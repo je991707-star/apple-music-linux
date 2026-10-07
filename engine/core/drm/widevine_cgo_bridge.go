@@ -1,4 +1,4 @@
-//go:build linux && native_backend
+//go:build linux && widevine_backend
 
 package drm
 
@@ -14,8 +14,8 @@ import (
 	"unsafe"
 )
 
-//export nativeBridgeAuth
-func nativeBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointer) {
+//export widevineBridgeAuth
+func widevineBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointer) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -25,8 +25,8 @@ func nativeBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointer)
 	}
 }
 
-//export nativeBridgeState
-func nativeBridgeState(cState *C.char, ud unsafe.Pointer) {
+//export widevineBridgeState
+func widevineBridgeState(cState *C.char, ud unsafe.Pointer) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 

@@ -1,4 +1,4 @@
-//go:build native_backend && itunlive
+//go:build widevine_backend && itunlive
 
 package main
 
@@ -17,7 +17,7 @@ import (
 )
 
 // Live check of the itun progressive-MV path against Apple, with the DRM session on disk.
-// Opt-in: go test -tags "native_backend itunlive" -run TestItunLive ./cmd
+// Opt-in: go test -tags "widevine_backend itunlive" -run TestItunLive ./cmd
 // ITUN_ADAM selects the music video; ITUN_DRM_DIR the drm directory (holds files/).
 func TestItunLive(t *testing.T) {
 	adamStr := os.Getenv("ITUN_ADAM")
@@ -31,7 +31,7 @@ func TestItunLive(t *testing.T) {
 	}
 	s := NewAPIServer(0, ServerConfig{DRMBinaryPath: drmDir, DRMBaseDir: drmDir + "/files"})
 	if s.dm == nil {
-		t.Fatal("no DRM manager (native_backend tag?)")
+		t.Fatal("no DRM manager (widevine_backend tag?)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()

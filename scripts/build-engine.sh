@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build-engine.sh — builds the Go engine with in-process DRM into OUT_DIR.
 #
-# The engine MUST be built with CGO and the native_backend tag: without it the
+# The engine MUST be built with CGO and the widevine_backend tag: without it the
 # DRM backend is a stub and the app silently falls back to AAC-only playback.
 # It links libdrm_client.so and finds it at runtime next to itself via an $ORIGIN rpath,
 # so it is copied into OUT_DIR too.
@@ -32,7 +32,7 @@ ln -s "$REPO/drm/libdrm_client.so" "$LINKDIR/libdrm_client.so"
 
 cd "$REPO/engine"
 CGO_ENABLED=1 CGO_LDFLAGS="-L$LINKDIR -Wl,-rpath,\$ORIGIN" \
-    go build -tags native_backend "$@" -o "$OUT/engine" ./cmd
+    go build -tags widevine_backend "$@" -o "$OUT/engine" ./cmd
 cp "$REPO/drm/libdrm_client.so" "$OUT/"
 
 echo "engine + DRM libs → $OUT"

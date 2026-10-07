@@ -12,7 +12,10 @@ const body = MAIN.slice(MAIN.indexOf('function ensureEngineConfig'), MAIN.indexO
 
 test('packaged builds put drm-base-dir under CONFIG_DIR, not inside the bundle', () => {
     const packaged = body.slice(body.indexOf('if (app.isPackaged)'), body.indexOf('} else {'));
-    assert.match(packaged, /drmBase\s*=\s*path\.join\(CONFIG_DIR,\s*'drm',\s*'files'\)/);
+    assert.match(packaged, /drmBase\s*=\s*ensureUserDRM\(\)/);
+    const fn = MAIN.slice(MAIN.indexOf('function ensureUserDRM'));
+    assert.match(fn, /path\.join\(CONFIG_DIR,\s*'drm'\)/);
+    assert.match(fn.slice(0, fn.indexOf('\n}')), /path\.join\(userDir,\s*'files'\)/);
     assert.ok(!/drmBase\s*=\s*path\.join\(__dirname/.test(packaged), 'must not point into the bundle');
 });
 

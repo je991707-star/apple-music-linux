@@ -213,7 +213,7 @@ const ENGINE_PORT = 20025;
 const DEBUG_OUTPUT = process.env.AML_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
-// DRM runs in-process (NativeBackend + libdrm_client.so).
+// DRM runs in-process (WidevineBackend + libdrm_client.so).
 // libdrm_client.so has no Android/hybris dependencies — only OpenSSL + libcurl.
 // The only writable state it needs is drm/files/ (MUSIC_TOKEN, STOREFRONT_ID,
 // mpl_db/) which lives in the user config dir for packaged builds.

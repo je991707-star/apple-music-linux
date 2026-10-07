@@ -94,7 +94,7 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	// DRMManager.Status() gives a complete snapshot including whether FairPlay
 	// is initialised and what content types are available.
 	var snap drm.DRMSnapshot
-	if s.dm != nil { // nil when built without native_backend
+	if s.dm != nil { // nil when built without widevine_backend
 		snap = s.dm.Status()
 	}
 	cap := snap.Capabilities

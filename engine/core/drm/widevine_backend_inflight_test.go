@@ -1,4 +1,4 @@
-//go:build native_backend
+//go:build widevine_backend
 
 package drm
 
@@ -10,7 +10,7 @@ import (
 // Stop must not tear the C library down under a call that is still inside it, and must
 // refuse new calls from the moment it starts.
 func TestQuiesceWaitsForInFlightCalls(t *testing.T) {
-	b := &nativeBackend{running: true, gen: 1}
+	b := &widevineBackend{running: true, gen: 1}
 
 	leave, err := b.enter(0)
 	if err != nil {
@@ -52,7 +52,7 @@ func TestQuiesceWaitsForInFlightCalls(t *testing.T) {
 }
 
 func TestQuiesceGivesUpOnAStuckCall(t *testing.T) {
-	b := &nativeBackend{running: true, gen: 1}
+	b := &widevineBackend{running: true, gen: 1}
 	if _, err := b.enter(0); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestQuiesceGivesUpOnAStuckCall(t *testing.T) {
 
 // A key context opened before a restart must not be used after it.
 func TestEnterRejectsContextsFromAPreviousRun(t *testing.T) {
-	b := &nativeBackend{running: true, gen: 2}
+	b := &widevineBackend{running: true, gen: 2}
 	if _, err := b.enter(1); err == nil {
 		t.Fatal("a call carrying generation 1 was accepted by generation 2")
 	}

@@ -9932,7 +9932,7 @@ window.amlGetQueueInfo = function () {
         const drmState = drm?.state ?? drm ?? {};
         // Determine sign-in status from multiple signals:
         // - manager: "ready" means DRMManager is healthy
-        // - process: "running" means NativeBackend is loaded
+        // - process: "running" means WidevineBackend is loaded
         // - authentication: "logged_in" means credentials are valid
         // - fairplay: "ready" means FairPlay license is active
         // - session: "valid" means mpl_db credentials exist

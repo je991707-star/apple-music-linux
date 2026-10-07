@@ -78,9 +78,9 @@ type windowsBackend struct {
 	storefrontID string
 }
 
-// NewNativeBackend returns a windowsBackend if the Apple Music for Windows
+// NewWidevineBackend returns a windowsBackend if the Apple Music for Windows
 // SC Info directory can be located; otherwise returns nil (DRM disabled).
-func NewNativeBackend(drmDir string) DRMBackend {
+func NewWidevineBackend(drmDir string) DRMBackend {
 	b := &windowsBackend{
 		drmDir:  drmDir,
 		eventCh: make(chan DRMEvent, 32),
@@ -229,7 +229,7 @@ func (b *windowsBackend) DecryptItunSamples(ctx context.Context, adamID uint64, 
 }
 
 // DialCBCS opens an in-process CBCS decryption pipe backed by SC Info keys.
-// The protocol is the same as the Linux NativeBackend (serveCBCS wire format).
+// The protocol is the same as the Linux WidevineBackend (serveCBCS wire format).
 func (b *windowsBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	client, server := net.Pipe()
 

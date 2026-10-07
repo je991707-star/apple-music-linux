@@ -457,7 +457,7 @@ type APIServer struct {
 	eagerStart  bool   // launch the drm binary at Start() when a session exists
 	sessionDir  string // session/credential directory guarded by sessionLock
 	sessionLock *drm.SessionLock
-	backendName string              // configured backend name ("native")
+	backendName string              // configured backend name ("widevine")
 	scheduler   *prefetch.Scheduler // background cache-warming scheduler
 	diskCache   *diskcache.Cache    // per-track decrypted audio disk cache
 	alac        *alacGate           // parks background ALAC downloads while the player's track starts
@@ -506,11 +506,11 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 
 	// DRM subsystem constructed first: DRMManager is passed to the PlaybackManager
-	// as a fairplay.CBCSDialer so cbcs.go uses in-process decryption via NativeBackend.
-	// BackendConfig carries what NativeBackend needs (BaseDir, DeviceInfo).
+	// as a fairplay.CBCSDialer so cbcs.go uses in-process decryption via WidevineBackend.
+	// BackendConfig carries what WidevineBackend needs (BaseDir, DeviceInfo).
 	// Resolve the DRM directory marker: use config if set, otherwise auto-discover
 	// drm/drm-native relative to the working directory. Only its directory is
-	// used (NativeBackend runs in-process; nothing is executed).
+	// used (WidevineBackend runs in-process; nothing is executed).
 	drmBinaryPath := cfg.DRMBinaryPath
 	if drmBinaryPath == "" {
 		// Prefer drm directory with libdrm_client.so when present.
@@ -536,8 +536,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
-	// NativeBackend (in-process CGO, libdrm_client.so) is the DRM backend.
-	// NewNativeBackend returns nil when the native_backend build tag is absent.
+	// WidevineBackend (in-process CGO, libdrm_client.so) is the DRM backend.
+	// NewWidevineBackend returns nil when the widevine_backend build tag is absent.
 	var drmBackend drm.DRMBackend
 	var drmDir string // directory containing libdrm_client.so and files/
 	if drmBinaryPath != "" {
@@ -546,10 +546,10 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	if drmDir == "" {
 		drmDir = "/tmp/aml-drm"
 	}
-	drmBackend = drm.NewNativeBackend(drmDir)
+	drmBackend = drm.NewWidevineBackend(drmDir)
 	if drmBackend != nil {
-		s.backendName = "native"
-		slog.Info("DRM backend", "name", "native")
+		s.backendName = "widevine"
+		slog.Info("DRM backend", "name", "widevine")
 		s.dm = drm.NewDRMManager(
 			drmBackend,
 			drmSession,
@@ -573,7 +573,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			drm.DefaultRestartPolicy,
 		)
 	} else {
-		slog.Warn("DRM backend unavailable (native_backend build tag not set); DRM features disabled")
+		slog.Warn("DRM backend unavailable (widevine_backend build tag not set); DRM features disabled")
 	}
 	s.session = drmSession
 	s.drmReady = drmBackend != nil
@@ -816,7 +816,7 @@ func (s *APIServer) Start() error {
 	}
 
 	// Eager-start now that the session lock is held.
-	// Retry with exponential backoff: NativeBackend initializes drm_init
+	// Retry with exponential backoff: WidevineBackend initializes drm_init
 	// asynchronously and FairPlay may not be ready immediately. A single immediate
 	// GetAccount would fail with "not ready". We retry until ready or the
 	// 30-second budget is exhausted.

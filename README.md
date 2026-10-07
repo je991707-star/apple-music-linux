@@ -209,7 +209,7 @@ This authenticates the FairPlay layer. Without it, playback falls back to AAC 25
 
 ## Dev
 
-The Android runtime used by the DRM layer (`drm/rootfs/system/lib64`, `libhybris-core.so`) is stored with [Git LFS](https://git-lfs.com), so install it before cloning.
+The bundled FFmpeg (`third_party/ffmpeg`) is stored with [Git LFS](https://git-lfs.com), so install it before cloning.
 
 ```bash
 git lfs install
@@ -233,20 +233,20 @@ sudo apt install vlc nodejs npm
 **Rebuild the Go engine:**
 
 ```bash
-# CGO + the native_backend tag are required for DRM (lossless, hi-res, MVs);
+# CGO + the widevine_backend tag are required for DRM (lossless, hi-res, MVs);
 # without them the engine builds fine but silently falls back to AAC.
 # CGO's -L cannot take a path with spaces, hence the symlink.
 ln -sfT "$PWD/drm" /tmp/aml-drm
 cd engine
 CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/aml-drm -Wl,-rpath,$ORIGIN' \
-  go build -tags native_backend -o ../electron/dist/resources/engine ./cmd
-cp ../drm/libdrm_client.so ../drm/libhybris-core.so ../electron/dist/resources/
+  go build -tags widevine_backend -o ../electron/dist/resources/engine ./cmd
+cp ../drm/libdrm_client.so ../electron/dist/resources/
 ```
 
 ## Build
 
 ```bash
-make -C drm android-stubs libdrm_client.so   # Android stub libraries + DRM client library
+make -C drm libdrm_client.so   # DRM client library
 cd electron
 bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
@@ -268,7 +268,7 @@ scripts/build-installer.sh --clean # build the installer, then drop electron/dis
 
 `scripts/clean.sh --all` also removes the built library and `electron/dist/resources` — the engine
 `npx electron .` runs — so rebuild with `make -C drm` and `npm run build:go` afterwards. Your Apple session
-(`drm/files`) and `drm/rootfs` are never touched.
+(`drm/files`) is never touched.
 
 ## Project structure
 
@@ -305,12 +305,8 @@ apple-music-linux/
 │   │   ├── autoeq/ ffmpeg/ cavern/   Headphone EQ and binaural (Atmos) rendering
 │   │   └── archtest/          Import-boundary tests
 │   └── utils/                 aacstream, alacstream, ampapi, lyrics, manifest, config
-├── drm/                       FairPlay client
-│   ├── drm_client.c/.h        C client library (libdrm_client.so)
-│   ├── drm_hybris.c, native/  Bridge and vendored wrapper that drive Apple's Android libraries
-│   ├── android-libs.txt       The exact Android libraries required (Git LFS)
-│   ├── stubs/                 Generated stand-ins for libandroid and libOpenSLES
-│   ├── rootfs/system/lib64/   Android runtime (Git LFS)
+├── drm/                       DRM client (AES key contexts; Widevine keys are acquired in Go)
+│   ├── drm_client.c/.h, drm_linux.c   C client library (libdrm_client.so)
 │   └── files/                 Your Apple session (never packaged or committed)
 ├── flatpak/                   Flatpak manifest, desktop entry, metainfo and icon
 ├── third_party/ffmpeg/        Prebuilt minimal FFmpeg (LGPL, Git LFS) bundled into every package
@@ -337,7 +333,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 - [Electron](https://electronjs.org) — desktop shell
 - [libvlc](https://www.videolan.org/vlc/libvlc.html) — lossless audio playback, bundled as an audio-only subset
 - [FFmpeg](https://ffmpeg.org) — a minimal LGPL build (9.0.2, [source](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz)) is bundled for music-video remuxing and export, and supplies the codec libraries VLC loads
-- [libhybris](https://github.com/libhybris/libhybris) — runs Apple's Android FairPlay libraries on glibc
+- [OpenSSL](https://www.openssl.org) and [libcurl](https://curl.se) — AES decryption and HTTP in the DRM client library
 - [MusicKit JS](https://developer.apple.com/documentation/musickitjs) — Apple's web playback SDK, loaded from music.apple.com
 
 **Go engine**

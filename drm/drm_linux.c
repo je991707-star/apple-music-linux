@@ -1,7 +1,7 @@
 /*
  * drm_linux.c — Linux-facing DRM API shim.
  *
- * Implements the flat C API that engine/core/drm/native_backend.go calls via CGO.
+ * Implements the flat C API that engine/core/drm/widevine_backend.go calls via CGO.
  * Key acquisition happens entirely in the Go layer (aacstream.AcquireKey via
  * Widevine); this layer only needs to:
  *

@@ -6,7 +6,7 @@ import (
 )
 
 // DRMBackend is the swappable transport interface. The sole implementation
-// is NativeBackend, which loads libdrm_client.so in-process via CGO.
+// is WidevineBackend, which loads libdrm_client.so in-process via CGO.
 //
 // Neither DRMManager nor any code above it knows which backend is active.
 // Transport details are entirely internal to the backend implementation.
@@ -52,7 +52,7 @@ type DRMBackend interface {
 
 	// Authenticate ensures an authenticated DRM context exists. This is an
 	// intent, not a mechanism: the backend decides how to satisfy it.
-	// NativeBackend calls drm_shutdown + drm_init for credential refresh.
+	// WidevineBackend calls drm_shutdown + drm_init for credential refresh.
 	// After Authenticate returns nil, the backend is ready to decrypt.
 	// DRMManager.Authenticate sets credentials via AuthCoordinator before calling
 	// this, so the backend can answer Challenge(ChallengeCredentials) immediately.
@@ -78,7 +78,7 @@ type DRMBackend interface {
 	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 
 	// DialCBCS opens one CBCS decryption connection (satisfies fairplay.CBCSDialer).
-	// NativeBackend returns an in-process net.Pipe() backed by nativeCBCSServe.
+	// WidevineBackend returns an in-process net.Pipe() backed by widevineCBCSServe.
 	DialCBCS(ctx context.Context) (net.Conn, error)
 
 	// Events returns a channel that emits DRMEvents as backend state changes.
@@ -115,8 +115,8 @@ type BackendConfig struct {
 // ─── Authentication challenge model ──────────────────────────────────────────
 
 // AuthSource is called by the backend when authentication input is needed.
-// NativeBackend calls Challenge directly from the CGO callback registered
-// with drm_config.auth_callback (nativeBridgeAuth).
+// WidevineBackend calls Challenge directly from the CGO callback registered
+// with drm_config.auth_callback (widevineBridgeAuth).
 type AuthSource interface {
 	// Challenge is called when the backend needs input to proceed.
 	// It blocks until SubmitChallenge is called on the AuthCoordinator

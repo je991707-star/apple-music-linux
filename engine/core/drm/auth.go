@@ -8,7 +8,7 @@ import (
 
 // AuthCoordinator implements AuthSource and bridges the engine's intent API
 // (Login, SubmitChallenge) with the backend's credential callbacks
-// (nativeBridgeAuth CGO callback in NativeBackend).
+// (widevineBridgeAuth CGO callback in WidevineBackend).
 //
 // The coordination model:
 //

@@ -6,7 +6,7 @@
 # library or renderer bundle:
 #
 #   1. libdrm_client.so   make -C drm             (C client, OpenSSL + libcurl only)
-#   2. engine             scripts/build-engine.sh (Go, CGO, native_backend)
+#   2. engine             scripts/build-engine.sh (Go, CGO, widevine_backend)
 #   3. renderer bundles   scripts/build-renderer.sh
 #   4. VLC subset         scripts/bundle-vlc.sh (+ the prebuilt minimal FFmpeg, third_party/ffmpeg)
 #   5. electron-builder   --dir → linux-unpacked
@@ -75,7 +75,7 @@ make -C "$DRM" libdrm_client.so >/dev/null
 # ── 2. Go engine with in-process DRM (stripped) ──────────────────────────────
 # Built into electron/dist/resources, where electron-builder's extraResources picks up
 # the engine and libdrm_client.so (build-engine.sh copies the fresh library there too).
-echo "[2/7] Building Go engine (CGO + native_backend)..."
+echo "[2/7] Building Go engine (CGO + widevine_backend)..."
 "$REPO/scripts/build-engine.sh" "$ELECTRON/dist/resources" -ldflags="-w -s" -trimpath
 
 # ── 3. Renderer bundles ───────────────────────────────────────────────────────
@@ -126,10 +126,10 @@ same "$DRM/libdrm_client.so"     "$RES/libdrm_client.so"   "resources/libdrm_cli
 same "$REPO/third_party/ffmpeg/bin/ffmpeg" "$RES/ffmpeg/bin/ffmpeg" "resources/ffmpeg/bin/ffmpeg"
 same "$REPO/third_party/ffmpeg/lib/libavcodec.so.63" "$RES/ffmpeg/lib/libavcodec.so.63" "resources/ffmpeg/lib/libavcodec.so.63"
 
-# The engine must actually link the DRM library (a build without the native_backend tag has
+# The engine must actually link the DRM library (a build without the widevine_backend tag has
 # no DRM and silently falls back to AAC-only), and find it next to itself.
 ldd "$RES/engine" 2>/dev/null | grep -q 'libdrm_client.so => /' \
-    || die "the packaged engine does not resolve libdrm_client.so (missing native_backend tag or rpath)"
+    || die "the packaged engine does not resolve libdrm_client.so (missing widevine_backend tag or rpath)"
 
 # Renderer bundles: the copy inside app.asar (and any copy beside it, which main.mjs
 # prefers) must equal the freshly built file.

@@ -2,7 +2,7 @@
 //
 // Architecture:
 //
-//	PlaybackManager → DRMProvider → DRMManager → DRMBackend → NativeBackend
+//	PlaybackManager → DRMProvider → DRMManager → DRMBackend → WidevineBackend
 //
 // DRMProvider is the only interface playback code uses. It has no knowledge
 // of transports or backend implementation details.
@@ -10,7 +10,7 @@
 // DRMManager implements DRMProvider and owns the full DRM lifecycle:
 // authentication orchestration, session management, and restart policy.
 //
-// DRMBackend is the backend interface. NativeBackend is the sole implementation:
+// DRMBackend is the backend interface. WidevineBackend is the sole implementation:
 // it loads libdrm_client.so in-process via CGO (no subprocess, no TCP).
 package drm
 
