@@ -8867,18 +8867,15 @@
             `;
         document.head.appendChild(ds);
       }
-      const losslessOn = drmSignedIn && prefs["lossless-enabled"] !== false;
-      const qualityOpts = drmSignedIn ? [
+      const losslessOn = prefs["lossless-enabled"] !== false;
+      const qualityOpts = [
         { value: "high-quality", label: "High Quality (AAC 256 kbps)" },
         { value: "lossless", label: "Lossless (ALAC up to 24-bit / 48 kHz)" },
         { value: "hi-res-lossless", label: "Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)" }
-      ] : [
-        { value: "high-quality", label: "High Quality (AAC 256 kbps)" }
       ];
       const { wrap: sqWrap, setValue: setSQ } = _adamMakeQualityDropdown("streaming-quality", prefs, qualityOpts);
       if (!losslessOn) setSQ("high-quality");
       const sqResetBtn = _adamMiniBtn(() => {
-        if (!drmSignedIn) return;
         if (!losslessToggle.querySelector("input")?.checked) {
           losslessToggle.querySelector("input").click();
         }
@@ -8892,10 +8889,6 @@
       sqQualityWrap.style.cssText = "flex:1;display:flex;align-items:center;gap:8px;";
       sqQualityWrap.append(sqWrap);
       sqInner.append(sqQualityWrap, sqResetBtn);
-      if (!drmSignedIn) {
-        sqInner.style.opacity = "0.38";
-        sqInner.style.pointerEvents = "none";
-      }
       function _applyLosslessRowState(on) {
         sqQualityWrap.style.opacity = on ? "1" : "0.38";
         sqQualityWrap.style.pointerEvents = on ? "" : "none";
@@ -8904,7 +8897,7 @@
       const sqRow = makeRow(
         "Streaming",
         sqInner,
-        drmSignedIn ? null : "Streaming quality is available once the DRM session is ready",
+        drmSignedIn ? null : "Lossless qualities play once the DRM layer is ready; AAC plays until then",
         true
       );
       let _onLosslessChange = null;
@@ -8921,15 +8914,10 @@
         }
         _onLosslessChange?.(v);
       });
-      if (!drmSignedIn) {
-        losslessToggle.style.opacity = "0.38";
-        losslessToggle.style.pointerEvents = "none";
-        losslessToggle.title = "Lossless is available once the DRM session is ready";
-      }
       aqBody.appendChild(makeRow(
         "Lossless Audio",
         losslessToggle,
-        drmSignedIn ? "Stream lossless audio (ALAC) when available" : "Lossless is available once the DRM session is ready",
+        drmSignedIn ? "Stream lossless audio (ALAC) when available" : "Starts as soon as the DRM layer is ready; AAC plays until then",
         false
       ));
       aqBody.appendChild(sqRow);
@@ -9901,7 +9889,7 @@
         return;
       }
       const drmState = drm?.state ?? drm ?? {};
-      const drmSignedIn = drmState?.process === "running" && drmState?.session === "valid" || drmState?.authentication === "logged_in" || drmState?.fairplay === "ready" || drm?.capabilities?.cbcs === true;
+      const drmSignedIn = accountSignedIn(drm);
       const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
         _buildThemeSection(prefs),
         _buildCacheSection(prefs),

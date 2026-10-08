@@ -42,6 +42,11 @@ const sessionValidityTTL = 4 * time.Hour
 type SessionManager struct {
 	baseDir string
 
+	// webSession supplies the media-user-token (and storefront, when known) the web player handed
+	// to the engine. It stands in for the credential files an old login wrote, so a profile that
+	// only ever signed in on the web still counts as having a session.
+	webSession func() (mut, storefront string)
+
 	mu          sync.Mutex
 	lastSuccess time.Time
 }
@@ -51,13 +56,34 @@ func NewSessionManager(baseDir string) *SessionManager {
 	return &SessionManager{baseDir: baseDir}
 }
 
-// HasSession returns true if mpl_db/accounts.sqlitedb exists and has
-// content. This indicates a prior login occurred but does NOT guarantee
-// the session is currently usable — use IsSessionValid for that.
+// SetWebSession registers where the web player's media-user-token comes from. The function must be
+// cheap and must not call back into the SessionManager.
+func (s *SessionManager) SetWebSession(fn func() (mut, storefront string)) {
+	s.mu.Lock()
+	s.webSession = fn
+	s.mu.Unlock()
+}
+
+func (s *SessionManager) web() (mut, storefront string) {
+	s.mu.Lock()
+	fn := s.webSession
+	s.mu.Unlock()
+	if fn == nil {
+		return "", ""
+	}
+	return fn()
+}
+
+// HasSession reports whether an account is available: either the legacy login database
+// (mpl_db/accounts.sqlitedb) exists and has content, or the web player has supplied a
+// media-user-token. It does NOT guarantee the session is currently usable — use IsSessionValid.
 func (s *SessionManager) HasSession() bool {
 	path := filepath.Join(s.baseDir, "mpl_db", "accounts.sqlitedb")
-	info, err := os.Stat(path)
-	return err == nil && info.Size() > 0
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		return true
+	}
+	mut, _ := s.web()
+	return mut != ""
 }
 
 // RecordSuccess records the timestamp of a successful DRM operation.
@@ -158,7 +184,11 @@ func (s *SessionManager) TwoFAFilePath() string {
 
 // ReadStorefrontID reads {BaseDir}/STOREFRONT_ID.
 func (s *SessionManager) ReadStorefrontID() string {
-	return readFile(filepath.Join(s.baseDir, "STOREFRONT_ID"))
+	if sf := readFile(filepath.Join(s.baseDir, "STOREFRONT_ID")); sf != "" {
+		return sf
+	}
+	_, sf := s.web()
+	return sf
 }
 
 // NormalizeStorefrontID strips the platform/content-class suffix that the
@@ -183,7 +213,11 @@ func NormalizeStorefrontID(sf string) string {
 // refresh the token during the engine's lifetime, so callers must not
 // assume the value is immutable or cache it.
 func (s *SessionManager) ReadMusicToken() string {
-	return readFile(filepath.Join(s.baseDir, "MUSIC_TOKEN"))
+	if t := readFile(filepath.Join(s.baseDir, "MUSIC_TOKEN")); t != "" {
+		return t
+	}
+	t, _ := s.web()
+	return t
 }
 
 // readFile returns the file's content without surrounding whitespace: these

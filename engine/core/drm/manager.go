@@ -3,6 +3,7 @@ package drm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,9 @@ type DRMManager struct {
 	// crash handler or login that was already in flight must not flip it back to ready or failed.
 	closed atomic.Bool
 
+	// warming ensures one background backend start at a time when the web session appears.
+	warming atomic.Bool
+
 	authMu   sync.Mutex // serialises Authenticate: concurrent logins would Stop/Start the backend under each other
 	backend  DRMBackend
 	session  *SessionManager
@@ -130,6 +134,10 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 	m.setManagerState(ManagerReady)
 	// Reflect session state at startup so GET /api/v1/drm/status shows the
 	// correct state immediately — before any playback request fires ensureRunning.
+	if !backend.Running() {
+		// The backend starts lazily; "stopped" is accurate, "unknown" made a healthy idle engine look broken.
+		m.snapshot.State.Process = ProcessStopped
+	}
 	if session.HasSession() {
 		m.snapshot.State.Session = SessionValid
 		m.snapshot.State.Authentication = AuthLoggedIn
@@ -226,6 +234,46 @@ func (m *DRMManager) GetAccount(ctx context.Context) (AccountInfo, error) {
 		m.session.RecordSuccess()
 	}
 	return info, err
+}
+
+// SetWebSession wires in the media-user-token the web player gives the engine. With it, a profile that
+// only ever signed in on the web has a session: it is what ensureRunning and the eager start look for,
+// and what the backend reads when there are no credential files.
+func (m *DRMManager) SetWebSession(fn func() (mut, storefront string)) {
+	m.session.SetWebSession(fn)
+	if b, ok := m.backend.(interface{ SetAccountFallback(func() AccountInfo) }); ok {
+		b.SetAccountFallback(func() AccountInfo {
+			mut, sf := fn()
+			return AccountInfo{MusicToken: mut, StorefrontID: sf}
+		})
+	}
+}
+
+// NoteWebSession is called when the web player supplies or changes its token. It reports the session
+// as valid and, if the backend is not running yet, starts it in the background so FairPlay (and with it
+// lossless) becomes available without any separate sign-in.
+func (m *DRMManager) NoteWebSession() {
+	if m.closed.Load() || !m.session.HasSession() {
+		return
+	}
+	m.mu.RLock()
+	challenging := m.snapshot.State.Authentication == AuthChallenging
+	m.mu.RUnlock()
+	if !challenging {
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			Message: "web session",
+		})
+	}
+	if m.backend.Running() || !m.warming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer m.warming.Store(false)
+		if err := m.ensureRunning(m.shutdownCtx); err != nil {
+			slog.Warn("drm: starting after web session failed", "err", err)
+		}
+	}()
 }
 
 // ensureRunning auto-starts the backend (session reuse path) if not running.

@@ -9567,16 +9567,15 @@ window.adamGetQueueInfo = function () {
             `;
             document.head.appendChild(ds);
         }
-        // Lossless toggle is only meaningful when DRM is signed in.
-        const losslessOn = drmSignedIn && prefs['lossless-enabled'] !== false;
-        // Always build the full option set when DRM is active — the greyed row prevents
-        // interaction when lossless is off, and toggling on restores the saved choice.
-        const qualityOpts = drmSignedIn ? [
+        // The toggle only records the preference. Whether lossless can actually play depends on the DRM layer,
+        // which starts by itself once the web session is known; until then the engine plays AAC.
+        const losslessOn = prefs['lossless-enabled'] !== false;
+        // Always build the full option set — the greyed row prevents interaction when lossless is off,
+        // and toggling on restores the saved choice.
+        const qualityOpts = [
             { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
             { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
             { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
-        ] : [
-            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
         ];
         const { wrap: sqWrap, setValue: setSQ } = _adamMakeQualityDropdown('streaming-quality', prefs, qualityOpts);
         // Clamp display to 'high-quality' when lossless is disabled — saved pref may be lossless/hi-res.
@@ -9584,7 +9583,6 @@ window.adamGetQueueInfo = function () {
         // Reset button lives outside the greyed row so it stays clickable even when
         // lossless is disabled — clicking it re-enables lossless and restores quality.
         const sqResetBtn = _adamMiniBtn(() => {
-            if (!drmSignedIn) return;
             // Re-enable lossless toggle if it was off.
             if (!losslessToggle.querySelector('input')?.checked) {
                 losslessToggle.querySelector('input').click();
@@ -9600,19 +9598,14 @@ window.adamGetQueueInfo = function () {
         sqQualityWrap.style.cssText = 'flex:1;display:flex;align-items:center;gap:8px;';
         sqQualityWrap.append(sqWrap);
         sqInner.append(sqQualityWrap, sqResetBtn);
-        // When DRM is off, grey the entire quality row — only one option exists.
-        if (!drmSignedIn) {
-            sqInner.style.opacity = '0.38';
-            sqInner.style.pointerEvents = 'none';
-        }
-        // Grey only the dropdown half, not the reset button (when DRM is active).
+        // Grey only the dropdown half, not the reset button, while lossless is off.
         function _applyLosslessRowState(on) {
             sqQualityWrap.style.opacity = on ? '1' : '0.38';
             sqQualityWrap.style.pointerEvents = on ? '' : 'none';
         }
         _applyLosslessRowState(losslessOn);
         const sqRow = makeRow('Streaming', sqInner,
-            drmSignedIn ? null : 'Streaming quality is available once the DRM session is ready',
+            drmSignedIn ? null : 'Lossless qualities play once the DRM layer is ready; AAC plays until then',
             true);
 
         let _onLosslessChange = null;
@@ -9629,15 +9622,9 @@ window.adamGetQueueInfo = function () {
             }
             _onLosslessChange?.(v);
         });
-        if (!drmSignedIn) {
-            // DRM not active — lossless is unavailable regardless of pref.
-            losslessToggle.style.opacity = '0.38';
-            losslessToggle.style.pointerEvents = 'none';
-            losslessToggle.title = 'Lossless is available once the DRM session is ready';
-        }
         aqBody.appendChild(makeRow('Lossless Audio', losslessToggle,
             drmSignedIn ? 'Stream lossless audio (ALAC) when available'
-                        : 'Lossless is available once the DRM session is ready',
+                        : 'Starts as soon as the DRM layer is ready; AAC plays until then',
             false));
         aqBody.appendChild(sqRow);
 
@@ -10536,10 +10523,7 @@ window.adamGetQueueInfo = function () {
 
         // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
         const drmState = drm?.state ?? drm ?? {};
-        const drmSignedIn = (drmState?.process === 'running' && drmState?.session === 'valid')
-            || drmState?.authentication === 'logged_in'
-            || drmState?.fairplay === 'ready'
-            || drm?.capabilities?.cbcs === true;
+        const drmSignedIn = accountSignedIn(drm); // one definition, shared with the status poll below
 
         // Build all async sections in parallel now that we have prefs.
         const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([

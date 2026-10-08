@@ -78,10 +78,11 @@ type adamplayBackend struct {
 	eventCh chan DRMEvent
 	running bool
 	// Global state callback channel for C callbacks
-	stateCh      chan string
-	stateHandle  cgo.Handle
-	stateBox     unsafe.Pointer // C-allocated cell holding stateHandle; the pointer handed to C
-	cachedDevTok string         // MusicKit developer JWT, fetched once on Start
+	stateCh         chan string
+	stateHandle     cgo.Handle
+	stateBox        unsafe.Pointer     // C-allocated cell holding stateHandle; the pointer handed to C
+	accountFallback func() AccountInfo // web-session token when no credential files exist (guarded by mu)
+	cachedDevTok    string             // MusicKit developer JWT, fetched once on Start
 
 	// In-flight accounting for calls into the C library (guarded by mu). Stop must not
 	// tear the library down under a running call, and key contexts handed out by one
@@ -220,12 +221,10 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	case b.eventCh <- DRMEvent{
 		Snapshot: DRMSnapshot{
 			State: DRMState{
-				Process:        ProcessRunning,
-				Manager:        ManagerReady,
-				Authentication: AuthLoggedIn,
-				FairPlay:       fpState,
-				Session:        SessionValid,
-				Recovery:       RecoveryIdle,
+				Process:  ProcessRunning,
+				Manager:  ManagerReady,
+				FairPlay: fpState,
+				Recovery: RecoveryIdle,
 			},
 			Timestamp: time.Now(),
 			Message:   "native backend initialized",
@@ -359,6 +358,13 @@ func (b *adamplayBackend) GetM3U8(ctx context.Context, adamID uint64) (string, e
 	return C.GoString(cURL), nil
 }
 
+// SetAccountFallback registers the source GetAccount uses when there are no credential files.
+func (b *adamplayBackend) SetAccountFallback(fn func() AccountInfo) {
+	b.mu.Lock()
+	b.accountFallback = fn
+	b.mu.Unlock()
+}
+
 // GetAccount returns the account information
 func (b *adamplayBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 	leave, err := b.enter(0)
@@ -368,6 +374,15 @@ func (b *adamplayBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 	defer leave()
 	cJSON := C.drm_get_account()
 	if cJSON == nil {
+		// No credential files: use the web player's token if the engine has one.
+		b.mu.Lock()
+		fb := b.accountFallback
+		b.mu.Unlock()
+		if fb != nil {
+			if acc := fb(); acc.MusicToken != "" {
+				return acc, nil
+			}
+		}
 		return AccountInfo{}, fmt.Errorf("failed to get account info")
 	}
 	defer C.free(unsafe.Pointer(cJSON))

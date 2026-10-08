@@ -593,6 +593,10 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	s.session = drmSession
 	s.drmReady = drmBackend != nil
+	if s.dm != nil {
+		// The web player's token counts as the account: no separate DRM sign-in exists.
+		s.dm.SetWebSession(s.webSessionTokens)
+	}
 	s.sessionDir = drmBaseDir
 
 	// Eager-start decision (executed in Start(), after the session lock is held):
@@ -1068,13 +1072,25 @@ func (s *APIServer) musicUserToken() string {
 	return s.mediaUserToken()
 }
 
+// webSessionTokens returns only what the web player supplied (never the credential files, which the
+// session manager consults itself): the token source for the DRM session.
+func (s *APIServer) webSessionTokens() (mut, storefront string) {
+	s.mkTokenMu.RLock()
+	defer s.mkTokenMu.RUnlock()
+	return s.mkMusicToken, ""
+}
+
 func (s *APIServer) setMusicUserToken(tok string) {
 	if tok == "" {
 		return
 	}
 	s.mkTokenMu.Lock()
+	changed := s.mkMusicToken != tok
 	s.mkMusicToken = tok
 	s.mkTokenMu.Unlock()
+	if changed && s.dm != nil {
+		s.dm.NoteWebSession() // reports the session and starts the DRM backend if it is not running
+	}
 }
 
 func (s *APIServer) lang(r *http.Request) string {
