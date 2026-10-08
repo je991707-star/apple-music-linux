@@ -1,7 +1,7 @@
 /*
  * drm_linux.c — Linux-facing DRM API shim.
  *
- * Implements the flat C API that engine/core/drm/widevine_backend.go calls via CGO.
+ * Implements the flat C API that engine/core/drm/adamplay_backend.go calls via CGO.
  * Key acquisition happens entirely in the Go layer (aacstream.AcquireKey via
  * Widevine); this layer only needs to:
  *
@@ -18,6 +18,7 @@
 
 #include "drm_types.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,7 +46,9 @@ static char *read_file_trimmed(const char *path)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     rewind(f);
-    if (sz <= 0) { fclose(f); return NULL; }
+    /* Credential files are a few hundred bytes; refuse anything absurd rather
+     * than allocating whatever size a replaced file claims. */
+    if (sz <= 0 || sz > 65536) { fclose(f); return NULL; }
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
     size_t n = fread(buf, 1, (size_t)sz, f);
@@ -75,7 +78,7 @@ static void derive_iv(const uint8_t base_iv[16], uint64_t sn, uint8_t out[16])
 static int aes128_cbc_decrypt(const uint8_t key[16], const uint8_t iv[16],
                                uint8_t *data, size_t n)
 {
-    if (n == 0 || (n & 0xf) != 0) return -1;
+    if (n == 0 || (n & 0xf) != 0 || n > (size_t)INT_MAX) return -1;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return -1;
@@ -109,10 +112,13 @@ int drm_init(const struct drm_config *cfg)
     }
 
     g_initialized = 1;
+    /* Copy under the lock: drm_shutdown may clear them the moment we unlock. */
+    drm_state_callback_t cb = g_state_cb;
+    void *ud = g_state_ud;
     pthread_mutex_unlock(&g_init_lock);
 
-    if (g_state_cb)
-        g_state_cb(DRM_STATE_RUNNING, g_state_ud);
+    if (cb)
+        cb(DRM_STATE_RUNNING, ud);
 
     return 0;
 }
@@ -139,12 +145,30 @@ int drm_is_recovery_active(void) { return 0; }
  * Widevine key request.  DevToken is fetched separately by the Go layer
  * via ampapi.GetToken() so we leave it empty here.
  */
+/* Escape a string for use inside a JSON string literal. Returns malloc'd. */
+static char *json_escape(const char *in)
+{
+    size_t len = strlen(in);
+    char *out = malloc(len * 6 + 1);
+    if (!out) return NULL;
+    char *o = out;
+    for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+        if (*p == '"' || *p == '\\') { *o++ = '\\'; *o++ = (char)*p; }
+        else if (*p < 0x20) { o += sprintf(o, "\\u%04x", *p); }
+        else { *o++ = (char)*p; }
+    }
+    *o = '\0';
+    return out;
+}
+
 char *drm_get_account(void)
 {
     char mt_path[4096], sf_path[4096];
 
+    pthread_mutex_lock(&g_init_lock);
     snprintf(mt_path, sizeof(mt_path), "%s/MUSIC_TOKEN",    g_base_dir);
     snprintf(sf_path, sizeof(sf_path), "%s/STOREFRONT_ID",  g_base_dir);
+    pthread_mutex_unlock(&g_init_lock);
 
     char *mt = read_file_trimmed(mt_path);
     char *sf = read_file_trimmed(sf_path);
@@ -155,17 +179,22 @@ char *drm_get_account(void)
         return NULL;
     }
 
-    /* Allocate enough room for both values plus JSON scaffolding */
-    size_t len = 64 + (mt ? strlen(mt) : 0) + (sf ? strlen(sf) : 0);
-    char *json = malloc(len);
-    if (!json) { free(mt); free(sf); return NULL; }
-
-    snprintf(json, len,
-             "{\"storefront_id\":\"%s\",\"dev_token\":\"\",\"music_token\":\"%s\"}",
-             sf ? sf : "", mt);
-
+    /* Values come from files a user can edit: escape them, or a quote or
+     * backslash would corrupt (or inject into) the JSON the Go layer parses. */
+    char *mt_e = json_escape(mt);
+    char *sf_e = json_escape(sf ? sf : "");
     free(mt);
     free(sf);
+    if (!mt_e || !sf_e) { free(mt_e); free(sf_e); return NULL; }
+
+    size_t len = 64 + strlen(mt_e) + strlen(sf_e);
+    char *json = malloc(len);
+    if (json)
+        snprintf(json, len,
+                 "{\"storefront_id\":\"%s\",\"dev_token\":\"\",\"music_token\":\"%s\"}",
+                 sf_e, mt_e);
+    free(mt_e);
+    free(sf_e);
     return json;
 }
 
@@ -201,6 +230,12 @@ drm_key_context_handle_t drm_open_key_context(const char *asset_id,
 
     kc->asset_id_str = asset_id  ? strdup(asset_id)  : NULL;
     kc->media_uri    = media_uri ? strdup(media_uri) : NULL;
+    if ((asset_id && !kc->asset_id_str) || (media_uri && !kc->media_uri)) {
+        free(kc->asset_id_str);
+        free(kc->media_uri);
+        free(kc);
+        return NULL;
+    }
     kc->ref_count    = 1;
     memset(kc->aes_key, 0, sizeof(kc->aes_key));
     memset(kc->iv,      0, sizeof(kc->iv));
@@ -214,6 +249,24 @@ drm_key_context_handle_t drm_open_key_context(const char *asset_id,
     }
 
     return kc;
+}
+
+/*
+ * drm_close_key_context: wipe the content key and free the context. The caller
+ * must guarantee nothing is still decrypting with it. Without this every opened
+ * context (and its plaintext key) stayed in memory for the life of the process.
+ */
+void drm_close_key_context(drm_key_context_handle_t kc)
+{
+    if (!kc) return;
+    pthread_mutex_lock(&kc->lock);
+    fairplay_secure_zero(kc->aes_key, sizeof(kc->aes_key));
+    fairplay_secure_zero(kc->iv, sizeof(kc->iv));
+    pthread_mutex_unlock(&kc->lock);
+    pthread_mutex_destroy(&kc->lock);
+    free(kc->asset_id_str);
+    free(kc->media_uri);
+    free(kc);
 }
 
 int drm_set_key_context_key(drm_key_context_handle_t kc,

@@ -39,8 +39,15 @@ const (
 	ManagerFailed                           // 5
 )
 
+var managerStateNames = [...]string{"unknown", "disabled", "initializing", "ready", "shutting_down", "failed"}
+
+// String is total: a value outside the defined states (a zero-value mix-up, a bad cast) reads as
+// "unknown" instead of panicking, which JSON marshalling would otherwise turn into a failed response.
 func (s ManagerState) String() string {
-	return [...]string{"unknown", "disabled", "initializing", "ready", "shutting_down", "failed"}[s]
+	if s < 0 || int(s) >= len(managerStateNames) {
+		return managerStateNames[ManagerUnknown]
+	}
+	return managerStateNames[s]
 }
 
 func (s ManagerState) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
@@ -48,7 +55,7 @@ func (s ManagerState) MarshalJSON() ([]byte, error) { return json.Marshal(s.Stri
 // ─── ProcessState — backend process health ───────────────────────────────────
 
 // ProcessState describes the health of the DRM backend runtime
-// (WidevineBackend CGO library). It is independent of whether the
+// (AdamplayBackend CGO library). It is independent of whether the
 // DRMManager itself is configured.
 type ProcessState int
 

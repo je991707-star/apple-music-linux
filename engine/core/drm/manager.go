@@ -45,7 +45,7 @@ type RestartPolicy struct {
 // The apiserver implements this by calling eventBus.emit("drm", snapshot).
 type EventSink func(snapshot DRMSnapshot)
 
-// ── WidevineBackend capability status ──────────────────────────────────────────
+// ── AdamplayBackend capability status ──────────────────────────────────────────
 //
 //	Capability        Status
 //	──────────────── ───────
@@ -71,6 +71,11 @@ type EventSink func(snapshot DRMSnapshot)
 // DRMManager is the only type in the engine that knows about the DRMBackend.
 // PlaybackManager only sees DRMProvider.
 type DRMManager struct {
+	// closed is set once by Shutdown. From then on the manager state is absorbing at shutting_down: a
+	// crash handler or login that was already in flight must not flip it back to ready or failed.
+	closed atomic.Bool
+
+	authMu   sync.Mutex // serialises Authenticate: concurrent logins would Stop/Start the backend under each other
 	backend  DRMBackend
 	session  *SessionManager
 	auth     *AuthCoordinator
@@ -240,6 +245,10 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 		// A concurrent ensureRunning / handleCrash goroutine may have started
 		// the backend between our Running() check and this call — that is fine.
 		if !m.backend.Running() {
+			m.mergeAndEmit(DRMSnapshot{
+				State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
+				Message: fmt.Sprintf("session restore failed: %v", err),
+			})
 			return err
 		}
 	}
@@ -267,6 +276,8 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 //   - !HasSession(): credentials are stored; wrapper's credentialHandler
 //     fires Challenge(ChallengeCredentials) and AuthCoordinator replies.
 func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error {
+	m.authMu.Lock()
+	defer m.authMu.Unlock()
 	m.auth.SetCredentials(creds) // stored in AuthCoordinator; used if challenged
 	m.setManagerState(ManagerInitializing)
 
@@ -309,7 +320,7 @@ func (m *DRMManager) SubmitChallenge(_ context.Context, reply string) error {
 }
 
 // Logout stops the backend and clears the session.
-// Stop() is sufficient — WidevineBackend holds no persistent process state.
+// Stop() is sufficient — AdamplayBackend holds no persistent process state.
 // SessionManager.ClearSession removes the persisted mpl_db and derived files.
 func (m *DRMManager) Logout(ctx context.Context) error {
 	m.setManagerState(ManagerShuttingDown)
@@ -385,6 +396,7 @@ func (m *DRMManager) InProcess() bool {
 func (m *DRMManager) Shutdown() {
 	m.shutdownStop() // cancel any in-progress handleCrash sleep or restart
 	m.setManagerState(ManagerShuttingDown)
+	m.closed.Store(true) // after the state is set: setManagerState refuses anything but shutting_down from here
 	if m.backend.Running() {
 		_ = m.backend.Stop()
 	}
@@ -468,7 +480,7 @@ func (m *DRMManager) handleCrash() {
 
 	if err := m.backend.Start(ctx, m.cfg); err != nil {
 		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Process: ProcessFailed},
+			State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
 			Message: fmt.Sprintf("restart failed: %v", err),
 		})
 		return
@@ -479,6 +491,9 @@ func (m *DRMManager) handleCrash() {
 // ── State helpers ─────────────────────────────────────────────────────────────
 
 func (m *DRMManager) setManagerState(s ManagerState) {
+	if m.closed.Load() && s != ManagerShuttingDown {
+		return
+	}
 	m.mu.Lock()
 	m.snapshot.State.Manager = s
 	m.mu.Unlock()
@@ -490,7 +505,7 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	m.emitMu.Lock()
 	defer m.emitMu.Unlock()
 	m.mu.Lock()
-	if snap.State.Manager != 0 {
+	if snap.State.Manager != 0 && (!m.closed.Load() || snap.State.Manager == ManagerShuttingDown) {
 		m.snapshot.State.Manager = snap.State.Manager
 	}
 	if snap.State.Process != 0 {
@@ -507,7 +522,9 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	}
 	if snap.Challenge != nil {
 		m.snapshot.Challenge = snap.Challenge
-	} else if snap.State.Authentication != AuthChallenging {
+	} else if m.snapshot.State.Authentication != AuthChallenging {
+		// Judge by the merged state: an unrelated update (Authentication unset) must not
+		// erase a challenge that is still waiting for the user.
 		m.snapshot.Challenge = nil
 	}
 
@@ -551,6 +568,10 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 			Atmos: true,
 			HiRes: !m.cfg.DisableHiRes,
 		}
+	} else {
+		// Playback capabilities belong to a ready FairPlay session; a failed or
+		// restarting one must not keep advertising them.
+		m.snapshot.Capabilities = CapabilityState{}
 	}
 
 	m.snapshot.Timestamp = time.Now()

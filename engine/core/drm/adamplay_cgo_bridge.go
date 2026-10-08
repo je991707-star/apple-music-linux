@@ -1,4 +1,4 @@
-//go:build (linux || windows) && widevine_backend
+//go:build (linux || windows) && adamplay_backend
 
 package drm
 
@@ -14,8 +14,8 @@ import (
 	"unsafe"
 )
 
-//export widevineBridgeAuth
-func widevineBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointer) {
+//export adamplayBridgeAuth
+func adamplayBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointer) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -25,8 +25,8 @@ func widevineBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointe
 	}
 }
 
-//export widevineBridgeState
-func widevineBridgeState(cState *C.char, ud unsafe.Pointer) {
+//export adamplayBridgeState
+func adamplayBridgeState(cState *C.char, ud unsafe.Pointer) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -35,8 +35,8 @@ func widevineBridgeState(cState *C.char, ud unsafe.Pointer) {
 		return
 	}
 
-	// Convert unsafe.Pointer to uintptr, then to cgo.Handle
-	handle := cgo.Handle(uintptr(ud))
+	// ud points at the C-allocated cell that holds the cgo.Handle.
+	handle := cgo.Handle(*(*uintptr)(ud))
 	stateCh, ok := handle.Value().(chan string)
 	if !ok {
 		return

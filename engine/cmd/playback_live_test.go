@@ -1,4 +1,4 @@
-//go:build widevine_backend && drmlive
+//go:build adamplay_backend && drmlive
 
 package main
 
@@ -28,7 +28,7 @@ import (
 // decrypt stages, then decode the result with FFmpeg. The tokens come from the engine's own state
 // (the web developer token and the DRM session's media-user token) and are never printed.
 //
-// Opt-in: go test -tags "widevine_backend drmlive" -run TestPlaybackLive ./cmd
+// Opt-in: go test -tags "adamplay_backend drmlive" -run TestPlaybackLive ./cmd
 //
 //	PLAY_ADAM      catalog id (song or music video)
 //	PLAY_KIND      alac | aac | atmos | mv | mvaudio   (default alac; mv = the video stream,

@@ -138,6 +138,11 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	if req.OutputDir == "" {
 		req.OutputDir = defaultOutputDir()
 	}
+	absDir, err := normalizeOutputDir(req.OutputDir)
+	if err != nil {
+		return nil, err
+	}
+	req.OutputDir = absDir
 	if err := m.checkOutputDir(req.OutputDir); err != nil {
 		return nil, err
 	}
@@ -873,14 +878,15 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 		return
 	}
 	m.advance(job, PhaseMoving, 96)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		if err2 := copyFile(tmpPath, finalPath); err2 != nil {
-			os.Remove(tmpPath) //nolint:errcheck
-			m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err2))
-			return
-		}
+	// The existence check in Phase 2 ran long ago and another job may have
+	// produced the same file since, so the policy is enforced atomically here.
+	dest, err := moveNoClobber(tmpPath, finalPath, req.Options.OverwritePolicy)
+	if err != nil {
 		os.Remove(tmpPath) //nolint:errcheck
+		m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err))
+		return
 	}
+	finalPath = dest
 	m.setOutput(job, finalPath)
 	m.advance(job, PhaseDone, 100)
 }
@@ -1161,6 +1167,11 @@ func (m *Manager) setSource(job *ExportJob, src string) {
 
 func (m *Manager) advance(job *ExportJob, phase Phase, pct int) {
 	m.mu.Lock()
+	// A late update from a goroutine that lost a race (cancel, failure) must not revive or rewind a job.
+	if !canTransition(job.Phase, phase) {
+		m.mu.Unlock()
+		return
+	}
 	job.Phase = phase
 	job.Percent = pct
 	job.UpdatedAt = time.Now()
@@ -1172,6 +1183,10 @@ func (m *Manager) advance(job *ExportJob, phase Phase, pct int) {
 // ends in PhaseCancelled rather than PhaseFailed.
 func (m *Manager) fail(job *ExportJob, err error) {
 	m.mu.Lock()
+	if job.Phase.IsTerminal() { // already finished: a late error must not overwrite the outcome
+		m.mu.Unlock()
+		return
+	}
 	job.Phase = PhaseFailed
 	if job.ctx != nil && job.ctx.Err() != nil {
 		job.Phase = PhaseCancelled
@@ -1212,21 +1227,35 @@ func newExportID() string {
 	return hex.EncodeToString(b)
 }
 
+// copyFile copies src to dst through a temp file in dst's directory and renames
+// it into place, so a failure never leaves a partial dst or damages an existing one.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.CreateTemp(filepath.Dir(dst), ".am-copy-*")
 	if err != nil {
 		return err
 	}
-	if _, err = io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	name := out.Name()
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
 	}
-	return out.Close()
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(name, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(name, dst)
+	}
+	if err != nil {
+		os.Remove(name) //nolint:errcheck
+	}
+	return err
 }
 
 // errFFmpegUnavailable is returned when ffmpeg is not on PATH.

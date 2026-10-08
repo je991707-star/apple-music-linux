@@ -7,13 +7,8 @@ package vlc
 // #include <stdlib.h>
 import "C"
 import (
-	"bufio"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +30,10 @@ type Player struct {
 // New creates a libvlc instance and media player.
 // Returns an error if libvlc cannot be initialised (missing shared library).
 func New() (*Player, error) {
+	return newPlayer("Adam", "io.github.silentone12725.Adam")
+}
+
+func newPlayer(applicationName, applicationID string) (*Player, error) {
 	inst := C.libvlc_new(0, nil)
 	if inst == nil {
 		return nil, fmt.Errorf("vlc: libvlc_new failed — is libvlc.so.5 in LD_LIBRARY_PATH?")
@@ -44,6 +43,17 @@ func New() (*Player, error) {
 		C.libvlc_release(inst)
 		return nil, fmt.Errorf("vlc: libvlc_media_player_new failed")
 	}
+	// Stable audio identity lets the desktop mixer retain its per-app settings (from PR #1: https://github.com/silentone12725/apple-music-linux/pull/1).
+	name := C.CString(applicationName)
+	agent := C.CString("Adam/1.4.1")
+	appID := C.CString(applicationID)
+	version := C.CString("1.4.1")
+	icon := C.CString("adam")
+	C.libvlc_set_user_agent(inst, name, agent)
+	C.libvlc_set_app_id(inst, appID, version, icon)
+	for _, value := range []*C.char{name, agent, appID, version, icon} {
+		C.free(unsafe.Pointer(value))
+	}
 	return &Player{inst: inst, mp: mp, volume: 100}, nil
 }
 
@@ -51,6 +61,10 @@ func New() (*Player, error) {
 func (p *Player) Load(url string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.mp == nil {
+		return fmt.Errorf("vlc: player closed")
+	}
 
 	cURL := C.CString(url)
 	defer C.free(unsafe.Pointer(cURL))
@@ -73,6 +87,12 @@ func (p *Player) Load(url string) error {
 func (p *Player) LoadSource(src Source) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.mp == nil {
+		src.Abort()
+		src.Close()
+		return fmt.Errorf("vlc: player closed")
+	}
 
 	p.detachLocked()
 	cm := newCallbackMedia(src)
@@ -106,101 +126,27 @@ func (p *Player) detachLocked() {
 
 func (p *Player) playLocked() error {
 	p.loadGen++
-	myGen := p.loadGen
-	vol := p.volume
 	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
 		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
 	}
-	// A previous libvlc session can leave the player muted even when the
-	// requested software volume is non-zero. Clear that state before the
-	// audio output is opened.
-	C.libvlc_audio_set_mute(p.mp, 0)
-	C.libvlc_audio_set_volume(p.mp, C.int(vol))
-	// WirePlumber applies its stored per-app stream volume asynchronously after
-	// VLC opens the audio device, overriding the libvlc software volume above.
-	// Re-apply after VLC reaches playing state so our value lands last.
-	go p.reapplyVolumeOnPlay(vol, myGen)
+	// Volume/mute belong to the existing player and the desktop mixer. Repeated
+	// reapplication here overwrote external mixer changes on every new track.
 	return nil
 }
 
-// reapplyVolumeOnPlay waits until VLC enters playing state then sets the
-// libvlc software volume and resets any WirePlumber stream mute via wpctl.
-func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
-	// Wait for VLC to reach Playing state. Bail out immediately if a newer
-	// Load() call has fired (myGen no longer matches p.loadGen).
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		p.mu.Lock()
-		if p.loadGen != myGen {
-			p.mu.Unlock()
-			return // stale — new track loaded or player closed
-		}
-		state := C.libvlc_media_player_get_state(p.mp)
-		p.mu.Unlock()
-		if state == C.libvlc_Playing {
-			break
-		}
-	}
-
-	// Re-apply libvlc software volume then apply wpctl correction.
-	// WirePlumber applies vol=0 asynchronously after VLC opens the audio
-	// device; repeated calls ensure our value lands last.
+// Volume reports the live mixer state rather than the last slider request.
+// Together with not re-applying volume on every Load, this is from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1).
+func (p *Player) Volume() (int, bool) {
 	p.mu.Lock()
-	if p.loadGen != myGen {
-		p.mu.Unlock()
-		return
+	defer p.mu.Unlock()
+	if p.mp == nil {
+		return p.volume, false
 	}
-	C.libvlc_audio_set_mute(p.mp, 0)
-	C.libvlc_audio_set_volume(p.mp, C.int(vol))
-	log.Printf("[vlc] audio output volume=%d mute=%d", vol, int(C.libvlc_audio_get_mute(p.mp)))
-	p.mu.Unlock()
-
-	for range 8 {
-		p.mu.Lock()
-		stale := p.loadGen != myGen
-		p.mu.Unlock()
-		if stale {
-			return
-		}
-		resetPipeWireVolume(vol)
-		time.Sleep(250 * time.Millisecond)
+	vol := int(C.libvlc_audio_get_volume(p.mp))
+	if vol < 0 {
+		vol = p.volume
 	}
-}
-
-// resetPipeWireVolume targets the sink input owned by this engine process.
-// libVLC is embedded in the Go engine, so PipeWire names the stream after the
-// engine process rather than after a standalone "vlc" application.
-func resetPipeWireVolume(vol int) {
-	if runtime.GOOS != "linux" {
-		return
-	}
-	out, err := exec.Command("pactl", "list", "sink-inputs").Output()
-	if err != nil {
-		return
-	}
-	pid := strconv.Itoa(os.Getpid())
-	sinkID := ""
-	matchesPID := false
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "Sink Input #") {
-			sinkID = strings.TrimSpace(strings.TrimPrefix(line, "Sink Input #"))
-			matchesPID = false
-			continue
-		}
-		if strings.Contains(line, "application.process.id =") &&
-			strings.Contains(line, `"`+pid+`"`) {
-			matchesPID = true
-		}
-		if matchesPID && sinkID != "" {
-			_ = exec.Command("pactl", "set-sink-input-mute", sinkID, "0").Run()
-			_ = exec.Command("pactl", "set-sink-input-volume", sinkID,
-				fmt.Sprintf("%d%%", vol)).Run()
-			return
-		}
-	}
+	return vol, C.libvlc_audio_get_mute(p.mp) == 1
 }
 
 // SeekURL stops current playback, loads seekURL, and logs the actual landed
@@ -209,7 +155,9 @@ func resetPipeWireVolume(vol int) {
 // bypassing any truncated disk-cached file.
 func (p *Player) SeekURL(seekURL string, posMs int64) error {
 	p.mu.Lock()
-	C.libvlc_media_player_stop(p.mp)
+	if p.mp != nil {
+		C.libvlc_media_player_stop(p.mp)
+	}
 	p.mu.Unlock()
 
 	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, seekURL)
@@ -222,36 +170,7 @@ func (p *Player) SeekURL(seekURL string, posMs int64) error {
 	myGen := p.loadGen
 	p.mu.Unlock()
 
-	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
-			p.mu.Lock()
-			if p.loadGen != myGen {
-				p.mu.Unlock()
-				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
-				return
-			}
-			state := C.libvlc_media_player_get_state(p.mp)
-			pos := int64(C.libvlc_media_player_get_time(p.mp))
-			gen := p.loadGen
-			p.mu.Unlock()
-			if gen != myGen {
-				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
-				return
-			}
-			if state == C.libvlc_Playing && pos > 0 {
-				delta := pos - posMs
-				sign := "+"
-				if delta < 0 {
-					sign = ""
-				}
-				log.Printf("[vlc seek] ◄ LANDED  requested=%dms  actual=%dms  Δ=%s%dms", posMs, pos, sign, delta)
-				return
-			}
-		}
-		log.Printf("[vlc seek] ✗ TIMEOUT — VLC did not reach playing state within 5s (requested=%dms)", posMs)
-	}()
+	go p.confirmLanding(myGen, posMs)
 	return nil
 }
 
@@ -265,10 +184,13 @@ func (p *Player) SeekReload(posMs int64) error {
 		posMs = 0
 	}
 	p.mu.Lock()
+	if p.mp == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("vlc: player closed")
+	}
 	url := p.lastURL
-	vol := p.volume
-	p.mu.Unlock()
 	if url == "" {
+		p.mu.Unlock()
 		return nil
 	}
 	// Strip any existing query string from the URL so :start-time is the only
@@ -282,6 +204,7 @@ func (p *Player) SeekReload(posMs int64) error {
 	defer C.free(unsafe.Pointer(cURL))
 	media := C.libvlc_media_new_location(p.inst, cURL)
 	if media == nil {
+		p.mu.Unlock()
 		return fmt.Errorf("vlc: libvlc_media_new_location failed for %s", base)
 	}
 	defer C.libvlc_media_release(media)
@@ -292,52 +215,45 @@ func (p *Player) SeekReload(posMs int64) error {
 
 	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, base)
 
-	p.mu.Lock()
+	// The whole swap-and-play runs under the lock: Close releases mp/inst under
+	// the same lock, so an unlocked play() here could hit a freed player.
 	p.detachLocked()
 	C.libvlc_media_player_stop(p.mp)
 	C.libvlc_media_player_set_media(p.mp, media)
 	p.lastURL = base
-	p.loadGen++
+	if err := p.playLocked(); err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	myGen := p.loadGen
 	p.mu.Unlock()
 
-	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
-		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
-	}
-	C.libvlc_audio_set_volume(p.mp, C.int(vol))
-	go p.reapplyVolumeOnPlay(vol, myGen)
 	// Verify actual landing position once VLC enters playing state.
-	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
-			p.mu.Lock()
-			if p.loadGen != myGen {
-				p.mu.Unlock()
-				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
-				return
-			}
-			state := C.libvlc_media_player_get_state(p.mp)
-			pos := int64(C.libvlc_media_player_get_time(p.mp))
-			gen := p.loadGen
-			p.mu.Unlock()
-			if gen != myGen {
-				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
-				return
-			}
-			if state == C.libvlc_Playing && pos > 0 {
-				delta := pos - posMs
-				sign := "+"
-				if delta < 0 {
-					sign = ""
-				}
-				log.Printf("[vlc seek] ◄ LANDED  requested=%dms  actual=%dms  Δ=%s%dms", posMs, pos, sign, delta)
-				return
-			}
-		}
-		log.Printf("[vlc seek] ✗ TIMEOUT — VLC did not reach playing state within 5s (requested=%dms)", posMs)
-	}()
+	go p.confirmLanding(myGen, posMs)
 	return nil
+}
+
+// confirmLanding logs where a seek landed, abandoning the check if the player
+// is reloaded or closed first.
+func (p *Player) confirmLanding(myGen int, posMs int64) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		p.mu.Lock()
+		if p.loadGen != myGen || p.mp == nil {
+			p.mu.Unlock()
+			log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
+			return
+		}
+		state := C.libvlc_media_player_get_state(p.mp)
+		pos := int64(C.libvlc_media_player_get_time(p.mp))
+		p.mu.Unlock()
+		if state == C.libvlc_Playing && pos > 0 {
+			log.Printf("[vlc seek] ◄ LANDED  requested=%dms  actual=%dms  Δ=%+dms", posMs, pos, pos-posMs)
+			return
+		}
+	}
+	log.Printf("[vlc seek] ✗ TIMEOUT — VLC did not reach playing state within 5s (requested=%dms)", posMs)
 }
 
 // SetTime seeks within the currently loaded media to posMs milliseconds.
@@ -349,11 +265,17 @@ func (p *Player) SetTime(posMs int64) {
 		return
 	}
 	p.mu.Lock()
+	if p.mp == nil {
+		p.mu.Unlock()
+		return
+	}
 	state := C.libvlc_media_player_get_state(p.mp)
 	p.mu.Unlock()
 	if state == C.libvlc_Playing || state == C.libvlc_Paused {
 		p.mu.Lock()
-		C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
+		if p.mp != nil {
+			C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
+		}
 		p.mu.Unlock()
 		return
 	}
@@ -369,6 +291,10 @@ func (p *Player) SetTime(posMs int64) {
 			if p.loadGen != myGen {
 				p.mu.Unlock()
 				return // track changed or player closed — drop seek
+			}
+			if p.mp == nil {
+				p.mu.Unlock()
+				return
 			}
 			state := C.libvlc_media_player_get_state(p.mp)
 			if state == C.libvlc_Playing || state == C.libvlc_Paused {
@@ -386,6 +312,9 @@ func (p *Player) SetTime(posMs int64) {
 func (p *Player) Time() (posMs, lengthMs int64, state string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return 0, 0, "stopped"
+	}
 	posMs = int64(C.libvlc_media_player_get_time(p.mp))
 	lengthMs = int64(C.libvlc_media_player_get_length(p.mp))
 	state = vlcStateName(C.libvlc_media_player_get_state(p.mp))
@@ -396,6 +325,9 @@ func (p *Player) Time() (posMs, lengthMs int64, state string) {
 func (p *Player) Pause() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_media_player_set_pause(p.mp, 1)
 }
 
@@ -403,6 +335,9 @@ func (p *Player) Pause() {
 func (p *Player) Resume() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_media_player_set_pause(p.mp, 0)
 }
 
@@ -411,6 +346,9 @@ func (p *Player) Resume() {
 func (p *Player) SetRate(rate float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_media_player_set_rate(p.mp, C.float(rate))
 }
 
@@ -425,6 +363,9 @@ func (p *Player) SetVolume(vol int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.volume = vol
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_audio_set_mute(p.mp, 0)
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 }
@@ -437,6 +378,7 @@ func (p *Player) Stop() {
 	if p.mp != nil {
 		p.detachLocked()
 		C.libvlc_media_player_stop(p.mp)
+		p.loadGen++ // cancel delayed seeks even if no new track follows Stop
 	}
 }
 

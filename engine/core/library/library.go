@@ -381,17 +381,31 @@ func (s *Store) save() {
 // querySongs / queryPlaylists / queryAllPlaylistTracks / querySyncedAt all have
 // *InTx variants used by save() so the full dump is one consistent snapshot.
 
+// queryRows runs q on tx (or the store's db) and logs a failure instead of
+// swallowing it: a silent nil here would make save() persist a truncated snapshot.
+func (s *Store) queryRows(tx *sql.Tx, q string) *sql.Rows {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tx != nil {
+		rows, err = tx.Query(q)
+	} else {
+		rows, err = s.db.Query(q)
+	}
+	if err != nil {
+		log.Printf("[library] query failed: %v", err)
+		return nil
+	}
+	return rows
+}
+
 func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
 	if tx == nil && s.db == nil {
 		return nil
 	}
 	q := "SELECT lid,cid,name,artist,album,album_id,ms,track_number,disc_number FROM songs"
-	var rows *sql.Rows
-	if tx != nil {
-		rows, _ = tx.Query(q)
-	} else {
-		rows, _ = s.db.Query(q)
-	}
+	rows := s.queryRows(tx, q)
 	if rows == nil {
 		return nil
 	}
@@ -440,12 +454,7 @@ func (s *Store) queryPlaylistsInTx(tx *sql.Tx) []PlaylistInfo {
 		return nil
 	}
 	q := "SELECT lid,name,track_count FROM playlists"
-	var rows *sql.Rows
-	if tx != nil {
-		rows, _ = tx.Query(q)
-	} else {
-		rows, _ = s.db.Query(q)
-	}
+	rows := s.queryRows(tx, q)
 	if rows == nil {
 		return nil
 	}
@@ -471,12 +480,7 @@ func (s *Store) queryAllPlaylistTracksInTx(tx *sql.Tx) map[string][]PlaylistTrac
 		return nil
 	}
 	q := "SELECT playlist_id,lid,cid FROM playlist_tracks ORDER BY playlist_id,position"
-	var rows *sql.Rows
-	if tx != nil {
-		rows, _ = tx.Query(q)
-	} else {
-		rows, _ = s.db.Query(q)
-	}
+	rows := s.queryRows(tx, q)
 	if rows == nil {
 		return nil
 	}
@@ -834,11 +838,20 @@ type amPlayParams struct {
 	CatalogID string `json:"catalogId"`
 }
 
+// maxPlaylistPages bounds pagination: 100 tracks/page covers far more than any real playlist.
+const maxPlaylistPages = 1000
+
 func fetchPlaylistTracks(ctx context.Context, c *resty.Client, playlistID string) ([]PlaylistTrack, error) {
 	var all []PlaylistTrack
 	path := fmt.Sprintf("/v1/me/library/playlists/%s/tracks", playlistID)
 	params := map[string]string{"limit": fmt.Sprintf("%d", pageLimit)}
-	for path != "" {
+	seen := map[string]struct{}{}
+	for pages := 0; path != ""; pages++ {
+		// A server that repeats a cursor, or never ends, must not spin forever.
+		if _, dup := seen[path]; dup || pages >= maxPlaylistPages {
+			return nil, fmt.Errorf("playlist pagination did not terminate (page %d)", pages)
+		}
+		seen[path] = struct{}{}
 		var resp amResponse
 		r, err := c.R().SetContext(ctx).SetQueryParams(params).SetResult(&resp).Get(path)
 		if err != nil {

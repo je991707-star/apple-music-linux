@@ -33,6 +33,41 @@ const (
 	PhaseCancelled   Phase = "cancelled"
 )
 
+// IsTerminal reports whether p is a final state: a job that reaches it never leaves it. Retrying a
+// failed or cancelled export enqueues a new job rather than reviving the old one.
+func (p Phase) IsTerminal() bool { return p == PhaseDone || p == PhaseFailed || p == PhaseCancelled }
+
+// rank orders the non-terminal phases; a job only ever moves forward through them.
+func (p Phase) rank() int {
+	switch p {
+	case PhaseQueued:
+		return 0
+	case PhaseResolving:
+		return 1
+	case PhaseDownloading:
+		return 2
+	case PhaseTagging:
+		return 3
+	case PhaseMoving:
+		return 4
+	}
+	return -1
+}
+
+// canTransition is the job's transition relation. From a terminal state nothing is allowed; any
+// non-terminal phase may end in a terminal one (failure and cancellation can strike anywhere, and
+// skipped or collection jobs finish without visiting every stage); otherwise the move must stay in
+// place (a progress update) or go forward. Unknown phases are refused.
+func canTransition(from, to Phase) bool {
+	if from.IsTerminal() || from.rank() < 0 { // finished, or not a phase at all
+		return false
+	}
+	if to.IsTerminal() {
+		return true
+	}
+	return to.rank() >= from.rank()
+}
+
 // ExportCapabilities selects the content variant to export.
 type ExportCapabilities struct {
 	Lossless        bool `json:"lossless"`        // ALAC

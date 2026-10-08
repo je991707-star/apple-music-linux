@@ -295,6 +295,9 @@ func newWorkQueue() *workQueue {
 func (q *workQueue) push(item *workItem) (evicted *workItem) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.done {
+		return item // no worker will ever pop it; hand it back so its job can finish
+	}
 	if q.h.Len() >= maxQueueDepth {
 		minI := 0
 		for i := range q.h {
@@ -879,7 +882,9 @@ func (s *Scheduler) warm(item *workItem) {
 		case <-item.ctx.Done():
 			// Job was cancelled — release the session we just opened.
 			s.mu.Lock()
-			delete(s.preWarmed, item.track.AssetID)
+			if cur, ok := s.preWarmed[item.track.AssetID]; ok && cur.sessionID == sess.ID {
+				delete(s.preWarmed, item.track.AssetID)
+			}
 			s.mu.Unlock()
 			s.pm.Release(sess.ID)
 			job.finishCancelled()

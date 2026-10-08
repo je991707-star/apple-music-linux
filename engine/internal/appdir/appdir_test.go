@@ -49,14 +49,14 @@ func TestFreshInstallJustReturnsTheNewDirectory(t *testing.T) {
 func TestLegacyConfigDirectoriesAreMergedIntoTheNewOne(t *testing.T) {
 	config, _ := setRoots(t)
 	write(t, filepath.Join(config, "apple-music-linux", "electron-prefs.json"), "prefs")
-	write(t, filepath.Join(config, "apple-music-linux", "widevine", "device_private_key"), "key")
+	write(t, filepath.Join(config, "apple-music-linux", "adamplay", "device_private_key"), "key")
 	write(t, filepath.Join(config, "aml", "mv-dec.key"), "mvkey")
 	write(t, filepath.Join(config, "aml", "eq.json"), "eq")
 
 	dir := Config()
 	for rel, want := range map[string]string{
 		"electron-prefs.json":         "prefs",
-		"widevine/device_private_key": "key",
+		"adamplay/device_private_key": "key",
 		"mv-dec.key":                  "mvkey",
 		"eq.json":                     "eq",
 	} {

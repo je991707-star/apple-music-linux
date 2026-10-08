@@ -1,4 +1,4 @@
-//go:build (linux || windows) && widevine_backend
+//go:build (linux || windows) && adamplay_backend
 
 package drm
 
@@ -40,13 +40,14 @@ drm_key_context_handle_t drm_open_key_context(const char *asset_id_str, const ch
 int   drm_decrypt_sample(drm_key_context_handle_t key_context, uint8_t *sample_data, uint32_t sample_size);
 int   drm_decrypt_sample_at(drm_key_context_handle_t key_context, uint8_t *sample_data, uint32_t sample_size, uint64_t sample_number);
 int   drm_decrypt_sample_with_sample_iv(drm_key_context_handle_t key_context, uint8_t *sample_data, uint32_t sample_size);
+void  drm_close_key_context(drm_key_context_handle_t key_context);
 int   drm_set_key_context_key(drm_key_context_handle_t key_context, const uint8_t *aes_key, const uint8_t *iv);
 int   drm_decrypt_itun(drm_adam_id_t asset_id, uint8_t *sample_data, uint32_t input_size, uint32_t *output_size);
 int   drm_is_recovery_active(void);
 
 // ── CGO bridge function pointers ────────────────────────────────────────────
-extern void widevineBridgeAuth(char *ctype, char *buf, int size, void *ud);
-extern void widevineBridgeState(char *state, void *ud);
+extern void adamplayBridgeAuth(char *ctype, char *buf, int size, void *ud);
+extern void adamplayBridgeState(char *state, void *ud);
 */
 import "C"
 
@@ -68,8 +69,8 @@ import (
 	"engine/utils/ampapi"
 )
 
-// widevineBackend implements the DRM backend using the native implementation
-type widevineBackend struct {
+// adamplayBackend implements the DRM backend using the native implementation
+type adamplayBackend struct {
 	mu      sync.Mutex
 	config  BackendConfig
 	drmDir  string // directory containing libdrm_client.so and files/
@@ -79,7 +80,8 @@ type widevineBackend struct {
 	// Global state callback channel for C callbacks
 	stateCh      chan string
 	stateHandle  cgo.Handle
-	cachedDevTok string // MusicKit developer JWT, fetched once on Start
+	stateBox     unsafe.Pointer // C-allocated cell holding stateHandle; the pointer handed to C
+	cachedDevTok string         // MusicKit developer JWT, fetched once on Start
 
 	// In-flight accounting for calls into the C library (guarded by mu). Stop must not
 	// tear the library down under a running call, and key contexts handed out by one
@@ -94,7 +96,7 @@ var errBackendStopped = errors.New("DRM backend is not running")
 // enter registers one call into the C library. gen is the generation the caller's
 // state (key contexts) belongs to, or 0 for calls that carry none. The returned func
 // must be called when the call is done.
-func (b *widevineBackend) enter(gen uint64) (leave func(), err error) {
+func (b *adamplayBackend) enter(gen uint64) (leave func(), err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.running || (gen != 0 && gen != b.gen) {
@@ -104,7 +106,7 @@ func (b *widevineBackend) enter(gen uint64) (leave func(), err error) {
 	return b.leave, nil
 }
 
-func (b *widevineBackend) leave() {
+func (b *adamplayBackend) leave() {
 	b.mu.Lock()
 	b.active--
 	if b.active == 0 && b.drained != nil {
@@ -114,26 +116,31 @@ func (b *widevineBackend) leave() {
 	b.mu.Unlock()
 }
 
-func (b *widevineBackend) currentGen() uint64 {
+func (b *adamplayBackend) currentGen() uint64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.gen
 }
 
-// WidevineBackend creates the in-process Widevine DRM backend
+// AdamplayBackend creates the in-process Widevine DRM backend
 // drmDir is the directory containing libdrm_client.so and files/ folder with credentials
-func WidevineBackend(drmDir string) DRMBackend {
-	b := &widevineBackend{
+func AdamplayBackend(drmDir string) DRMBackend {
+	b := &adamplayBackend{
 		drmDir:  drmDir,
 		eventCh: make(chan DRMEvent, 16),
 		stateCh: make(chan string, 16),
 	}
 	b.stateHandle = cgo.NewHandle(b.stateCh)
+	// Pass the handle to C inside C memory: converting an integer straight to
+	// unsafe.Pointer is invalid cgo and flagged by go vet. The box lives as long
+	// as the backend (one per process), so the callback never sees a freed cell.
+	b.stateBox = C.malloc(C.size_t(unsafe.Sizeof(uintptr(0))))
+	*(*uintptr)(b.stateBox) = uintptr(b.stateHandle)
 	return b
 }
 
 // Start launches the native DRM backend
-func (b *widevineBackend) Start(ctx context.Context, cfg BackendConfig) error {
+func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -163,11 +170,11 @@ func (b *widevineBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		password:        nil,
 		device_info:     cDeviceInfo,
 		offline_only:    0,
-		auth_callback:   (C.drm_auth_callback_t)(C.widevineBridgeAuth),
+		auth_callback:   (C.drm_auth_callback_t)(C.adamplayBridgeAuth),
 		auth_user_data:  nil,
-		state_callback:  (C.drm_state_callback_t)(C.widevineBridgeState),
+		state_callback:  (C.drm_state_callback_t)(C.adamplayBridgeState),
 		// Pass stateCh as userdata via cgo.Handle
-		state_user_data: unsafe.Pointer(uintptr(b.stateHandle)),
+		state_user_data: b.stateBox,
 	}
 
 	// Pass credentials if provided
@@ -232,7 +239,7 @@ func (b *widevineBackend) Start(ctx context.Context, cfg BackendConfig) error {
 }
 
 // Authenticate ensures an authenticated DRM context exists
-func (b *widevineBackend) Authenticate(ctx context.Context) error {
+func (b *adamplayBackend) Authenticate(ctx context.Context) error {
 	// For native backend, authentication is handled by callbacks
 	// Just verify we're running
 	b.mu.Lock()
@@ -247,7 +254,7 @@ func (b *widevineBackend) Authenticate(ctx context.Context) error {
 
 // quiesce refuses new calls into the C library and waits (bounded) for the ones already
 // inside it to finish. It reports whether everything drained in time.
-func (b *widevineBackend) quiesce(timeout time.Duration) bool {
+func (b *adamplayBackend) quiesce(timeout time.Duration) bool {
 	b.mu.Lock()
 	b.running = false
 	var wait chan struct{}
@@ -270,7 +277,7 @@ func (b *widevineBackend) quiesce(timeout time.Duration) bool {
 
 // Stop shuts down the native DRM backend. New calls are refused at once; calls already
 // inside the C library get a bounded time to finish before it is torn down.
-func (b *widevineBackend) Stop() error {
+func (b *adamplayBackend) Stop() error {
 	if !b.quiesce(15 * time.Second) {
 		log.Printf("[drm] Stop: calls still inside the DRM library after 15s — shutting down anyway")
 	}
@@ -282,21 +289,21 @@ func (b *widevineBackend) Stop() error {
 }
 
 // Running reports whether the backend is currently operational
-func (b *widevineBackend) Running() bool {
+func (b *adamplayBackend) Running() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.running
 }
 
 // SetAuthSource registers the AuthSource
-func (b *widevineBackend) SetAuthSource(src AuthSource) {
+func (b *adamplayBackend) SetAuthSource(src AuthSource) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.authSrc = src
 }
 
 // Decrypt decrypts FairPlay-encrypted samples
-func (b *widevineBackend) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
+func (b *adamplayBackend) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
 	leave, err := b.enter(0)
 	if err != nil {
 		return DecryptResponse{}, err
@@ -313,6 +320,7 @@ func (b *widevineBackend) Decrypt(ctx context.Context, req DecryptRequest) (Decr
 	if kdCtx == nil {
 		return DecryptResponse{}, fmt.Errorf("failed to open key context for asset %s", req.AdamID)
 	}
+	defer C.drm_close_key_context(kdCtx)
 
 	// Decrypt each sample
 	decrypted := make([][]byte, len(req.Samples))
@@ -336,7 +344,7 @@ func (b *widevineBackend) Decrypt(ctx context.Context, req DecryptRequest) (Decr
 }
 
 // GetM3U8 returns the HLS URL for an asset
-func (b *widevineBackend) GetM3U8(ctx context.Context, adamID uint64) (string, error) {
+func (b *adamplayBackend) GetM3U8(ctx context.Context, adamID uint64) (string, error) {
 	leave, err := b.enter(0)
 	if err != nil {
 		return "", err
@@ -352,7 +360,7 @@ func (b *widevineBackend) GetM3U8(ctx context.Context, adamID uint64) (string, e
 }
 
 // GetAccount returns the account information
-func (b *widevineBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
+func (b *adamplayBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 	leave, err := b.enter(0)
 	if err != nil {
 		return AccountInfo{}, err
@@ -373,7 +381,7 @@ func (b *widevineBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 }
 
 // GetProgressiveMVURL returns the progressive download URL and download key
-func (b *widevineBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error) {
+func (b *adamplayBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error) {
 	leave, err := b.enter(0)
 	if err != nil {
 		return "", "", err
@@ -414,7 +422,7 @@ func (b *widevineBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64
 }
 
 // DecryptItunSamples decrypts itun-encrypted samples
-func (b *widevineBackend) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+func (b *adamplayBackend) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
 	leave, err := b.enter(0)
 	if err != nil {
 		return nil, err
@@ -440,6 +448,9 @@ func (b *widevineBackend) DecryptItunSamples(ctx context.Context, adamID uint64,
 			return nil, fmt.Errorf("itun decryption failed for sample %d with code %d", i, ret)
 		}
 
+		if int(outSize) > len(sample) {
+			return nil, fmt.Errorf("itun decryption of sample %d reported %d bytes for a %d byte sample", i, outSize, len(sample))
+		}
 		decrypted[i] = sample[:outSize]
 	}
 
@@ -452,8 +463,9 @@ const defaultKeyURI = "skd://itunes.apple.com/P000000000/s1/e1"
 // warmDefaultKeyContext opens the shared default key context as soon as FairPlay is up.
 // The first open costs about 5 s inside the Android library; the library caches contexts
 // by (asset, URI), so doing it here means the first track's CBCS dial finds it instead of
-// paying that during playback startup. The context is deliberately kept open.
-func (b *widevineBackend) warmDefaultKeyContext() {
+// paying that during playback startup. The shim keeps no per-asset cache, so the probe
+// context is closed straight away.
+func (b *adamplayBackend) warmDefaultKeyContext() {
 	leave, err := b.enter(b.currentGen()) // waits for Start to release b.mu
 	if err != nil {
 		return
@@ -464,15 +476,17 @@ func (b *widevineBackend) warmDefaultKeyContext() {
 	defer C.free(unsafe.Pointer(cAssetID))
 	defer C.free(unsafe.Pointer(cMediaURI))
 	start := time.Now()
-	ok := C.drm_open_key_context(cAssetID, cMediaURI) != nil
+	kc := C.drm_open_key_context(cAssetID, cMediaURI)
+	ok := kc != nil
+	C.drm_close_key_context(kc) // a probe only: nothing will ever use or free it otherwise
 	log.Printf("[drm] default key context warmed in %s (ok=%v)", time.Since(start).Round(time.Millisecond), ok)
 }
 
 // InProcess marks DialCBCS connections as in-process pipes (see DRMManager.InProcess).
-func (b *widevineBackend) InProcess() bool { return true }
+func (b *adamplayBackend) InProcess() bool { return true }
 
 // DialCBCS opens a CBCS decryption connection
-func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
+func (b *adamplayBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	// For native backend, use a pipe
 	client, server := net.Pipe()
 	gen := b.currentGen() // key contexts opened below belong to this run of the backend
@@ -480,6 +494,11 @@ func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	// Start the CBCS server on the server side
 	go func() {
 		defer server.Close()
+		// serveCBCS handles one key at a time, so only the current context is ever in
+		// use. Each is wiped and freed when the next key is selected or the session
+		// ends; otherwise every track left its plaintext content key in memory.
+		var cur C.drm_key_context_handle_t
+		defer func() { C.drm_close_key_context(cur) }()
 		err := serveCBCS(ctx, server, func(adamID, uri string) (decrypt func([]byte) error, err error) {
 			log.Printf("[drm] DialCBCS: opening key context for adamID=%s uri=%s", adamID, uri)
 
@@ -517,7 +536,7 @@ func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 					if err != nil {
 						log.Printf("[drm] DialCBCS: failed to fetch license: %v", err)
 					} else {
-						log.Printf("[drm] DialCBCS: license fetched, key=%02x%02x...", fetchedKey[0], fetchedKey[1])
+						log.Printf("[drm] DialCBCS: license fetched (%d-byte key)", len(fetchedKey))
 					}
 				}
 			}
@@ -526,6 +545,8 @@ func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 			if enterErr != nil {
 				return nil, enterErr
 			}
+			C.drm_close_key_context(cur) // previous key is finished with
+			cur = nil
 			cAssetID := C.CString(adamID)
 			cMediaURI := C.CString(uri)
 			kdCtx := C.drm_open_key_context(cAssetID, cMediaURI)
@@ -539,7 +560,8 @@ func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 			}
 			log.Printf("[drm] DialCBCS: key context opened successfully for adamID=%s", adamID)
 
-			// Set the fetched key if available
+			// Set the fetched key if available. Without one (e.g. the ALAC default key URI)
+			// the context keeps its default key, exactly as before.
 			if len(fetchedKey) == 16 {
 				// The sample-derived IV path uses this as its base value.
 				zeroIV := make([]byte, 16)
@@ -551,6 +573,7 @@ func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 					log.Printf("[drm] DialCBCS: key context key set successfully")
 				}
 			}
+			cur = kdCtx
 			leave()
 
 			return func(sample []byte) error {
@@ -584,17 +607,17 @@ func (b *widevineBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 }
 
 // Events returns the event channel
-func (b *widevineBackend) Events() <-chan DRMEvent {
+func (b *adamplayBackend) Events() <-chan DRMEvent {
 	return b.eventCh
 }
 
 // authLoop processes authentication requests
-func (b *widevineBackend) authLoop() {
+func (b *adamplayBackend) authLoop() {
 	// Auth is handled via callbacks
 }
 
 // stateLoop processes state changes from C callbacks
-func (b *widevineBackend) stateLoop() {
+func (b *adamplayBackend) stateLoop() {
 	for state := range b.stateCh {
 		// Parse state string and emit event
 		result := ParseStateFile(state)

@@ -1,10 +1,14 @@
 package ampapi
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 )
+
+// maxTokenPageBytes bounds the web player page and script scanned for the developer token.
+const maxTokenPageBytes = 32 << 20
 
 func GetToken() (string, error) {
 	req, err := http.NewRequest("GET", "https://music.apple.com", nil)
@@ -18,13 +22,16 @@ func GetToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenPageBytes))
 	if err != nil {
 		return "", err
 	}
 
 	regex := regexp.MustCompile(`/assets/index~[^/]+\.js`)
 	indexJsUri := regex.FindString(string(body))
+	if indexJsUri == "" {
+		return "", fmt.Errorf("token: web player script not found on music.apple.com")
+	}
 
 	req, err = http.NewRequest("GET", "https://music.apple.com"+indexJsUri, nil)
 	if err != nil {
@@ -37,7 +44,7 @@ func GetToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err = io.ReadAll(resp.Body)
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxTokenPageBytes))
 	if err != nil {
 		return "", err
 	}

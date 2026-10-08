@@ -94,7 +94,7 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	// DRMManager.Status() gives a complete snapshot including whether FairPlay
 	// is initialised and what content types are available.
 	var snap drm.DRMSnapshot
-	if s.dm != nil { // nil when built without widevine_backend
+	if s.dm != nil { // nil when built without adamplay_backend
 		snap = s.dm.Status()
 	}
 	cap := snap.Capabilities
@@ -231,6 +231,9 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.shutdownCtx.Done():
+			// Server shutdown: end the stream so http.Server.Shutdown doesn't wait on it.
 			return
 		case <-heartbeat.C:
 			writeEv(s.events.nextID(), "ping", map[string]int64{"ts": time.Now().UnixMilli()}, epochInfo.Generation, false, "")

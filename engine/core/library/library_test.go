@@ -1,9 +1,15 @@
 package library
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/go-resty/resty/v2"
 )
 
 func song(id, cid, album string, disc, track int) amItem {
@@ -175,5 +181,39 @@ func TestLoadIgnoresNewerCacheFormat(t *testing.T) {
 	s2 := New(dir)
 	if songs, _, _, _ := s2.Stats(); songs != 0 {
 		t.Fatalf("loaded %d songs from a newer format", songs)
+	}
+}
+
+func TestFetchPlaylistTracks_RepeatedCursorTerminates(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"i.1"}],"next":"/v1/me/library/playlists/p.1/tracks?offset=100"}`)
+	}))
+	defer srv.Close()
+	c := resty.New().SetBaseURL(srv.URL)
+	_, err := fetchPlaylistTracks(context.Background(), c, "p.1")
+	if err == nil {
+		t.Fatal("expected an error for a cursor that never advances")
+	}
+	if calls > 5 {
+		t.Fatalf("made %d requests; a repeated cursor must stop immediately", calls)
+	}
+}
+
+func TestFetchPlaylistTracks_FollowsPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("offset") == "" {
+			fmt.Fprint(w, `{"data":[{"id":"i.1"}],"next":"/v1/me/library/playlists/p.1/tracks?offset=100"}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"id":"i.2"}]}`)
+	}))
+	defer srv.Close()
+	got, err := fetchPlaylistTracks(context.Background(), resty.New().SetBaseURL(srv.URL), "p.1")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v err=%v, want 2 tracks", got, err)
 	}
 }

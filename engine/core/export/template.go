@@ -117,7 +117,9 @@ func renderTemplate(t FilenameTemplate, v templateVar) string {
 
 	// Remove any {ext} that was already substituted; we always append ext.
 	path := filepath.Clean(s)
-	if filepath.Ext(path) == "" {
+	// filepath.Ext cannot decide this: "Mr. Brightside" has an "extension" of
+	// ". Brightside". Only an actual trailing ".<ext>" means one was supplied.
+	if v.Ext != "" && !strings.HasSuffix(strings.ToLower(path), "."+strings.ToLower(v.Ext)) {
 		path = path + "." + v.Ext
 	}
 	return path

@@ -2,6 +2,7 @@ package wv
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -12,5 +13,9 @@ func GetCertData(client *http.Client, licenseURL string) ([]byte, error) {
 		return nil, err
 	}
 	defer response.Body.Close()
-	return io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("license server certificate request: HTTP %d", response.StatusCode)
+	}
+	// A service certificate is a few KB; an error page or runaway body must not be read whole.
+	return io.ReadAll(io.LimitReader(response.Body, 1<<20))
 }

@@ -47,6 +47,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,9 +79,21 @@ var artworkClient = &http.Client{
 
 // drmAccountAdapter adapts *drm.DRMManager to apple.AccountTokenSource so the
 // apple package stays decoupled from the drm package's concrete types.
-type drmAccountAdapter struct{ dm *drm.DRMManager }
+//
+// getMUT is the APIServer's musicUserToken() method. It checks the in-memory
+// MK token pushed at startup first, then falls back to the DRM session file,
+// so lossless/ALAC works from the web-player session without a MUSIC_TOKEN file.
+type drmAccountAdapter struct {
+	dm     *drm.DRMManager
+	getMUT func() string
+}
 
 func (a *drmAccountAdapter) GetMusicToken(ctx context.Context) (devToken, musicToken string, err error) {
+	// Prefer the in-memory MK token (pushed by the renderer at startup).
+	if mut := a.getMUT(); mut != "" {
+		devTok, err := a.dm.GetAccount(ctx)
+		return devTok.DevToken, mut, err
+	}
 	info, err := a.dm.GetAccount(ctx)
 	return info.DevToken, info.MusicToken, err
 }
@@ -458,12 +471,13 @@ type APIServer struct {
 	eagerStart  bool   // launch the drm binary at Start() when a session exists
 	sessionDir  string // session/credential directory guarded by sessionLock
 	sessionLock *drm.SessionLock
-	backendName string              // configured backend name ("widevine")
+	backendName string              // configured backend name ("adamplay")
 	scheduler   *prefetch.Scheduler // background cache-warming scheduler
 	diskCache   *diskcache.Cache    // per-track decrypted audio disk cache
 	alac        *alacGate           // parks background ALAC downloads while the player's track starts
 	libStore    *library.Store      // local library metadata cache (songs, playlists)
 	vlcPlayer   *vlc.Player         // nil when libvlc is not available
+	vlcGate     vlcGate             // session that currently owns vlcPlayer
 
 	tokenMu     sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request
@@ -493,6 +507,7 @@ type ServerConfig struct {
 // NewAPIServer wires all routes.
 func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	initMVPrefs()
+	listenPort.Store(int32(port))
 	epoch := newEpochManager()
 	shutCtx, shutStop := context.WithCancel(context.Background())
 	s := &APIServer{
@@ -507,11 +522,11 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 
 	// DRM subsystem constructed first: DRMManager is passed to the PlaybackManager
-	// as a fairplay.CBCSDialer so cbcs.go uses in-process decryption via WidevineBackend.
-	// BackendConfig carries what WidevineBackend needs (BaseDir, DeviceInfo).
+	// as a fairplay.CBCSDialer so cbcs.go uses in-process decryption via AdamplayBackend.
+	// BackendConfig carries what AdamplayBackend needs (BaseDir, DeviceInfo).
 	// Resolve the DRM directory marker: use config if set, otherwise auto-discover
 	// drm/drm-native relative to the working directory. Only its directory is
-	// used (WidevineBackend runs in-process; nothing is executed).
+	// used (AdamplayBackend runs in-process; nothing is executed).
 	drmBinaryPath := cfg.DRMBinaryPath
 	if drmBinaryPath == "" {
 		// Prefer drm directory with libdrm_client.so when present.
@@ -537,8 +552,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
-	// WidevineBackend (in-process CGO, libdrm_client.so) is the DRM backend.
-	// WidevineBackend returns nil when the widevine_backend build tag is absent.
+	// AdamplayBackend (in-process CGO, libdrm_client.so) is the DRM backend.
+	// AdamplayBackend returns nil when the adamplay_backend build tag is absent.
 	var drmBackend drm.DRMBackend
 	var drmDir string // directory containing libdrm_client.so and files/
 	if drmBinaryPath != "" {
@@ -547,10 +562,10 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	if drmDir == "" {
 		drmDir = filepath.Join(os.TempDir(), "adam-drm")
 	}
-	drmBackend = drm.WidevineBackend(drmDir)
+	drmBackend = drm.AdamplayBackend(drmDir)
 	if drmBackend != nil {
-		s.backendName = "widevine"
-		slog.Info("DRM backend", "name", "widevine")
+		s.backendName = "adamplay"
+		slog.Info("DRM backend", "name", "adamplay")
 		s.dm = drm.NewDRMManager(
 			drmBackend,
 			drmSession,
@@ -574,7 +589,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			drm.DefaultRestartPolicy,
 		)
 	} else {
-		slog.Warn("DRM backend unavailable (widevine_backend build tag not set); DRM features disabled")
+		slog.Warn("DRM backend unavailable (adamplay_backend build tag not set); DRM features disabled")
 	}
 	s.session = drmSession
 	s.drmReady = drmBackend != nil
@@ -594,7 +609,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	var acctSource apple.AccountTokenSource
 	if s.dm != nil {
 		cbcsDialer = s.dm
-		acctSource = &drmAccountAdapter{s.dm}
+		acctSource = &drmAccountAdapter{dm: s.dm, getMUT: s.musicUserToken}
 	}
 	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(cbcsDialer, acctSource))
 	s.installReleaseHook()
@@ -603,7 +618,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// so token rotations are picked up automatically.
 	// Use ev.Kind as the SSE event name so clients can subscribe to specific
 	// phases (prefetch.cached, prefetch.done, …) without filtering JSON.
-	s.scheduler = prefetch.NewScheduler(s.pm, s.token, s.mediaUserToken, func(ev prefetch.Event) {
+	s.scheduler = prefetch.NewScheduler(s.pm, s.token, s.musicUserToken, func(ev prefetch.Event) {
 		s.events.emit(string(ev.Kind), ev)
 	}, prefetch.DefaultWorkers)
 	go func() {
@@ -681,11 +696,6 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 
 	mux.HandleFunc("POST /api/v1/playback", cors(s.handleCreatePlayback))
 	mux.HandleFunc("GET /api/v1/playback/{id}/audio", cors(s.handlePlaybackAudio))
-	mux.HandleFunc("GET /api/v1/playback/{id}/video", cors(s.handlePlaybackVideo))
-	mux.HandleFunc("GET /api/v1/playback/{id}/video-dl", cors(s.handlePlaybackVideoNative))
-	mux.HandleFunc("GET /api/v1/playback/{id}/video-dl-info", cors(s.handlePlaybackVideoNativeInfo))
-	mux.HandleFunc("GET /api/v1/playback/{id}/video-raw", cors(s.handlePlaybackVideoRaw))
-	mux.HandleFunc("GET /api/v1/playback/{id}/video-es", cors(s.handlePlaybackVideoES))
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/init", cors(s.handlePlaybackVsegInit))
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/seg/{n}", cors(s.handlePlaybackVsegSeg))
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/manifest", cors(s.handlePlaybackVsegManifest))
@@ -817,7 +827,7 @@ func (s *APIServer) Start() error {
 	}
 
 	// Eager-start now that the session lock is held.
-	// Retry with exponential backoff: WidevineBackend initializes drm_init
+	// Retry with exponential backoff: AdamplayBackend initializes drm_init
 	// asynchronously and FairPlay may not be ready immediately. A single immediate
 	// GetAccount would fail with "not ready". We retry until ready or the
 	// 30-second budget is exhausted.
@@ -938,7 +948,11 @@ func isLoopbackHost(hostport string) bool {
 }
 
 // isAllowedOrigin matches origins exactly by scheme and hostname — a prefix
-// test would also accept e.g. http://localhost.attacker.example.
+// test would also accept e.g. http://localhost.attacker.example. Apart from
+// music.apple.com, only loopback origins on the engine's own port are accepted
+// (ADAM_ALLOW_LOCAL_ORIGINS=1 widens that to any loopback port for local web
+// tooling): otherwise any other web app on this machine could drive the
+// unauthenticated API.
 func isAllowedOrigin(origin string) bool {
 	if origin == "https://music.apple.com" {
 		return true
@@ -947,7 +961,24 @@ func isAllowedOrigin(origin string) bool {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" {
 		return false
 	}
-	return isLoopbackHost(u.Host)
+	if !isLoopbackHost(u.Host) {
+		return false
+	}
+	if os.Getenv("ADAM_ALLOW_LOCAL_ORIGINS") == "1" {
+		return true
+	}
+	return u.Port() == enginePort()
+}
+
+// listenPort is the port the engine serves on, published by NewAPIServer so the
+// origin check can recognise the engine's own loopback origin.
+var listenPort atomic.Int32
+
+func enginePort() string {
+	if p := listenPort.Load(); p != 0 {
+		return strconv.Itoa(int(p))
+	}
+	return "20025"
 }
 
 // setCORSHeaders writes all CORS response headers onto w based on the request origin.

@@ -285,6 +285,64 @@ func TestSelectVideoVariant_BestFit(t *testing.T) {
 	}
 }
 
+func TestSelectVideoVariantWithCodec_4K_HEVC(t *testing.T) {
+	t.Parallel()
+	// Apple's 4K variants: HEVC-only at 3840x1920, H.264 available up to 1080p.
+	m := &Master{Variants: []Variant{
+		{URL: "http://x/4k.m3u8", Resolution: "3840x1920", Codecs: "hvc1.2.20000000.H150.B0", AverageBandwidth: 15000000},
+		{URL: "http://x/1080p.m3u8", Resolution: "1920x1080", Codecs: "avc1.640032", AverageBandwidth: 8000000},
+		{URL: "http://x/720p.m3u8", Resolution: "1280x720", Codecs: "avc1.64001F", AverageBandwidth: 4000000},
+	}}
+	// VideoHeights returns 1920 for the HEVC tier; quality menu sends maxHeight=1920.
+	url, codecs, _, err := m.SelectVideoVariantWithCodec(1920)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(url, "4k.m3u8") {
+		t.Errorf("got URL %q, want 4k.m3u8", url)
+	}
+	if !strings.Contains(strings.ToLower(codecs), "hvc1") {
+		t.Errorf("got codecs %q, want hvc1", codecs)
+	}
+}
+
+func TestSelectVideoVariantWithCodec_1080_PrefersH264(t *testing.T) {
+	t.Parallel()
+	m := &Master{Variants: []Variant{
+		{URL: "http://x/4k.m3u8", Resolution: "3840x1920", Codecs: "hvc1.2.20000000.H150.B0", AverageBandwidth: 15000000},
+		{URL: "http://x/1080p.m3u8", Resolution: "1920x1080", Codecs: "avc1.640032", AverageBandwidth: 8000000},
+	}}
+	// maxHeight=1080 should pick 1080p H.264, not 4K HEVC.
+	url, codecs, _, err := m.SelectVideoVariantWithCodec(1080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(url, "1080p.m3u8") {
+		t.Errorf("got URL %q, want 1080p.m3u8", url)
+	}
+	if !strings.Contains(strings.ToLower(codecs), "avc1") {
+		t.Errorf("got codecs %q, want avc1", codecs)
+	}
+}
+
+func TestVideoHeights_Includes4K(t *testing.T) {
+	t.Parallel()
+	m := &Master{Variants: []Variant{
+		{URL: "http://x/4k.m3u8", Resolution: "3840x1920", Codecs: "hvc1.2.20000000.H150.B0"},
+		{URL: "http://x/1080p.m3u8", Resolution: "1920x1080", Codecs: "avc1.640032"},
+		{URL: "http://x/720p.m3u8", Resolution: "1280x720", Codecs: "avc1.64001F"},
+	}}
+	heights := m.VideoHeights()
+	// Must include 720, 1080 (H.264) and 1920 (HEVC at ≥2160 height threshold).
+	want := map[int]bool{720: true, 1080: true, 1920: true}
+	for _, h := range heights {
+		delete(want, h)
+	}
+	for h := range want {
+		t.Errorf("VideoHeights missing %d", h)
+	}
+}
+
 // ── OpenMediaCBCS ────────────────────────────────────────────────────────────
 
 func TestOpenMediaCBCS_ALACByterange(t *testing.T) {
@@ -430,5 +488,39 @@ func BenchmarkOpenMedia(b *testing.B) {
 		if _, err := OpenMedia(context.Background(), srv.URL+"/media_encrypted.m3u8"); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// A request above the H.264 ceiling must only be answered by an HEVC variant
+// that is actually taller than that ceiling; an HEVC 1080p must never displace
+// the H.264 1080p the caller would otherwise have received.
+func TestSelectVideoVariantWithCodec_AboveCeiling_DoesNotPickLowerHEVC(t *testing.T) {
+	t.Parallel()
+	m := &Master{Variants: []Variant{
+		{URL: "http://x/hevc1080.m3u8", Resolution: "1920x1080", Codecs: "hvc1.2.4.L120", AverageBandwidth: 9000000},
+		{URL: "http://x/avc1080.m3u8", Resolution: "1920x1080", Codecs: "avc1.640032", AverageBandwidth: 8000000},
+		{URL: "http://x/avc720.m3u8", Resolution: "1280x720", Codecs: "avc1.64001F", AverageBandwidth: 4000000},
+	}}
+	url, codecs, _, err := m.SelectVideoVariantWithCodec(1440)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(url, "avc1080") {
+		t.Errorf("got %q (%s), want the H.264 1080p variant", url, codecs)
+	}
+}
+
+func TestSelectVideoVariantWithCodec_NoCodecsAttribute(t *testing.T) {
+	t.Parallel()
+	m := &Master{Variants: []Variant{
+		{URL: "http://x/a.m3u8", Resolution: "1920x1080", Bandwidth: 8000000},
+		{URL: "http://x/b.m3u8", Resolution: "1280x720", Bandwidth: 4000000},
+	}}
+	url, _, _, err := m.SelectVideoVariantWithCodec(720)
+	if err != nil || !strings.Contains(url, "b.m3u8") {
+		t.Fatalf("got %q err=%v, want b.m3u8", url, err)
+	}
+	if _, _, _, err := m.SelectVideoVariantWithCodec(480); err == nil {
+		t.Error("expected error when every variant exceeds maxHeight")
 	}
 }

@@ -9,6 +9,10 @@ import (
 	"net"
 )
 
+// maxCBCSSample bounds one sample: real audio/video samples are well under a megabyte, and
+// the size comes off the wire as a uint32 that would otherwise allocate up to 4 GiB.
+const maxCBCSSample = 64 << 20
+
 // serveCBCS speaks the FairPlay sample protocol of handle() in the wrapper's
 // main.c over conn, with key-context creation and sample decryption injected
 // so the protocol is testable without the native library:
@@ -19,8 +23,9 @@ import (
 //
 // A zero size ends the current key, NOT the connection: the client
 // (alacstream.SwitchKeys) then sends the next adamID/URI on the same
-// connection. The connection ends when the client closes it (EOF at a header),
-// or when a header is empty or its key cannot be opened.
+// connection. The connection ends when the client closes it at a record boundary
+// (EOF where a header or size would start; EOF inside a record is an error), or
+// when a header is empty or its key cannot be opened.
 func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri string) (decrypt func([]byte) error, err error)) error {
 	for {
 		adamID, err := readShortString(conn)
@@ -59,6 +64,9 @@ func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri stri
 			if size == 0 {
 				break // key switch: the next header selects a new key
 			}
+			if size > maxCBCSSample {
+				return fmt.Errorf("CBCS sample of %d bytes exceeds the %d byte limit", size, maxCBCSSample)
+			}
 			sample := make([]byte, size)
 			if _, err := io.ReadFull(conn, sample); err != nil {
 				return err
@@ -80,6 +88,11 @@ func readShortString(r io.Reader) (string, error) {
 	}
 	buf := make([]byte, n[0])
 	if _, err := io.ReadFull(r, buf); err != nil {
+		// The length byte arrived, so the stream ended inside a field. io.EOF would read as the clean
+		// end-of-session the caller reserves for a record boundary; this is a truncated record.
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return "", fmt.Errorf("short string: %w", err)
 	}
 	return string(buf), nil

@@ -1,7 +1,9 @@
 package export
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -74,4 +76,71 @@ func (m *Manager) checkOutputDir(dir string) error {
 		}
 	}
 	return fmt.Errorf("outputDir must be inside one of the allowed export directories")
+}
+
+// moveFile renames src over dst, falling back to an atomic copy across devices.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	if err := copyFile(src, dst); err != nil {
+		return err
+	}
+	os.Remove(src) //nolint:errcheck
+	return nil
+}
+
+// maxRenameAttempts bounds the "name (N).ext" search; a variable so a test can lower it.
+var maxRenameAttempts = 10000
+
+// moveNoClobber moves tmp to final honouring policy without a check-then-act gap:
+// "overwrite" replaces; "rename" takes the first free "name (N).ext"; anything
+// else (skip) keeps the existing file. The claim on the name is a hard link,
+// which fails atomically when the name is taken. Filesystems without hard links
+// fall back to a move that still refuses to replace an existing file (checked, not
+// atomic, there). Returns the path the content ended up at (the existing file's
+// path when skipped).
+func moveNoClobber(tmp, final, policy string) (string, error) {
+	if policy == "overwrite" {
+		return final, moveFile(tmp, final)
+	}
+	ext := filepath.Ext(final)
+	base := strings.TrimSuffix(final, ext)
+	for i := 0; i < maxRenameAttempts; i++ {
+		dest := final
+		if i > 0 {
+			dest = fmt.Sprintf("%s (%d)%s", base, i, ext)
+		}
+		err := os.Link(tmp, dest)
+		if err != nil && !errors.Is(err, fs.ErrExist) {
+			// No hard links here (or another device): plain move, but never over an existing file.
+			if _, statErr := os.Lstat(dest); statErr != nil {
+				return dest, moveFile(tmp, dest)
+			}
+			err = fs.ErrExist
+		}
+		if err == nil {
+			os.Remove(tmp) //nolint:errcheck
+			return dest, nil
+		}
+		if policy != "rename" { // skip: keep what is there
+			os.Remove(tmp) //nolint:errcheck
+			return final, nil
+		}
+	}
+	os.Remove(tmp) //nolint:errcheck
+	return "", fmt.Errorf("no free name for %s after %d attempts", filepath.Base(final), maxRenameAttempts)
+}
+
+// normalizeOutputDir makes an export directory absolute. A relative value would resolve against the
+// engine's working directory, and one starting with "-" would reach ffmpeg as an option, not a path.
+func normalizeOutputDir(dir string) (string, error) {
+	if strings.ContainsRune(dir, 0) {
+		return "", fmt.Errorf("outputDir: invalid path")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("outputDir: %w", err)
+	}
+	return abs, nil
 }

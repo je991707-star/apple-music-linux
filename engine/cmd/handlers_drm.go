@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -61,10 +60,10 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	go func() {
-		// Use context.Background: r.Context() is cancelled the moment the 202
-		// response is written, which would abort the login mid-flight.
-		// Authentication is long-running; progress arrives via SSE instead.
-		if err := s.dm.Authenticate(context.Background(), drm.Credentials{
+		// Not r.Context(): that is cancelled the moment the 202 response is written,
+		// which would abort the login mid-flight. The server's shutdown context still
+		// ends it on exit. Progress arrives via SSE.
+		if err := s.dm.Authenticate(s.shutdownCtx, drm.Credentials{
 			Email:    req.Email,
 			Password: req.Password,
 		}); err != nil {

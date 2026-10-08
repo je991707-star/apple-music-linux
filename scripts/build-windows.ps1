@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   1. libdrm_client.dll      mingw32-make -C drm            (drm_linux.c + libcrypto)
-  2. engine.exe             go build (CGO, widevine_backend tag, libvlc)
+  2. engine.exe             go build (CGO, adamplay_backend tag, libvlc)
   3. runtime DLLs           libcrypto and its MSYS2 UCRT64 dependencies
   4. VLC runtime subset     libvlc.dll, libvlccore.dll and the audio-side plugins
   5. renderer bundles       verified present (committed; Linux CI checks they are fresh)
@@ -76,7 +76,7 @@ $env:CGO_CFLAGS = "-I$($Link -replace '\\','/')/inc"
 $env:CGO_LDFLAGS = "-L$($Link -replace '\\','/')/vlc -L$($Link -replace '\\','/')/drm"
 Push-Location "$Repo\engine"
 try {
-    go build -tags widevine_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
+    go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
     if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
 } finally { Pop-Location }
 

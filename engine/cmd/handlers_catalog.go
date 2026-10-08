@@ -73,7 +73,8 @@ func (s *APIServer) handleCatalogArtist(w http.ResponseWriter, r *http.Request) 
 // catalogIDRe matches Apple catalog/library IDs and storefront codes. These
 // values are interpolated into amp-api URL paths, so anything else ("../",
 // "?", "#") is rejected rather than forwarded with the user's bearer token.
-var catalogIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// The first character may not be a dot, which also rejects the "." and ".." path segments.
+var catalogIDRe = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$`)
 
 // catalogParams resolves the storefront (query → session → "us") and validates
 // both it and the {id} path value, writing a 400 when either is malformed.

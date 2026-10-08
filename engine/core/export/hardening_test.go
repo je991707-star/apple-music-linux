@@ -95,3 +95,18 @@ func TestArtworkDownloadIsBoundedAndCancellable(t *testing.T) {
 		t.Fatal("cancelling the job did not stop the artwork download")
 	}
 }
+
+func TestNormalizeOutputDirIsAlwaysAbsolute(t *testing.T) {
+	for _, in := range []string{"-y", "-i/evil", "relative/dir", "../up", ".", "/already/abs", "/a/../b"} {
+		got, err := normalizeOutputDir(in)
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if !filepath.IsAbs(got) {
+			t.Errorf("normalizeOutputDir(%q) = %q, want an absolute path", in, got)
+		}
+	}
+	if _, err := normalizeOutputDir("a\x00b"); err == nil {
+		t.Error("a path containing a NUL byte must be refused")
+	}
+}

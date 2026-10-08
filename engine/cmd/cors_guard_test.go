@@ -19,7 +19,8 @@ func TestCORSGuard(t *testing.T) {
 		{"main process, no origin", "POST", "127.0.0.1:20025", "", http.StatusTeapot},
 		{"localhost host", "GET", "localhost:20025", "", http.StatusTeapot},
 		{"ipv6 loopback", "GET", "[::1]:20025", "", http.StatusTeapot},
-		{"local dev origin", "GET", "127.0.0.1:20025", "http://localhost:5173", http.StatusTeapot},
+		{"own loopback origin", "GET", "127.0.0.1:20025", "http://127.0.0.1:20025", http.StatusTeapot},
+		{"other local web app", "GET", "127.0.0.1:20025", "http://localhost:5173", http.StatusForbidden},
 		{"preflight allowed", "OPTIONS", "127.0.0.1:20025", "https://music.apple.com", http.StatusNoContent},
 		{"cross-site simple POST", "POST", "127.0.0.1:20025", "https://attacker.example", http.StatusForbidden},
 		{"localhost prefix spoof", "POST", "127.0.0.1:20025", "http://localhost.attacker.example", http.StatusForbidden},
@@ -131,5 +132,15 @@ func TestCircuitBreakerStates(t *testing.T) {
 	cb.RecordSuccess()
 	if cb.State() != "closed" {
 		t.Fatal("success must close")
+	}
+}
+
+func TestAllowLocalOriginsOptIn(t *testing.T) {
+	t.Setenv("ADAM_ALLOW_LOCAL_ORIGINS", "1")
+	if !isAllowedOrigin("http://localhost:5173") {
+		t.Fatal("opt-in must allow any loopback port")
+	}
+	if isAllowedOrigin("http://localhost.attacker.example") {
+		t.Fatal("opt-in must still reject lookalike hosts")
 	}
 }

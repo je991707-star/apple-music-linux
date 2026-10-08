@@ -280,6 +280,13 @@ func parseSOFABlob(raw []byte) (*sofaIRData, int, error) {
 	sr := int(int32(binary.LittleEndian.Uint32(raw[12:])))
 	off := 16
 
+	// Dimensions come from a SOFA file that may be user-supplied. Bound them before they
+	// size an allocation: a crafted header would otherwise overflow the length check and
+	// ask the runtime for gigabytes, which is a fatal out-of-memory, not a recoverable error.
+	const maxMeasurements, maxIRLen = 1 << 16, 1 << 16
+	if M <= 0 || N <= 0 || sr <= 0 || M > maxMeasurements || N > maxIRLen {
+		return nil, 0, fmt.Errorf("hrtf: implausible sofa dimensions (M=%d N=%d sr=%d)", M, N, sr)
+	}
 	want := M*2*N*8 + M*2*8
 	if len(raw) < off+want {
 		return nil, 0, fmt.Errorf("hrtf: blob too short (have %d, need %d)", len(raw), off+want)

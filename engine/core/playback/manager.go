@@ -231,7 +231,7 @@ func openKey(req OpenRequest) string {
 // Concurrent calls for the same (assetID, storefront, capabilities) key are
 // deduplicated: the second caller waits for the first to finish and receives
 // the same Session, preventing orphaned DRM sessions.
-func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
+func (m *Manager) Open(ctx context.Context, req OpenRequest) (sess *Session, err error) {
 	if req.Private {
 		return m.openDirect(ctx, req, "")
 	}
@@ -268,12 +268,20 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 		m.inflight[key] = fl
 		m.inflightMu.Unlock()
 
-		// We are the leader: open the session, then signal all waiters.
+		// We are the leader: open the session, then signal all waiters. The cleanup is
+		// deferred so a panic in the provider cannot leave the flight registered (every
+		// later Open of this asset would join it and never return) or waiters blocked.
+		defer func() {
+			if r := recover(); r != nil {
+				fl.sess, fl.err = nil, fmt.Errorf("open %s: panic: %v", req.AssetID, r)
+				sess, err = nil, fl.err // without this the caller would get (nil, nil)
+			}
+			close(fl.done)
+			m.inflightMu.Lock()
+			delete(m.inflight, key)
+			m.inflightMu.Unlock()
+		}()
 		fl.sess, fl.err = m.openDirect(ctx, req, key)
-		close(fl.done)
-		m.inflightMu.Lock()
-		delete(m.inflight, key)
-		m.inflightMu.Unlock()
 		return fl.sess, fl.err
 	}
 }

@@ -65,6 +65,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.vlcGate.set(req.SessionID)
 	// If a specific start position was requested, seek there after VLC reaches
 	// playing state. SetTime is async and polls until VLC is ready.
 	if req.StartMs > 0 {
@@ -99,10 +100,13 @@ func (s *APIServer) handleVLCTime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	posMs, lengthMs, state := s.vlcPlayer.Time()
+	volume, muted := s.vlcPlayer.Volume()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"posMs":    posMs,
 		"lengthMs": lengthMs,
 		"state":    state,
+		"volume":   volume, // live mixer state, from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
+		"muted":    muted,
 	})
 }
 
@@ -120,6 +124,10 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[vlc seek] API recv posMs=%d sessionId=%s", req.PosMs, req.SessionID)
+	if !s.vlcGate.owns(req.SessionID) {
+		http.Error(w, "session does not own the player", http.StatusConflict)
+		return
+	}
 
 	// SetTime seeks within the currently loaded HTTP media. The audio endpoint
 	// serves the full cached ALAC file with Accept-Ranges, so libvlc can issue a
@@ -136,6 +144,7 @@ func (s *APIServer) handleVLCStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
 		return
 	}
+	s.vlcGate.clear()
 	s.vlcPlayer.Stop()
 	w.WriteHeader(http.StatusOK)
 }

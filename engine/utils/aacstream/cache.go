@@ -332,7 +332,7 @@ func WarmCache() {
 // SetCacheMaxBytes overrides the default cache size limit.
 // Call before any downloads begin.
 func SetCacheMaxBytes(n int64) {
-	segmentCache.maxBytes.Store(n)
+	segmentCache.maxBytes.Store(max(n, 0)) // 0 disables; a negative would half-enable it
 }
 
 // ── MV video segment cache ────────────────────────────────────────────────────
@@ -349,7 +349,7 @@ func PutCachedMVSegment(url string, data []byte) {
 
 // SetMVCacheMaxBytes sets the MV cache capacity. Pass 0 to disable.
 func SetMVCacheMaxBytes(n int64) {
-	mvSegmentCache.maxBytes.Store(n)
+	mvSegmentCache.maxBytes.Store(max(n, 0)) // 0 disables; a negative would half-enable it
 }
 
 // MVCacheStats returns hit/miss counts for the MV segment cache.

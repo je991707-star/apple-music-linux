@@ -163,7 +163,33 @@ func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs,
 	isH264 := func(v Variant) bool {
 		return strings.Contains(strings.ToLower(v.Codecs), "avc1")
 	}
-	// Prefer H.264 (avc1) — HEVC software decode fails on most Linux/Electron setups.
+	isHEVC := func(v Variant) bool {
+		lc := strings.ToLower(v.Codecs)
+		return strings.Contains(lc, "hvc1") || strings.Contains(lc, "hev1")
+	}
+	// Find the highest H.264 height available. When the caller requests above that
+	// ceiling, Apple's HEVC-only variants (e.g. 4K at 3840×1920) are the only option.
+	maxH264Height := 0
+	for _, v := range sorted {
+		if isH264(v) {
+			if h := heightOf(v); h > maxH264Height {
+				maxH264Height = h
+			}
+		}
+	}
+	if maxHeight > maxH264Height && maxH264Height > 0 {
+		// Above the H.264 ceiling — prefer HEVC at or below maxHeight.
+		for _, v := range sorted {
+			if !isHEVC(v) {
+				continue
+			}
+			h := heightOf(v)
+			if h > maxH264Height && h <= maxHeight {
+				return v.URL, v.Codecs, v.Resolution, nil
+			}
+		}
+	}
+	// Prefer H.264 (avc1) — HEVC hardware decode is not universal on Linux.
 	// Two-pass: H.264 first, HEVC fallback.
 	for _, preferH264 := range []bool{true, false} {
 		anyParseable := false
@@ -210,20 +236,15 @@ func (m *Master) SelectByCodec(codec string) string {
 // VideoHeights returns the unique, sorted set of video heights the quality menu
 // may offer — i.e. those SelectVideoVariantWithCodec will actually deliver.
 //
-// Only H.264-reachable heights count. SelectVideoVariantWithCodec's first pass
-// returns the highest-bandwidth avc1 variant at or below maxHeight and only falls
-// back to HEVC when the playlist has NO avc1 variant at all. So listing an
-// HEVC-only height would hand back a *lower-resolution* H.264 stream and make the
-// menu lie about what is playing. Variants with no CODECS attribute are counted:
-// they cannot be ruled out, and dropping them would hide real quality tiers.
+// H.264 heights are always included. HEVC-only heights above the highest H.264
+// height are also included: SelectVideoVariantWithCodec switches to HEVC when
+// maxHeight exceeds the H.264 ceiling, so those entries are genuinely selectable.
+// HEVC heights at or below the H.264 ceiling are excluded — the selector would
+// return a lower-resolution H.264 stream there and the menu would lie.
+// Variants with no CODECS attribute are counted: they cannot be ruled out.
 func (m *Master) VideoHeights() []int {
 	re := dimRe
-	seen := make(map[int]struct{})
-	for _, v := range m.Variants {
-		lc := strings.ToLower(v.Codecs)
-		if v.Codecs != "" && !strings.Contains(lc, "avc1") {
-			continue // HEVC or other: never selected while any H.264 variant exists
-		}
+	heightOf := func(v Variant) int {
 		h := 0
 		if v.Resolution != "" {
 			if parts := strings.SplitN(v.Resolution, "x", 2); len(parts) == 2 {
@@ -237,9 +258,40 @@ func (m *Master) VideoHeights() []int {
 				fmt.Sscanf(m2[2], "%d", &h)
 			}
 		}
-		if h > 0 {
-			seen[h] = struct{}{}
+		return h
+	}
+	// First pass: collect all H.264 heights and find the ceiling.
+	h264Heights := make(map[int]struct{})
+	maxH264 := 0
+	for _, v := range m.Variants {
+		lc := strings.ToLower(v.Codecs)
+		if v.Codecs != "" && !strings.Contains(lc, "avc1") {
+			continue
 		}
+		if h := heightOf(v); h > 0 {
+			h264Heights[h] = struct{}{}
+			if h > maxH264 {
+				maxH264 = h
+			}
+		}
+	}
+	// Second pass: collect HEVC heights strictly above the H.264 ceiling.
+	hevcAbove := make(map[int]struct{})
+	for _, v := range m.Variants {
+		lc := strings.ToLower(v.Codecs)
+		if !strings.Contains(lc, "hvc1") && !strings.Contains(lc, "hev1") {
+			continue
+		}
+		if h := heightOf(v); h > maxH264 {
+			hevcAbove[h] = struct{}{}
+		}
+	}
+	seen := make(map[int]struct{})
+	for h := range h264Heights {
+		seen[h] = struct{}{}
+	}
+	for h := range hevcAbove {
+		seen[h] = struct{}{}
 	}
 	out := make([]int, 0, len(seen))
 	for h := range seen {

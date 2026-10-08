@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -609,6 +610,16 @@ func (s *APIServer) handlePlaybackVsegInit(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// parseSeekSeconds parses a non-negative, finite seek time. ParseFloat alone accepts
+// "NaN" and "Inf", and NaN slips past a "< 0" check.
+func parseSeekSeconds(s string) (float64, bool) {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0, false
+	}
+	return v, true
+}
+
 // handlePlaybackVsegSeg serves fragment N.
 // Blocks until the fragment is fully written or the stream ends.
 func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request) {
@@ -854,9 +865,8 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	tStr := r.URL.Query().Get("t")
-	tSec, err := strconv.ParseFloat(tStr, 64)
-	if err != nil || tSec < 0 {
+	tSec, ok := parseSeekSeconds(r.URL.Query().Get("t"))
+	if !ok {
 		http.Error(w, "invalid t parameter", http.StatusBadRequest)
 		return
 	}
