@@ -5,7 +5,7 @@
  * Date: 2026-10-08
  *
  * Clean-room implementation.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  *
  * Protocol: POST JSON {"uri":…,"adamId":…} to buy.itunes.apple.com/itcs/key/get
  * Response: JSON {"ckc":"<base64>","ckcId":"…","expirationTime":…}

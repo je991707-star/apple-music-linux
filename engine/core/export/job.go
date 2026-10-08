@@ -10,7 +10,7 @@
 //     and writing files.  It knows nothing about HTTP or the TUI.
 //   - The caller (apiserver.go) is responsible for routing HTTP requests to the
 //     manager and forwarding events to SSE clients.
-//   - The client (apple-music-linux) is responsible for UX, download queue
+//   - The client (adam) is responsible for UX, download queue
 //     display, library browsing, and playback cache management.
 package export
 

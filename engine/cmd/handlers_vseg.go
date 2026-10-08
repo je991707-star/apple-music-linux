@@ -426,10 +426,10 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 }
 
 // directSeekEnabled reports whether fragment-level seeks may be used for this request.
-// AML_MV_DIRECT_SEEK=0 disables them globally; ?direct=0 disables one request (the
+// ADAM_MV_DIRECT_SEEK=0 disables them globally; ?direct=0 disables one request (the
 // player sets it after its own validation of the direct output failed).
 func directSeekEnabled(r *http.Request) bool {
-	return os.Getenv("AML_MV_DIRECT_SEEK") != "0" && r.URL.Query().Get("direct") != "0"
+	return os.Getenv("ADAM_MV_DIRECT_SEEK") != "0" && r.URL.Query().Get("direct") != "0"
 }
 
 // vsegCodecIsCopyable reports whether the stream's video can be handed to the browser

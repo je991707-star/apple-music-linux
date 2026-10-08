@@ -4,8 +4,8 @@
 // SQLite stores.
 //
 // Runtime: in-memory SQLite (modernc.org/sqlite) for fast indexed queries.
-// Persistence: AES-256-GCM encrypted JSON at ~/.cache/apple-music-linux/library.enc.
-// Key: 32-byte random key auto-generated at ~/.cache/apple-music-linux/library.key.
+// Persistence: AES-256-GCM encrypted JSON at ~/.cache/adam/library.enc.
+// Key: 32-byte random key auto-generated at ~/.cache/adam/library.key.
 //
 // Data is populated by the JS layer via Ingest() — MusicKit JS fetches from
 // Apple's API (handling auth internally) and POSTs the result to the engine.

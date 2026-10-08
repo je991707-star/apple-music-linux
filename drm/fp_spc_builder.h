@@ -5,7 +5,7 @@
  * Date: 2026-10-07
  * 
  * Clean-room implementation of FairPlay SPC construction.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  *
  * Based on specification: drm/CLEANROOM_IMPLEMENTATION_PROMPT.md v1.1
  *

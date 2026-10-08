@@ -12,7 +12,7 @@ import (
 func main() {
 	// Start the API server
 	cmd := exec.Command("go", "run", ".", "--api", "8080")
-	cmd.Dir = "/home/daksh/Git Projects/apple-music-linux"
+	cmd.Dir = "/home/daksh/Git Projects/adam"
 	if err := cmd.Start(); err != nil {
 		fmt.Printf("Failed to start API server: %v\n", err)
 		return

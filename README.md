@@ -1,10 +1,10 @@
 <div align="center">
 
-# Apple Music Linux
+# Adam
 
-[![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/silentone12725/adam?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/adam/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/adam/releases/latest)
 
 An Apple Music desktop client for Linux and Windows — lossless audio, music videos, downloads, and a native-feeling UI.
 
@@ -126,30 +126,30 @@ Three formats are available. They contain the same build.
 No dependencies, no root required for a user install.
 
 ```bash
-chmod +x apple-music-linux.run
-./apple-music-linux.run
+chmod +x adam.run
+./adam.run
 ```
 
-This installs to `~/.local/lib/apple-music-linux` and adds a launcher to `~/.local/bin`. A desktop entry and icon are registered automatically.
+This installs to `~/.local/lib/adam` and adds a launcher to `~/.local/bin`. A desktop entry and icon are registered automatically.
 
 **Other install options:**
 
 ```bash
-./apple-music-linux.run --system      # install system-wide to /opt/ (needs sudo)
-./apple-music-linux.run --force       # overwrite an existing installation
-./apple-music-linux.run --uninstall   # remove the installation
-./apple-music-linux.run --help        # show all options
+./adam.run --system      # install system-wide to /opt/ (needs sudo)
+./adam.run --force       # overwrite an existing installation
+./adam.run --uninstall   # remove the installation
+./adam.run --help        # show all options
 ```
 
-After install, launch from your app menu or run `apple-music-linux` in a terminal.
+After install, launch from your app menu or run `adam` in a terminal.
 
 ### Option B — AppImage (162 MB, portable)
 
 No install needed — just run it directly.
 
 ```bash
-chmod +x apple-music-linux.AppImage
-./apple-music-linux.AppImage
+chmod +x adam.AppImage
+./adam.AppImage
 ```
 
 [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) can integrate it into your app menu automatically on first run.
@@ -159,7 +159,7 @@ chmod +x apple-music-linux.AppImage
 > sudo apt install libfuse2   # Ubuntu/Debian
 > sudo dnf install fuse       # Fedora
 > ```
-> Or run without FUSE: `./apple-music-linux.AppImage --appimage-extract-and-run`
+> Or run without FUSE: `./adam.AppImage --appimage-extract-and-run`
 
 ### Option C — Flatpak (118 MB, experimental)
 
@@ -167,27 +167,27 @@ A single-file Flatpak bundle that runs in the Flatpak sandbox. You need `flatpak
 
 ```bash
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user apple-music-linux.flatpak
-flatpak run io.github.silentone12725.AppleMusicLinux
+flatpak install --user adam.flatpak
+flatpak run io.github.silentone12725.Adam
 ```
 
-It also appears in your app menu as **Apple Music**. To remove it: `flatpak uninstall --user io.github.silentone12725.AppleMusicLinux`.
+It also appears in your app menu as **Apple Music**. To remove it: `flatpak uninstall --user io.github.silentone12725.Adam`.
 
 Things to know:
-- It keeps its own settings and sign-in under `~/.var/app/io.github.silentone12725.AppleMusicLinux/`, separate from the other formats, so you sign in again.
+- It keeps its own settings and sign-in under `~/.var/app/io.github.silentone12725.Adam/`, separate from the other formats, so you sign in again.
 - Only one copy of the app can run at a time (the engine uses port 20025), so close the other formats first.
 - Wallpaper detection for the blur theme is limited by the sandbox; the software blur is used instead.
 - This is a self-hosted bundle, not a Flathub listing.
 
 ### Option D — Windows installer (experimental)
 
-`apple-music-linux-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine, the DRM library and an audio-only VLC. The app follows Windows conventions: settings in `%APPDATA%\apple-music-linux`, Mica window backdrop on Windows 11, and the same Apple Music pink default theme.
+`adam-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine, the DRM library and an audio-only VLC. The app follows Windows conventions: settings in `%APPDATA%\adam`, Mica window backdrop on Windows 11, and the same Apple Music pink default theme.
 
 Windows integration:
 
 - **Media controls** — the Windows media overlay, lock screen and hardware media keys show the current track and drive play/pause/next/previous/seek (SMTC).
 - **Taskbar** — thumbnail buttons (previous, play/pause, next), playback progress on the taskbar icon, and jump-list tasks.
-- **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `aml://` link handler.
+- **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `adam://` link handler.
 - **Discord Rich Presence** over the Windows named pipe.
 
 Not available on Windows yet: Cavern (Atmos JOC) rendering and the bundled FFmpeg (music-video remux and export use an `ffmpeg.exe` on `PATH` if present).
@@ -216,7 +216,7 @@ This authenticates the FairPlay layer. Without it, playback falls back to AAC 25
 2. Click **Sign In**, enter your Apple ID, and wait about 20 seconds for the backend to authenticate and fetch the key
 
 <div align="center">
-  <img src="assets/screenshots/engine_login.png" alt="AML Settings — Engine Account login" width="49%"/>
+  <img src="assets/screenshots/engine_login.png" alt="Adam Settings — Engine Account login" width="49%"/>
   <img src="assets/screenshots/Account_logged_in.png" alt="Account logged in" width="49%"/>
 </div>
 
@@ -226,8 +226,8 @@ The bundled FFmpeg (`third_party/ffmpeg`) is stored with [Git LFS](https://git-l
 
 ```bash
 git lfs install
-git clone https://github.com/silentone12725/apple-music-linux
-cd apple-music-linux/electron
+git clone https://github.com/silentone12725/adam
+cd adam/electron
 bash build.sh
 ```
 
@@ -249,9 +249,9 @@ sudo apt install vlc nodejs npm
 # CGO + the widevine_backend tag are required for DRM (lossless, hi-res, MVs);
 # without them the engine builds fine but silently falls back to AAC.
 # CGO's -L cannot take a path with spaces, hence the symlink.
-ln -sfT "$PWD/drm" /tmp/aml-drm
+ln -sfT "$PWD/drm" /tmp/adam-drm
 cd engine
-CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/aml-drm -Wl,-rpath,$ORIGIN' \
+CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/adam-drm -Wl,-rpath,$ORIGIN' \
   go build -tags widevine_backend -o ../electron/dist/resources/engine ./cmd
 cp ../drm/libdrm_client.so ../electron/dist/resources/
 ```
@@ -263,8 +263,8 @@ make -C drm libdrm_client.so   # DRM client library
 cd electron
 bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
-cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linux.run
-scripts/build-flatpak.sh                # Flatpak bundle → dist/apple-music-linux.flatpak (after one of the above)
+cd .. && scripts/build-installer.sh   # .run installer → dist/adam.run
+scripts/build-flatpak.sh                # Flatpak bundle → dist/adam.flatpak (after one of the above)
 ```
 
 ### Windows
@@ -295,11 +295,11 @@ scripts/build-installer.sh --clean # build the installer, then drop electron/dis
 ## Project structure
 
 ```
-apple-music-linux/
+adam/
 ├── electron/                  Desktop shell
 │   ├── main.mjs               Main process: window, IPC, MPRIS2, tray, themes, prefs,
 │   │                          Discord / Last.fm / ListenBrainz, engine lifecycle
-│   ├── preload.cjs            amlBridge: the IPC surface exposed to music.apple.com
+│   ├── preload.cjs            adamBridge: the IPC surface exposed to music.apple.com
 │   ├── miniplayer.html        Mini player window (with miniplayer-preload.cjs)
 │   ├── src/                   Renderer code injected into the Apple Music web player
 │   │   ├── engine-playback.js   Playback, queue, settings panel, theming, MSE and MV pipelines
@@ -338,7 +338,7 @@ apple-music-linux/
 ├── verification/              API schema, QA console, benchmark and test harnesses
 ├── releases/                  Release notes (one file per version)
 ├── assets/                    Screenshots and tray icon
-├── aml-custom.example.css     Template for the Custom CSS theme
+├── adam-custom.example.css     Template for the Custom CSS theme
 ├── CHANGELOG.md
 └── go.work                    Go workspace (engine module)
 ```

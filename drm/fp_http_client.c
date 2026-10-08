@@ -5,7 +5,7 @@
  * Date: 2026-10-08
  *
  * Clean-room implementation of Apple's streaming key delivery protocol.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  *
  * Protocol: POST JSON {"challenge":…,"key-system":"com.widevine.alpha",…}
  * to play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense
@@ -214,7 +214,7 @@ void fp_http_config_init(fp_http_config_t *config) {
     memset(config, 0, sizeof(fp_http_config_t));
 
     config->license_server_url = FP_LICENSE_SERVER_URL;
-    config->user_agent = "AppleMusicLinux/2.0 (Linux; x86_64)";
+    config->user_agent = "Adam/2.0 (Linux; x86_64)";
     config->timeout_seconds = FP_HTTP_TIMEOUT_SECONDS;
     config->max_retries = FP_HTTP_MAX_RETRIES;
     config->retry_backoff_ms = FP_HTTP_RETRY_BACKOFF_MS;

@@ -35,13 +35,13 @@ jobs:
         working-directory: electron
       - name: Build the installer
         env:
-          AML_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
-          AML_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+          ADAM_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
+          ADAM_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
         run: scripts/build-installer.sh
       - name: Build the AppImage
         env:
-          AML_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
-          AML_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+          ADAM_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
+          ADAM_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
         working-directory: electron
         run: npm run dist
       - name: Attach to a draft release
@@ -50,7 +50,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes-file "releases/${TAG}.md"
-          gh release upload "$TAG" dist/apple-music-linux.run electron/dist/apple-music-linux.AppImage --clobber
+          gh release upload "$TAG" dist/adam.run electron/dist/adam.AppImage --clobber
 
   package-windows:
     runs-on: windows-latest
@@ -86,4 +86,4 @@ jobs:
         run: |
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -ne 0) { gh release create $env:TAG --draft --title $env:TAG --notes-file "releases/$($env:TAG).md" }
-          gh release upload $env:TAG (Get-ChildItem electron\dist\apple-music-linux-setup-*.exe).FullName --clobber
+          gh release upload $env:TAG (Get-ChildItem electron\dist\adam-setup-*.exe).FullName --clobber

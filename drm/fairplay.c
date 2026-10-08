@@ -5,7 +5,7 @@
  * Date: 2026-10-07
  * 
  * Clean-room implementation of FairPlay DRM for Linux.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  */
 
 #define _POSIX_C_SOURCE 200809L

@@ -1,23 +1,20 @@
 package wv
 
 import (
+	"engine/internal/appdir"
 	"log/slog"
 	"os"
 	"path/filepath"
 )
 
 // IdentityDir is where an operator-supplied Widevine device identity is read
-// from: $AML_WIDEVINE_DIR, else <user config dir>/apple-music-linux/widevine.
+// from: $ADAM_WIDEVINE_DIR, else <user config dir>/adam/widevine.
 // It holds device_private_key (PEM) and device_client_id_blob (raw bytes).
 func IdentityDir() string {
-	if d := os.Getenv("AML_WIDEVINE_DIR"); d != "" {
+	if d := os.Getenv("ADAM_WIDEVINE_DIR"); d != "" {
 		return d
 	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(base, "apple-music-linux", "widevine")
+	return filepath.Join(appdir.Config(), "widevine")
 }
 
 // InitConstants loads the device identity from IdentityDir when both files are

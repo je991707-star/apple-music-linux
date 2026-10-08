@@ -21,5 +21,5 @@ gcc -Wall -Wextra -std=c11 -D_GNU_SOURCE -o "$TMP/https_fetch_test" "$HERE/https
     -I"$TMP/drm" -L"$TMP/drm" -ldrm_client -Wl,-rpath,"$TMP/drm"
 
 mkdir "$TMP/cookies"
-SSL_CERT_FILE="$TMP/cert.pem" AML_HTTPS_TIMEOUT_SEC=2 \
+SSL_CERT_FILE="$TMP/cert.pem" ADAM_HTTPS_TIMEOUT_SEC=2 \
     "$TMP/https_fetch_test" "$PORT" "$TMP/cookies" 2>"$TMP/client.log" || { tail -30 "$TMP/client.log" >&2; exit 1; }

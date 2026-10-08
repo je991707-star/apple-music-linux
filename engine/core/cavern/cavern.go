@@ -47,7 +47,7 @@ const (
 const minimalSaveDat = "2\n0\n-30\nFalse\n0\n30\nFalse\n0\n10\n7\n10\nTrue\n"
 
 // IsAvailable reports whether CavernPipeServer is available.
-// It checks $AML_CAVERN first, then PATH.
+// It checks $ADAM_CAVERN first, then PATH.
 func IsAvailable() bool { return cavernBinary() != "" }
 
 // cavernBinary returns the path to the CavernPipeServer binary.
@@ -55,7 +55,7 @@ func cavernBinary() string {
 	if runtime.GOOS == "windows" {
 		return "" // the Cavern bridge is a Unix socket; Windows binaural uses the FFmpeg path
 	}
-	if env := os.Getenv("AML_CAVERN"); env != "" {
+	if env := os.Getenv("ADAM_CAVERN"); env != "" {
 		return env
 	}
 	p, _ := exec.LookPath("CavernPipeServer")

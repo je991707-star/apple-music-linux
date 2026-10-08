@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"engine/internal/appdir"
 	"fmt"
 	"io"
 	"log"
@@ -70,7 +71,7 @@ var (
 )
 
 // GetHRTFSet returns a cached HRTFSet. Detection priority:
-//  1. ~/.config/aml/hrtf.wav — user-provided 14-ch HeSuVi WAV (multich mode)
+//  1. ~/.config/adam/hrtf.wav — user-provided 14-ch HeSuVi WAV (multich mode)
 //  2. /usr/share/libmysofa/MIT_KEMAR_normal_pinna.sofa — extracted per-channel (stereo mode)
 //  3. nil, nil — crossfeed fallback; callers handle this case
 func GetHRTFSet() (*HRTFSet, error) {
@@ -108,11 +109,7 @@ func GetHRTFSet() (*HRTFSet, error) {
 
 // customHRTFPath returns the user-provided HRTF WAV path if it exists.
 func customHRTFPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	p := filepath.Join(home, ".config", "aml", "hrtf.wav")
+	p := filepath.Join(appdir.Config(), "hrtf.wav")
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
@@ -137,13 +134,9 @@ func wavSampleRate(path string) (int, error) {
 	return int(sr), nil
 }
 
-// hrtfCacheDir returns (creating if needed) ~/.cache/aml/hrtf/.
+// hrtfCacheDir returns (creating if needed) ~/.cache/adam/hrtf/.
 func hrtfCacheDir() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
-	}
-	dir := filepath.Join(base, "aml", "hrtf")
+	dir := filepath.Join(appdir.Cache(), "hrtf")
 	return dir, os.MkdirAll(dir, 0o755)
 }
 
@@ -255,7 +248,7 @@ sys.stdout.buffer.write(ir.tobytes())                 # M*2*N float64, C-order
 sys.stdout.buffer.write(pos[:, :2].astype(np.float64).tobytes())  # M*2 float64
 `
 	// Write helper script to a temp file.
-	sf, err := os.CreateTemp("", "aml_sofa_*.py")
+	sf, err := os.CreateTemp("", "adam_sofa_*.py")
 	if err != nil {
 		return nil, 0, err
 	}

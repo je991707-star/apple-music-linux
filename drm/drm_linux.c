@@ -10,7 +10,7 @@
  *   3. Return account credentials read from drm/files/.
  *
  * Clean-room implementation.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  */
 
 #define _POSIX_C_SOURCE 200809L

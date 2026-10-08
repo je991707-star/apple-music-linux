@@ -1,6 +1,6 @@
-var _amlSSEMod = (() => {
+var _adamSSEMod = (() => {
   // src/engine-sse.js
-  var ENGINE = window._amlEngineURL || "https://127.0.0.1:20025";
+  var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
   var EngineSSE = class {
     constructor(base) {
       this._base = base;
@@ -60,7 +60,7 @@ var _amlSSEMod = (() => {
         try {
           fn(data);
         } catch (e) {
-          console.error("[AML SSE] handler error:", e);
+          console.error("[Adam SSE] handler error:", e);
         }
       });
     }
@@ -77,12 +77,12 @@ var _amlSSEMod = (() => {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         this._connected = true;
         this._retryDelay = 1e3;
-        console.log("[AML SSE] Connected");
+        console.log("[Adam SSE] Connected");
         this._dispatch("sse.open", {});
         await this._parseStream(resp.body);
       } catch (e) {
         if (e.name === "AbortError") return;
-        console.warn("[AML SSE] Disconnected:", e.message);
+        console.warn("[Adam SSE] Disconnected:", e.message);
       }
       this._connected = false;
       this._scheduleReconnect();
@@ -155,8 +155,8 @@ var _amlSSEMod = (() => {
         this._retryTimer = null;
         this._connect();
       }, delay);
-      if (delay > 1500) console.log(`[AML SSE] Reconnecting in ${Math.round(delay)}ms`);
+      if (delay > 1500) console.log(`[Adam SSE] Reconnecting in ${Math.round(delay)}ms`);
     }
   };
-  window._amlEngine = new EngineSSE(ENGINE);
+  window._adamEngine = new EngineSSE(ENGINE);
 })();

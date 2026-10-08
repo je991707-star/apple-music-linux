@@ -4,11 +4,12 @@ import path from 'path';
 import os from 'os';
 import net from 'net';
 import { execFile } from 'child_process';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, statSync } from 'fs';
 
 export const IS_WIN = process.platform === 'win32';
 export const IS_LINUX = process.platform === 'linux';
 
-// Directory that holds the `apple-music-linux` config folder. Windows: %APPDATA%. Inside a
+// Directory that holds the `adam` config folder. Windows: %APPDATA%. Inside a
 // Flatpak the real ~/.config is invisible and XDG_CONFIG_HOME is the app's own directory.
 export function configRoot(plat = process.platform, env = process.env, home = os.homedir()) {
     if (plat === 'win32') return env.APPDATA || path.join(home, 'AppData', 'Roaming');
@@ -98,3 +99,55 @@ export function isPortFree(port, host = '127.0.0.1') {
 // A YAML double-quoted scalar. JSON string syntax is a subset of it, so backslashes in Windows
 // paths and any quotes are escaped correctly.
 export const yamlStr = (v) => JSON.stringify(String(v));
+
+// ── Migration from the app's earlier names ───────────────────────────────────
+
+const LEGACY_DIR_NAMES = ['apple-music-linux', 'aml'];
+
+function isDir(p) { try { return statSync(p).isDirectory(); } catch { return false; } }
+
+// Move src into dst without overwriting: rename the whole directory when dst is absent,
+// otherwise entry by entry (recursing into directories present on both sides).
+function mergeDir(src, dst) {
+    if (!isDir(src)) return;
+    if (!existsSync(dst)) {
+        try { mkdirSync(path.dirname(dst), { recursive: true }); renameSync(src, dst); return; } catch { /* fall through */ }
+    }
+    try { mkdirSync(dst, { recursive: true, mode: 0o700 }); } catch { return; }
+    let names = [];
+    try { names = readdirSync(src); } catch { return; }
+    for (const n of names) {
+        const s = path.join(src, n), d = path.join(dst, n);
+        if (!existsSync(d)) { try { renameSync(s, d); } catch { /* leave it */ } }
+        else if (isDir(s) && isDir(d)) mergeDir(s, d);
+    }
+    try { rmdirSync(src); } catch { /* not empty: something could not move */ }
+}
+
+// Fold the config directories earlier versions used into `<root>/<name>`, and give the
+// `aml-*` files inside it their new `adam-*` names.
+export function migrateLegacyConfig(root, name = 'adam', legacy = LEGACY_DIR_NAMES) {
+    const dir = path.join(root, name);
+    for (const old of legacy) mergeDir(path.join(root, old), dir);
+    let names = [];
+    try { names = readdirSync(dir); } catch { return dir; }
+    for (const n of names) {
+        if (!/^aml-/.test(n)) continue;
+        const to = path.join(dir, 'adam-' + n.slice(4));
+        if (!existsSync(to)) { try { renameSync(path.join(dir, n), to); } catch { /* ignore */ } }
+    }
+    return dir;
+}
+
+// Keys the encrypted store used before the rename: aml_x -> adam_x.
+export function migrateStoreKeys(store) {
+    let changed = false;
+    for (const k of Object.keys(store)) {
+        if (!k.startsWith('aml_')) continue;
+        const n = 'adam_' + k.slice(4);
+        if (!(n in store)) store[n] = store[k];
+        delete store[k];
+        changed = true;
+    }
+    return changed;
+}

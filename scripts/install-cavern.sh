@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Cavern JOC Installer for Apple Music Linux ==="
+echo "=== Cavern JOC Installer for Adam ==="
 echo ""
 
 # ── Detect package manager ─────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ sudo install -m 755 "$BINARY" /usr/local/bin/CavernPipeServer
 if command -v CavernPipeServer &>/dev/null; then
     echo "Verified: CavernPipeServer is in PATH"
 else
-    echo "WARNING: /usr/local/bin is not in PATH. Add it or set AML_CAVERN=/usr/local/bin/CavernPipeServer"
+    echo "WARNING: /usr/local/bin is not in PATH. Add it or set ADAM_CAVERN=/usr/local/bin/CavernPipeServer"
 fi
 
 # ── Clean up ───────────────────────────────────────────────────────────────────

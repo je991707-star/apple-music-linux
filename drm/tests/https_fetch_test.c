@@ -1,6 +1,6 @@
 /* Exercises drm_https_fetch and the cookie jar against https_server.py.
  * Usage: https_fetch_test PORT COOKIE_DIR
- * Needs SSL_CERT_FILE=<server cert> and AML_HTTPS_TIMEOUT_SEC=2. */
+ * Needs SSL_CERT_FILE=<server cert> and ADAM_HTTPS_TIMEOUT_SEC=2. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

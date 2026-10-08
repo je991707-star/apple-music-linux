@@ -5,7 +5,7 @@
  * Date: 2026-10-07
  * 
  * Clean-room implementation of FairPlay DRM client for Linux.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  *
  * This header defines the high-level DRM client API for:
  * - License acquisition

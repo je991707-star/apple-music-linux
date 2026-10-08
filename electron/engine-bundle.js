@@ -191,11 +191,20 @@
   }
 
   // src/engine-playback.js
-  if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
-  window.__amlEngineInjected = true;
-  var ENGINE = window._amlEngineURL || "https://127.0.0.1:20025";
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!/^aml[-_]/.test(k)) continue;
+      const n = "adam" + k.slice(3);
+      if (localStorage.getItem(n) === null) localStorage.setItem(n, localStorage.getItem(k));
+      localStorage.removeItem(k);
+    }
+  } catch (_) {
+  }
+  if (window.__adamEngineInjected) throw new Error("[Adam] double-injection guard");
+  window.__adamEngineInjected = true;
+  var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
   var ENGINE_HTTPS = ENGINE;
-  var _AML_DEBUG = !!(window.amlBridge?.isDev || window.amlBridge?.debug) || localStorage.getItem("_AML_DEBUG") === "1";
+  var _ADAM_DEBUG = !!(window.adamBridge?.isDev || window.adamBridge?.debug) || localStorage.getItem("_ADAM_DEBUG") === "1";
   var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
   var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
   var _TIMINGS = {
@@ -216,7 +225,7 @@
     if (mode === _powerMode) return;
     if (_isCharging === true && mode !== "full") return;
     _powerMode = mode;
-    console.log(`[AML Power] mode=${mode} (floor=${_sysPowerFloor ?? "none"})`);
+    console.log(`[Adam Power] mode=${mode} (floor=${_sysPowerFloor ?? "none"})`);
     if (_vlcMode && _vlcPollTimer) {
       const a = getMKAudio();
       if (a) startVLCPoll(a);
@@ -241,7 +250,7 @@
     }
     if (_sysPowerFloor !== _lastLoggedFloor) {
       _lastLoggedFloor = _sysPowerFloor;
-      console.log(`[AML Power] sys profile=${profile} \u2192 floor=${_sysPowerFloor ?? "none"}`);
+      console.log(`[Adam Power] sys profile=${profile} \u2192 floor=${_sysPowerFloor ?? "none"}`);
     }
     _recomputePowerMode();
   }
@@ -258,7 +267,7 @@
     _isCharging = true;
   });
   (function _pollSysPowerProfile() {
-    const fetch2 = () => window.amlBridge?.getPowerProfile().then(_applySysPowerProfile).catch(() => {
+    const fetch2 = () => window.adamBridge?.getPowerProfile().then(_applySysPowerProfile).catch(() => {
     });
     fetch2();
     document.addEventListener("visibilitychange", () => {
@@ -281,7 +290,7 @@
             try {
               cb();
             } catch (err) {
-              console.warn("[AML DOM] watcher threw:", err);
+              console.warn("[Adam DOM] watcher threw:", err);
             }
           }
         });
@@ -311,23 +320,23 @@
       requestAnimationFrame(probe);
     }, 3e3);
   })();
-  if (window._amlDebug) (function installAudioCapture() {
+  if (window._adamDebug) (function installAudioCapture() {
     const CAP_LIMIT = 64 * 1024 * 1024;
-    window.__amlCapture = {
+    window.__adamCapture = {
       chunks: [],
       // {n, path, size, b64, boxes, bufBefore, bufAfter, grew, t}
       totalBytes: 0,
       enabled: true
     };
-    window.__amlParseMp4 = mp4ParseBoxes;
-    window.__amlCaptureChunk = function(path, n, value, bufBefore, bufAfter, grew) {
-      if (!window.__amlCapture.enabled) return;
+    window.__adamParseMp4 = mp4ParseBoxes;
+    window.__adamCaptureChunk = function(path, n, value, bufBefore, bufAfter, grew) {
+      if (!window.__adamCapture.enabled) return;
       const bytes = value instanceof Uint8Array ? value : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       const HEADER = 8192;
       const slice = bytes.slice(0, HEADER);
       const hex = Array.from(slice).map((b) => b.toString(16).padStart(2, "0")).join("");
-      const boxes = window.__amlParseMp4(bytes);
-      window.__amlCapture.chunks.push({
+      const boxes = window.__adamParseMp4(bytes);
+      window.__adamCapture.chunks.push({
         n,
         path,
         size: value.byteLength,
@@ -340,11 +349,11 @@
         grew,
         t: Date.now()
       });
-      window.__amlCapture.totalBytes += value.byteLength;
+      window.__adamCapture.totalBytes += value.byteLength;
     };
-    window.__amlDrainCapture = function() {
-      const out = window.__amlCapture.chunks.slice();
-      window.__amlCapture.chunks = [];
+    window.__adamDrainCapture = function() {
+      const out = window.__adamCapture.chunks.slice();
+      window.__adamCapture.chunks = [];
       return out;
     };
   })();
@@ -372,7 +381,7 @@
   var _directPlayAdamId = null;
   var _directPlayGen = 0;
   var _directPlayPromise = null;
-  var _amlNextRef = null;
+  var _adamNextRef = null;
   var _iframePlay = (() => {
     try {
       const ifr = document.createElement("iframe");
@@ -392,13 +401,13 @@
   var _vlcPosMs = 0;
   var _vlcPaused = false;
   var _vlcVolPersist = 100;
-  var _amlTransitioning = false;
+  var _adamTransitioning = false;
   var _sessionContainers = [];
   var _sessionContainerIdx = -1;
   var _sessionItemIdx = -1;
-  var _amlNavInternal = false;
-  var _amlPendingCI = -1;
-  var _amlPendingII = -1;
+  var _adamNavInternal = false;
+  var _adamPendingCI = -1;
+  var _adamPendingII = -1;
   var _itemTypes = /* @__PURE__ */ new Map();
   function _recordItemTypes(mkItems) {
     for (const it of mkItems ?? []) {
@@ -510,7 +519,7 @@
   function _slBuildOverlay() {
     if (_slOverlay) return;
     const el = document.createElement("div");
-    el.id = "aml-lyrics-overlay";
+    el.id = "adam-lyrics-overlay";
     el.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:99998;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.86);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);transition:opacity 0.35s;opacity:0;overflow:hidden;font-family:-apple-system,SF Pro Display,system-ui,sans-serif;box-sizing:border-box;";
     const closeBtn = document.createElement("div");
     closeBtn.innerHTML = _svgCloseLg;
@@ -523,7 +532,7 @@
     };
     closeBtn.onclick = () => _slHide();
     const inner = document.createElement("div");
-    inner.id = "aml-sl-inner";
+    inner.id = "adam-sl-inner";
     inner.style.cssText = "width:100%;max-width:700px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:80px 32px 48px;box-sizing:border-box;overflow-y:auto;max-height:100%;scroll-behavior:smooth;scrollbar-width:none;";
     el.append(closeBtn, inner);
     document.body.appendChild(el);
@@ -531,7 +540,7 @@
   }
   function _slRenderLines(lines) {
     if (!_slOverlay) _slBuildOverlay();
-    const c = _slOverlay.querySelector("#aml-sl-inner");
+    const c = _slOverlay.querySelector("#adam-sl-inner");
     c.innerHTML = "";
     _slLinesEls = [];
     _slWordEls = [];
@@ -619,7 +628,7 @@
     const gen = ++_slGen;
     _slStop();
     if (_slLinesEls.length && _slOverlay) {
-      _slOverlay.querySelector("#aml-sl-inner").innerHTML = "";
+      _slOverlay.querySelector("#adam-sl-inner").innerHTML = "";
       _slLinesEls = [];
       _slWordEls = [];
     }
@@ -730,7 +739,7 @@
   function _warnIfOurSourceCleared(el, how) {
     if (!_activeMs || _activeMs.readyState === "closed" || !_ourBlobUrl) return;
     if (how.startsWith("src=") && how !== 'src=""') return;
-    console.warn("[AML MSE] our MediaSource is being detached by " + how + "\n" + (() => {
+    console.warn("[Adam MSE] our MediaSource is being detached by " + how + "\n" + (() => {
       const l = Error.stackTraceLimit;
       Error.stackTraceLimit = 30;
       const st = (new Error().stack || "").split("\n").slice(2, 22).join("\n");
@@ -739,8 +748,8 @@
     })());
   }
   function blockAppleCDN() {
-    if (window.__amlCDNBlocked) return;
-    window.__amlCDNBlocked = true;
+    if (window.__adamCDNBlocked) return;
+    window.__adamCDNBlocked = true;
     const desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src");
     _nativeSrcSet = desc.set;
     _nativeCTSet = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime").set;
@@ -749,11 +758,11 @@
       get: desc.get,
       set(val) {
         if (isAppleCDN(val) && !_allowCDNTransition) {
-          console.log("[AML Engine] Blocked CDN src:", val.slice(0, 80));
+          console.log("[Adam Engine] Blocked CDN src:", val.slice(0, 80));
           return;
         }
         if (isAppleCDN(val) && _allowCDNTransition) {
-          console.log("[AML Engine] CDN src THROUGH (gate open):", val.slice(0, 80));
+          console.log("[Adam Engine] CDN src THROUGH (gate open):", val.slice(0, 80));
         }
         if (_allowCDNTransition && val !== void 0) {
           console.log('[AUDIO-SRC] gate-open src set \u2192 "' + String(val).slice(0, 60) + '"');
@@ -777,7 +786,7 @@
       if (name === "src" && isAppleCDN(val) && !_allowCDNTransition) return;
       return realSetAttr.call(this, name, val);
     };
-    console.log("[AML Engine] Apple CDN audio blocked");
+    console.log("[Adam Engine] Apple CDN audio blocked");
     _guardSourceBufferMethods();
   }
   var _proxyInstalled = false;
@@ -792,7 +801,7 @@
     });
     mkAudio.play = () => {
       if (_vlcMode) {
-        console.log(`[AML VLC] audio.play() \u2192 resume`);
+        console.log(`[Adam VLC] audio.play() \u2192 resume`);
         _vlcPaused = false;
         const p2 = new Promise((resolve) => _resolvers.push(resolve));
         mkAudio.dispatchEvent(new Event("playing"));
@@ -823,18 +832,18 @@
       });
       return p;
     };
-    console.log("[AML Engine] Play proxy installed");
+    console.log("[Adam Engine] Play proxy installed");
   }
   function installMKSeekInterceptor(mk) {
-    if (mk.__amlSeekIntercepted) return;
-    mk.__amlSeekIntercepted = true;
+    if (mk.__adamSeekIntercepted) return;
+    mk.__adamSeekIntercepted = true;
     const _origSeek = mk.seekToTime.bind(mk);
     mk.seekToTime = async function(seekSec) {
       const audio = getMKAudio();
       if (_vlcMode) {
         _vlcPosMs = Math.round(seekSec * 1e3);
         _vlcSeekFrozen = true;
-        console.log(`[AML VLC] seekToTime(${seekSec.toFixed(3)})  target=${_vlcPosMs}ms  debounce-reset`);
+        console.log(`[Adam VLC] seekToTime(${seekSec.toFixed(3)})  target=${_vlcPosMs}ms  debounce-reset`);
         if (audio) {
           audio.dispatchEvent(new Event("seeking"));
           audio.dispatchEvent(new Event("seeked"));
@@ -845,7 +854,7 @@
           _vlcSeekTimer = null;
           const seekTarget = _vlcPosMs;
           _vlcSeekTargetMs = seekTarget;
-          console.log(`[AML VLC seek] \u25BA SEND  posMs=${seekTarget}ms  wasPlaying=${_vlcWasPlaying}  uiPos=${_vlcPosMs}ms`);
+          console.log(`[Adam VLC seek] \u25BA SEND  posMs=${seekTarget}ms  wasPlaying=${_vlcWasPlaying}  uiPos=${_vlcPosMs}ms`);
           let actualStartMs = seekTarget;
           try {
             const t0 = performance.now();
@@ -857,10 +866,10 @@
             const rtt = (performance.now() - t0).toFixed(0);
             const seekData = await seekResp.json().catch(() => ({}));
             actualStartMs = seekData.actualStartMs ?? seekTarget;
-            console.log(`[AML VLC seek] \u25C4 RECV  target=${seekTarget}ms  engine.actualStart=${actualStartMs}ms  rtt=${rtt}ms`);
+            console.log(`[Adam VLC seek] \u25C4 RECV  target=${seekTarget}ms  engine.actualStart=${actualStartMs}ms  rtt=${rtt}ms`);
             _vlcPosMs = seekTarget;
           } catch (e) {
-            console.warn(`[AML VLC seek] \u2717 ERROR`, e);
+            console.warn(`[Adam VLC seek] \u2717 ERROR`, e);
           }
           _vlcSeekOffsetMs = 0;
           _vlcPrevState = null;
@@ -872,14 +881,14 @@
             fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
             });
           }
-          console.log(`[AML VLC seek] \u21BA UNFREEZE  uiPos=${_vlcPosMs}ms  postSeek=${_vlcPostSeek}`);
-          window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3, seeked: true });
+          console.log(`[Adam VLC seek] \u21BA UNFREEZE  uiPos=${_vlcPosMs}ms  postSeek=${_vlcPostSeek}`);
+          window.adamBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3, seeked: true });
         }, T().debounce);
       } else if (_activeMvControls) {
         _activeMvControls.seekTo(seekSec);
       } else {
         if (!_mvGateOpen) {
-          console.log(`[AML MV] seek blocked \u2014 A/V gate not open yet (seekSec=${seekSec.toFixed(2)})`);
+          console.log(`[Adam MV] seek blocked \u2014 A/V gate not open yet (seekSec=${seekSec.toFixed(2)})`);
           return;
         }
         _ourSeekPending = true;
@@ -887,7 +896,7 @@
         if (audio) _nativeCTSet.call(audio, seekSec);
       }
     };
-    console.log("[AML Engine] MK seek interceptor installed");
+    console.log("[Adam Engine] MK seek interceptor installed");
   }
   function getMKAudio() {
     return document.getElementById("apple-music-player") || document.querySelector("audio") || null;
@@ -902,12 +911,12 @@
     if (_vlcMode) return;
     if (_activeMvControls) {
       if (_activeMvControls.paused) return;
-      window.amlBridge?.mprisUpdate?.({ position: Math.round(_activeMvControls.currentTime * 1e3) * 1e3 });
+      window.adamBridge?.mprisUpdate?.({ position: Math.round(_activeMvControls.currentTime * 1e3) * 1e3 });
       return;
     }
     const a = getMKAudio();
     if (!a || a.paused || !Number.isFinite(a.currentTime) || a.currentTime <= 0) return;
-    window.amlBridge?.mprisUpdate?.({ position: Math.round(a.currentTime * 1e3) * 1e3 });
+    window.adamBridge?.mprisUpdate?.({ position: Math.round(a.currentTime * 1e3) * 1e3 });
   }, 1e3);
   function waitForMusicKit() {
     return new Promise((resolve) => {
@@ -972,8 +981,8 @@
     "background:linear-gradient(to right,",
     "#fff var(--progress,0%),",
     "rgba(255,255,255,.26) var(--progress,0%),",
-    "rgba(255,255,255,.26) var(--aml-buffer,var(--progress,0%)),",
-    "rgba(255,255,255,.12) var(--aml-buffer,var(--progress,0%))",
+    "rgba(255,255,255,.26) var(--adam-buffer,var(--progress,0%)),",
+    "rgba(255,255,255,.12) var(--adam-buffer,var(--progress,0%))",
     ")!important}"
   ].join("");
   var PLAY_STATE = Object.freeze({
@@ -992,12 +1001,12 @@
   function setPlayState(next, ctx) {
     const prev = _playState;
     _playState = next;
-    if (prev !== next) console.log(`[AML State] ${prev} \u2192 ${next}${ctx ? " | " + ctx : ""}`);
+    if (prev !== next) console.log(`[Adam State] ${prev} \u2192 ${next}${ctx ? " | " + ctx : ""}`);
   }
   function genStale(myGen) {
     return myGen !== _generation;
   }
-  var _mvMaxHeight = parseInt(localStorage.getItem("aml-mv-quality") || "1080", 10);
+  var _mvMaxHeight = parseInt(localStorage.getItem("adam-mv-quality") || "1080", 10);
   var _mvVideoHeights = [];
   var _losslessSVG = `<svg viewBox="0 0 69 44" xmlns="http://www.w3.org/2000/svg" style="height:12px;width:auto;display:block;flex-shrink:0"><path d="M36.8269026,4 C42.3794214,4 45.7184513,10.5183153 48.20334,17.4261699 L48.4450486,18.1066712 L48.6815356,18.788389 L48.9130884,19.4700271 C49.6770268,21.7405814 50.36352,23.9882073 51.0204784,25.9968947 C52.5296562,19.7123189 51.7381954,18.3629096 53.3551269,18.3629096 C53.9565751,18.3629096 54.5652965,18.7717786 54.5652965,19.5168498 C54.5652965,19.8184059 54.0740356,23.0143253 53.391361,26.2165815 L53.2651959,26.7982368 L53.1352128,27.3761743 C52.9156151,28.3341623 52.6817778,29.2605867 52.4420448,30.075084 C59.3914285,48.2833991 64.5514879,24.299737 65.134561,19.3973484 C65.2196627,18.6903693 65.7520794,18.3629223 66.2903224,18.3629223 C67.0092304,18.3629223 67.5985395,18.9043683 67.4862017,19.7191497 C66.2419581,27.647702 64.3284002,40 56.4607867,40 C52.1189889,40 49.6781873,36.6024859 47.7506208,32.7092263 C46.4116896,30.0790205 45.2734117,26.952661 44.2263394,23.8087368 L43.9767371,23.0541028 C43.8940827,22.8026091 43.811956,22.5512479 43.7303009,22.3002645 L43.4866946,21.5486922 C41.1040436,14.1741911 39.0830717,7.34159293 35.9851696,7.34159293 C34.4711899,7.34159293 33.3487598,8.92234593 33.2709954,8.92234593 C33.128169,8.92234593 33.0160746,8.27828447 31.602332,6.51365955 C32.9478242,4.97723054 34.8023002,4 36.8269026,4 Z M11.0614865,4.01937104 C23.4500006,4.01937104 24.5519172,36.7070003 31.5633281,36.7070003 C32.3865195,36.7070003 33.2738509,36.2079668 34.2437613,35.0776923 C34.7806086,35.9871115 35.3308882,36.7945268 35.9004521,37.5054184 C34.500923,39.1028534 32.7595403,39.9988275 30.578884,39.9988275 C22.7448451,39.9977315 19.3788608,26.8790797 16.4819088,18.0220558 C15.7996486,20.8631751 15.4455023,23.434387 15.3068631,24.5887478 C15.2208267,25.3223111 14.6831215,25.6566526 14.1414468,25.6566526 C13.5407541,25.6566526 12.9351571,25.2454896 12.9351571,24.5116332 C12.9351571,24.4569356 12.9385248,24.4004537 12.9455035,24.3422131 C13.346708,21.4307464 14.1551865,17.0196557 15.0604448,13.9441978 C13.8554484,10.7869356 12.3503425,7.33621492 10.1329104,7.33621492 C5.65625092,7.33621492 3.09261157,18.5867088 2.37169324,24.5887478 C2.28565683,25.3223111 1.74795163,25.6566526 1.20627691,25.6566526 C0.605597004,25.6566526 0,25.2454896 0,24.5116332 C0,24.4569356 0.00336770017,24.4004537 0.0103463944,24.3422131 C0.114233957,23.5883333 0.225608359,22.8207923 0.346678477,22.046953 L0.452878843,21.3822914 C0.470991821,21.2713147 0.48931555,21.1602523 0.50785647,21.0491258 L0.621759807,20.3817689 C2.0405473,12.2570738 4.68538356,4.01937104 11.0614865,4.01937104 Z M23.9155499,4.00146557 C26.1404345,4.00146557 28.5270839,5.15921632 30.5844926,7.87545613 C30.6994554,8.00734485 31.8526558,9.79953527 32.2166235,10.4208612 C33.474197,12.6992201 34.5694223,15.4837436 35.5796467,18.378952 L35.8413062,19.1364745 C38.7427747,27.6177062 40.980016,36.7463669 44.4650259,36.7463669 C45.2911112,36.7463669 46.1873164,36.2334422 47.1790849,35.0773864 C47.7158553,35.9867291 48.2660581,36.794068 48.835558,37.5049086 C47.4394606,39.099438 45.6989231,39.9988275 43.5140667,39.9988275 C31.1995909,39.9969924 29.8609621,7.32900175 23.0764932,7.32900175 C21.5454317,7.32900175 20.4138588,8.92244789 20.3357358,8.92244789 C20.1928455,8.92244789 20.0806102,8.27846289 18.6670468,6.51397816 C20.048649,4.9358122 21.9168263,4.00146557 23.9155499,4.00146557 Z" fill="white" fill-rule="nonzero"/></svg>`;
   var _svgPlaySm = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-left:1px"><path d="M6.483 21.466c.22 0 .432-.035.635-.107.203-.072.428-.179.674-.322L20.578 13.609c.438-.253.759-.498.963-.735.204-.237.305-.523.305-.859 0-.332-.101-.617-.305-.856-.204-.239-.525-.485-.963-.738L7.792 3c-.246-.142-.471-.25-.674-.324-.203-.073-.415-.11-.635-.11-.424 0-.777.153-1.058.458-.281.305-.422.723-.422 1.252v15.486c0 .53.141.946.422 1.249.281.304.634.455 1.058.455z" fill-rule="nonzero"/></svg>`;
@@ -1069,10 +1078,10 @@
     _slotBadgeRetry = setTimeout(() => _insertBadgeIntoSlot(badge, attempt + 1), delay);
   }
   function _buildQualityPopup() {
-    let pop = document.getElementById("aml-quality-popup");
+    let pop = document.getElementById("adam-quality-popup");
     if (!pop) {
       pop = document.createElement("div");
-      pop.id = "aml-quality-popup";
+      pop.id = "adam-quality-popup";
       Object.assign(pop.style, {
         position: "fixed",
         zIndex: "1000002",
@@ -1134,7 +1143,7 @@
       }, 80);
     }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
-    let badge = document.getElementById("aml-quality-badge");
+    let badge = document.getElementById("adam-quality-badge");
     let color, isHiRes = false, isSpatial = false, label = "";
     if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural") {
       color = "#bf5af2";
@@ -1146,13 +1155,13 @@
       label = isHiRes ? "HI-RES" : "";
     } else {
       if (badge) badge.style.display = "none";
-      document.getElementById("aml-quality-popup")?.style && (document.getElementById("aml-quality-popup").style.display = "none");
-      window.amlBridge?.mprisUpdate?.({ qualityBadge: null });
+      document.getElementById("adam-quality-popup")?.style && (document.getElementById("adam-quality-popup").style.display = "none");
+      window.adamBridge?.mprisUpdate?.({ qualityBadge: null });
       return;
     }
     if (!badge) {
       badge = document.createElement("div");
-      badge.id = "aml-quality-badge";
+      badge.id = "adam-quality-badge";
       badge.style.cssText = 'display:inline-flex;align-items:center;gap:3px;border-radius:3px;padding:1px 4px;cursor:pointer;z-index:9999;white-space:nowrap;font-size:7.5px;font-weight:700;letter-spacing:.07em;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;transition:opacity 0.12s;';
       badge.addEventListener("mouseenter", () => {
         badge.style.opacity = "0.75";
@@ -1160,14 +1169,14 @@
       badge.addEventListener("mouseleave", () => {
         badge.style.opacity = "1";
         setTimeout(() => {
-          const pop = document.getElementById("aml-quality-popup");
+          const pop = document.getElementById("adam-quality-popup");
           if (pop) pop.style.display = "none";
         }, 200);
       });
       badge.addEventListener("click", (e) => {
         e.stopImmediatePropagation();
         e.stopPropagation();
-        const pop = document.getElementById("aml-quality-popup");
+        const pop = document.getElementById("adam-quality-popup");
         if (pop && pop.style.display !== "none") {
           pop.style.display = "none";
         } else {
@@ -1175,7 +1184,7 @@
         }
       }, true);
       document.addEventListener("click", () => {
-        const pop = document.getElementById("aml-quality-popup");
+        const pop = document.getElementById("adam-quality-popup");
         if (pop) pop.style.display = "none";
       }, true);
       badge.style.flexShrink = "0";
@@ -1193,7 +1202,7 @@
     }
     badge.style.display = "inline-flex";
     window._syncNpBadge?.();
-    window.amlBridge?.mprisUpdate?.({ qualityBadge: { codec, sampleRate, bitDepth, spatialAudio } });
+    window.adamBridge?.mprisUpdate?.({ qualityBadge: { codec, sampleRate, bitDepth, spatialAudio } });
   }
   (function() {
     let _npBadge = null;
@@ -1239,15 +1248,15 @@
       return `-${m}:${s.toString().padStart(2, "0")}`;
     }
     function _attach(scrubber) {
-      if (document.getElementById("aml-np-badge")) return;
+      if (document.getElementById("adam-np-badge")) return;
       const sr = scrubber.shadowRoot;
       if (!sr) return;
       _npBadge = document.createElement("div");
-      _npBadge.id = "aml-np-badge";
+      _npBadge.id = "adam-np-badge";
       _npBadge.style.cssText = "display:none;align-items:center;gap:5px;padding:3.5px 7px;border-radius:5px;font-size:11px;font-weight:500;letter-spacing:0em;line-height:1;white-space:nowrap;user-select:none;cursor:pointer;color:rgba(255,255,255,0.65);background:rgba(255,255,255,0.08);transition:opacity 0.12s;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:2;";
       _npBadge.addEventListener("click", (e) => {
         e.stopPropagation();
-        const pop = document.getElementById("aml-quality-popup");
+        const pop = document.getElementById("adam-quality-popup");
         if (pop && pop.style.display !== "none") {
           pop.style.display = "none";
         } else {
@@ -1260,7 +1269,7 @@
       _npBadge.addEventListener("mouseleave", () => {
         _npBadge.style.opacity = "1";
         setTimeout(() => {
-          const pop = document.getElementById("aml-quality-popup");
+          const pop = document.getElementById("adam-quality-popup");
           if (pop) pop.style.display = "none";
         }, 200);
       });
@@ -1369,10 +1378,10 @@
     if (typeof streamUrlOrResp === "string") {
       resp = await fetch(streamUrlOrResp, { signal });
       if (!resp.ok) throw new Error(`Engine stream ${resp.status}`);
-      console.log(`[AML Engine] Stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+      console.log(`[Adam Engine] Stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
     } else {
       resp = streamUrlOrResp;
-      console.log(`[AML Engine] Stream open (seek) +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+      console.log(`[Adam Engine] Stream open (seek) +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
     }
     const reader = resp.body.getReader();
     let chunks = 0;
@@ -1381,7 +1390,7 @@
         if (signal.aborted) throw new Error("aborted");
         const { done, value } = await reader.read();
         if (done) {
-          console.log(`[AML Engine] Stream done (${chunks} chunks) +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+          console.log(`[Adam Engine] Stream done (${chunks} chunks) +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
           break;
         }
         chunks++;
@@ -1406,7 +1415,7 @@
         }
         ms.endOfStream();
         _streamComplete = true;
-        console.log(`[AML Engine] Stream complete +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+        console.log(`[Adam Engine] Stream complete +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
         try {
           delete audio.load;
         } catch (_) {
@@ -1478,18 +1487,18 @@
         try {
           sb.appendBuffer(chunk);
         } catch (e) {
-          if (e.name === "QuotaExceededError") console.warn("[AML MSE] cache re-inject quota exceeded");
+          if (e.name === "QuotaExceededError") console.warn("[Adam MSE] cache re-inject quota exceeded");
           return;
         }
       }
       await _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec);
     } catch (e) {
-      if (!pipeCtrl.signal.aborted) console.error("[AML MSE] cache re-inject error:", e.message);
+      if (!pipeCtrl.signal.aborted) console.error("[Adam MSE] cache re-inject error:", e.message);
     }
   }
   function _mseCacheSeek(sb, audio, ms, seekSec) {
     if (Math.abs(_seekTarget - seekSec) < 0.5) {
-      console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s \u2192 cache guard`);
+      console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 cache guard`);
       return;
     }
     _seekTarget = seekSec;
@@ -1508,7 +1517,7 @@
     }
     _pipeCtrl = new AbortController();
     const pipeCtrl = _pipeCtrl;
-    console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s \u2192 cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
+    console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
     _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec).catch(() => {
     });
     try {
@@ -1532,7 +1541,7 @@
       _streamComplete = false;
     }
     if (Math.abs(_seekTarget - seekSec) < 0.5) {
-      console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s \u2192 guard`);
+      console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 guard`);
       return;
     }
     _seekTarget = seekSec;
@@ -1547,11 +1556,11 @@
     try {
       resp = await fetch(seekUrl, { signal: AbortSignal.any([mySeekCtrl.signal, _abortCtrl?.signal].filter(Boolean)) });
     } catch (e) {
-      if (e.name !== "AbortError") console.warn("[AML MSE] Seek fetch error:", e.message);
+      if (e.name !== "AbortError") console.warn("[Adam MSE] Seek fetch error:", e.message);
       return;
     }
     if (!resp.ok) {
-      console.warn(`[AML MSE] Seek ${resp.status} \u2014 not seekable`);
+      console.warn(`[Adam MSE] Seek ${resp.status} \u2014 not seekable`);
       return;
     }
     if (_abortCtrl?.signal.aborted || _seekFetchCtrl !== mySeekCtrl) {
@@ -1559,7 +1568,7 @@
       return;
     }
     const actualStart = parseFloat(resp.headers.get("X-Actual-Start") ?? seekSec);
-    console.log(`[AML MSE] Seek \u2192 ${seekSec.toFixed(2)}s (actual=${actualStart.toFixed(2)}s)`);
+    console.log(`[Adam MSE] Seek \u2192 ${seekSec.toFixed(2)}s (actual=${actualStart.toFixed(2)}s)`);
     if (_pipeCtrl) {
       _pipeCtrl.abort();
       _pipeCtrl = null;
@@ -1596,7 +1605,7 @@
     _pipeCtrl = new AbortController();
     const pipeCtrl = _pipeCtrl;
     pipeToSourceBuffer(sb, audio, resp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch((e) => {
-      if (!pipeCtrl.signal.aborted) console.error("[AML MSE] Seek pipe error:", e.message);
+      if (!pipeCtrl.signal.aborted) console.error("[Adam MSE] Seek pipe error:", e.message);
     });
     audio.addEventListener("canplay", () => {
       if (pipeCtrl.signal.aborted) return;
@@ -1605,17 +1614,17 @@
       } catch (_) {
       }
       _seekTarget = -Infinity;
-      console.log(`[AML MSE] Seek ready \u2014 req=${seekSec.toFixed(2)}s actual=${actualStart.toFixed(2)}s ct=${audio.currentTime.toFixed(2)}s`);
-      if (wasPlaying) _nativePlay().catch((e) => console.warn("[AML MSE] seek play():", e));
+      console.log(`[Adam MSE] Seek ready \u2014 req=${seekSec.toFixed(2)}s actual=${actualStart.toFixed(2)}s ct=${audio.currentTime.toFixed(2)}s`);
+      if (wasPlaying) _nativePlay().catch((e) => console.warn("[Adam MSE] seek play():", e));
     }, { once: true });
   }
   async function mseSeekToTime(seekSec, audio, sb, ms) {
     if (ms.readyState === "closed") return;
     const bufferedRanges = Array.from({ length: sb.buffered.length }, (_, i) => `[${sb.buffered.start(i).toFixed(1)},${sb.buffered.end(i).toFixed(1)}]`).join(" ");
-    console.log(`[AML MSE] seekToTime(${seekSec.toFixed(2)}) ct=${audio.currentTime.toFixed(2)} buffered=${bufferedRanges || "(empty)"} seekable=${_seekable}`);
+    console.log(`[Adam MSE] seekToTime(${seekSec.toFixed(2)}) ct=${audio.currentTime.toFixed(2)} buffered=${bufferedRanges || "(empty)"} seekable=${_seekable}`);
     for (let i = 0; i < sb.buffered.length; i++) {
       if (seekSec >= sb.buffered.start(i) - 1 && seekSec < sb.buffered.end(i) + 1) {
-        console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s \u2192 native (buffered)`);
+        console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 native (buffered)`);
         _seekTarget = -Infinity;
         const wasPlaying = !audio.paused;
         audio.addEventListener("seeked", () => {
@@ -1630,7 +1639,7 @@
       return;
     }
     if (!_seekable) {
-      console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s \u2192 not seekable`);
+      console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 not seekable`);
       return;
     }
     await _mseNetworkSeek(sb, audio, ms, seekSec);
@@ -1664,7 +1673,7 @@
   }
   async function startMVPipeline() {
     const _mvGen = _generation;
-    console.log(`[AML MV-V] enter gen=${_mvGen} session=${_sessionId} t=${Date.now()}`);
+    console.log(`[Adam MV-V] enter gen=${_mvGen} session=${_sessionId} t=${Date.now()}`);
     _mvGateOpen = false;
     const containerPromise = getMVContainer(_abortCtrl.signal);
     const myVid = document.createElement("video");
@@ -1674,18 +1683,18 @@
     const mkAudio = document.createElement("audio");
     mkAudio.style.display = "none";
     document.body.appendChild(mkAudio);
-    mkAudio.addEventListener("error", () => console.error(`[AML MV-A] mkAudio error code=${mkAudio.error?.code} msg=${mkAudio.error?.message}`));
+    mkAudio.addEventListener("error", () => console.error(`[Adam MV-A] mkAudio error code=${mkAudio.error?.code} msg=${mkAudio.error?.message}`));
     let ms = new MediaSource();
     let msBlobUrl = URL.createObjectURL(ms);
     myVid.src = msBlobUrl;
     let mvContainer;
     try {
       mvContainer = await containerPromise;
-      console.log(`[AML MV] container found ${mvContainer.offsetWidth}\xD7${mvContainer.offsetHeight}`);
+      console.log(`[Adam MV] container found ${mvContainer.offsetWidth}\xD7${mvContainer.offsetHeight}`);
       mvContainer.style.setProperty("pointer-events", "none", "important");
       mvContainer.style.setProperty("cursor", "wait", "important");
     } catch (e) {
-      console.warn("[AML MV] MV container not found, aborting:", e.message);
+      console.warn("[Adam MV] MV container not found, aborting:", e.message);
       myVid.src = "";
       if (myVid.parentNode) myVid.parentNode.removeChild(myVid);
       if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
@@ -1697,24 +1706,24 @@
     const avpShadow = avp?.shadowRoot;
     const vcDiv = avpShadow?.querySelector("#video-container");
     const nativeVidEl = avpShadow?.querySelector("#apple-music-video-player") ?? avpShadow?.querySelector("video");
-    console.log(`[AML MV-V] shadow traversal: avpi=${!!avpi} avp=${!!avp} avpShadow=${!!avpShadow} vcDiv=${!!vcDiv} nativeVidEl=${!!nativeVidEl} nativeVidEl.id=${nativeVidEl?.id} nativeVidEl.src="${nativeVidEl?.src?.slice(0, 60)}"`);
+    console.log(`[Adam MV-V] shadow traversal: avpi=${!!avpi} avp=${!!avp} avpShadow=${!!avpShadow} vcDiv=${!!vcDiv} nativeVidEl=${!!nativeVidEl} nativeVidEl.id=${nativeVidEl?.id} nativeVidEl.src="${nativeVidEl?.src?.slice(0, 60)}"`);
     if (nativeVidEl) {
       const _vidRef = nativeVidEl;
       Function.prototype.call = function(ctx, ...args) {
         if (this === _nativePauseRef && ctx === _vidRef) {
-          console.warn("[AML MV] intercepted savedPause.call(nativeVidEl) \u2014 counter-pause blocked. Stack:", new Error().stack.split("\n").slice(1, 4).join(" | "));
+          console.warn("[Adam MV] intercepted savedPause.call(nativeVidEl) \u2014 counter-pause blocked. Stack:", new Error().stack.split("\n").slice(1, 4).join(" | "));
           return;
         }
         return Reflect.apply(_origFnCall, this, [ctx, ...args]);
       };
       Function.prototype.apply = function(ctx, args) {
         if (this === _nativePauseRef && ctx === _vidRef) {
-          console.warn("[AML MV] intercepted savedPause.apply(nativeVidEl) \u2014 counter-pause blocked.");
+          console.warn("[Adam MV] intercepted savedPause.apply(nativeVidEl) \u2014 counter-pause blocked.");
           return;
         }
         return Reflect.apply(_origFnApply, this, [ctx, args]);
       };
-      console.log("[AML MV] Function.prototype.call/apply intercept installed for counter-pause");
+      console.log("[Adam MV] Function.prototype.call/apply intercept installed for counter-pause");
     }
     const _origReqFS = Element.prototype.requestFullscreen;
     Element.prototype.requestFullscreen = function(opts) {
@@ -1745,7 +1754,7 @@
     let _wcBufferedSec = 0;
     let _wcParsedSec = 0;
     let _wcVW = 0, _wcVH = 0;
-    console.log("%c[AML MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _vsegVideo ? "vseg" : _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
+    console.log("%c[Adam MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _vsegVideo ? "vseg" : _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
     const _nativeVidStopEvt = (e) => e.stopImmediatePropagation();
     if (nativeVidEl) {
       ["waiting", "stalled", "suspend"].forEach(
@@ -1962,7 +1971,7 @@
     let _abortReason = "unknown";
     const _abortMV = (reason) => {
       _abortReason = reason;
-      console.log(`[AML MV] abort: ${reason}`);
+      console.log(`[Adam MV] abort: ${reason}`);
       _abortCtrl?.abort();
     };
     const onExitClick = (e) => {
@@ -1976,12 +1985,12 @@
       exitBtn.style.setProperty("pointer-events", "auto", "important");
       exitBtn.addEventListener("click", onExitClick);
     }
-    if (!document.querySelector("#aml-sfpro-style")) {
+    if (!document.querySelector("#adam-sfpro-style")) {
       fetch(`${ENGINE}/fonts/SF-Pro.ttf`).then((r) => r.ok ? r.blob() : null).then((b) => {
         if (!b) return;
         const url = URL.createObjectURL(b);
         const s = document.createElement("style");
-        s.id = "aml-sfpro-style";
+        s.id = "adam-sfpro-style";
         s.textContent = `@font-face{font-family:'SF Pro';src:url('${url}')format('truetype');font-weight:100 900;font-style:normal;}`;
         document.head.appendChild(s);
       }).catch(() => {
@@ -2031,7 +2040,7 @@
     const _checkSVG = `<svg width="11" height="9" viewBox="0 0 11 9" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 4.5L4 7.5L10 1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     const _activeTint = () => {
       try {
-        const v = getComputedStyle(document.documentElement).getPropertyValue("--aml-accent-active").trim();
+        const v = getComputedStyle(document.documentElement).getPropertyValue("--adam-accent-active").trim();
         if (v) return v;
       } catch (_) {
       }
@@ -2112,7 +2121,7 @@
       opt.addEventListener("click", (e) => {
         e.stopPropagation();
         _mvMaxHeight = height;
-        localStorage.setItem("aml-mv-quality", String(height));
+        localStorage.setItem("adam-mv-quality", String(height));
         _qualitySpanEl.textContent = _qualityLabel();
         _qualityMenu.querySelectorAll("button").forEach((b, i) => {
           b.querySelector("span").innerHTML = _qualityOptions[i].height === _mvMaxHeight ? _checkSVG : "";
@@ -2222,9 +2231,9 @@
     const scrubberEl = footerEls[0]?.querySelector("amp-playback-controls-progress") ?? footerRow?.querySelector("amp-playback-controls-progress");
     const scrubberShadow = scrubberEl?.shadowRoot;
     const rangeInput = scrubberShadow?.querySelector("#playback-progress") ?? scrubberShadow?.querySelector("input[type=range]");
-    if (scrubberShadow && !scrubberShadow.getElementById("aml-buf-style")) {
+    if (scrubberShadow && !scrubberShadow.getElementById("adam-buf-style")) {
       const st = document.createElement("style");
-      st.id = "aml-buf-style";
+      st.id = "adam-buf-style";
       st.textContent = _BUF_BAR_CSS;
       scrubberShadow.appendChild(st);
     }
@@ -2265,7 +2274,7 @@
         if (_wcVideo) {
           mkAudio.currentTime = t;
         } else if (_nativeVideo && _nativeSeekRef) {
-          console.log(`[AML MV native] commit seek \u2192 ${t.toFixed(2)}s`);
+          console.log(`[Adam MV native] commit seek \u2192 ${t.toFixed(2)}s`);
           _nativeSeekRef(t);
         }
       };
@@ -2534,7 +2543,7 @@
           if (vBuf && vBuf.length > 0)
             bFrac = Math.min(1, Math.max(0, vBuf.end(vBuf.length - 1) / max));
         }
-        rangeInput.style.setProperty("--aml-buffer", _fillPct(bFrac).toFixed(2) + "%");
+        rangeInput.style.setProperty("--adam-buffer", _fillPct(bFrac).toFixed(2) + "%");
       }
       if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
       if (timeRemain) timeRemain.textContent = "-" + _fmtTime(max - t);
@@ -2545,7 +2554,7 @@
         rangeInput.value = "0";
         rangeInput.style.setProperty("--progress", "0%");
         rangeInput.style.setProperty("--width", "0%");
-        rangeInput.style.setProperty("--aml-buffer", "0%");
+        rangeInput.style.setProperty("--adam-buffer", "0%");
         if (timeElapsed) timeElapsed.textContent = _fmtTime(0);
         if (timeRemain) timeRemain.textContent = "--:--";
       } catch (_) {
@@ -2553,7 +2562,7 @@
     };
     _mvResetScrubberRef = _resetScrubberToLoading;
     const _seekSyncInterval = setInterval(_updateProgress, T().poll);
-    console.log(`[AML MV-V] myVid created in mvContainer; nativeVidEl readyState=${nativeVidEl?.readyState}`);
+    console.log(`[Adam MV-V] myVid created in mvContainer; nativeVidEl readyState=${nativeVidEl?.readyState}`);
     const audioMs = new MediaSource();
     const audioBlobUrl = URL.createObjectURL(audioMs);
     _nativeSrcSet.call(mkAudio, audioBlobUrl);
@@ -2564,7 +2573,7 @@
         audioMs.addEventListener("sourceopen", resolve, { once: true });
       });
     } catch (e) {
-      console.warn(`[AML MV-V] audio MSE sourceopen failed: ${e.message}`);
+      console.warn(`[Adam MV-V] audio MSE sourceopen failed: ${e.message}`);
       if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
       return;
     }
@@ -2613,7 +2622,7 @@
             }
           } else {
             if (!videoEl.paused) {
-              console.warn("[AML MV buf:waiting] video escaped pause \u2014 re-pausing");
+              console.warn("[Adam MV buf:waiting] video escaped pause \u2014 re-pausing");
               videoEl.pause();
             }
             if (lead === 0) {
@@ -2622,7 +2631,7 @@
               for (let i = 0; i < videoEl.buffered.length; i++) {
                 const s = videoEl.buffered.start(i);
                 if (s > ct && s - ct < 15) {
-                  console.log(`[AML MV buf:gap-snap] ct=${ct.toFixed(2)} \u2192 ${s.toFixed(2)} (gap=${(s - ct).toFixed(2)}s)`);
+                  console.log(`[Adam MV buf:gap-snap] ct=${ct.toFixed(2)} \u2192 ${s.toFixed(2)} (gap=${(s - ct).toFixed(2)}s)`);
                   videoEl.currentTime = s;
                   snapped = true;
                   break;
@@ -2631,7 +2640,7 @@
               if (!snapped && videoEl.buffered.length > 0) {
                 const bufEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
                 if (ct > bufEnd && ct - bufEnd < 30 && Date.now() - _bufWaitStart > 8e3) {
-                  console.warn(`[AML MV buf:ahead-snap] ct=${ct.toFixed(2)} ahead of bufEnd=${bufEnd.toFixed(2)} \u2014 re-seeking`);
+                  console.warn(`[Adam MV buf:ahead-snap] ct=${ct.toFixed(2)} ahead of bufEnd=${bufEnd.toFixed(2)} \u2014 re-seeking`);
                   _bufWaitStart = Date.now();
                   _mvVideoSeek(ct).catch(() => {
                   });
@@ -2642,12 +2651,12 @@
               _pipeRestarted = true;
               const restartAt = videoEl.currentTime;
               _ignoreSeekUntil = Date.now() + 8e3;
-              console.warn(`[AML MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s \u2014 restarting pipe`);
+              console.warn(`[Adam MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s \u2014 restarting pipe`);
               pipeCtrl = new AbortController();
               _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
             }
             if (Date.now() - _bufWaitStart > 45e3) {
-              console.warn(`[AML MV buf:timeout] stalled ${((Date.now() - _bufWaitStart) / 1e3).toFixed(0)}s \u2014 restarting session`);
+              console.warn(`[Adam MV buf:timeout] stalled ${((Date.now() - _bufWaitStart) / 1e3).toFixed(0)}s \u2014 restarting session`);
               _abortMV("buf-timeout");
               return;
             }
@@ -2655,13 +2664,13 @@
         } else if (videoEl.paused && lead < BUF_LOW && pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted) {
           if (!_pipeRestarted) {
             _pipeRestarted = true;
-            console.warn(`[AML MV buf:recover] pipe dead + starved at ct=${videoEl.currentTime.toFixed(2)}s \u2014 restarting pipe`);
+            console.warn(`[Adam MV buf:recover] pipe dead + starved at ct=${videoEl.currentTime.toFixed(2)}s \u2014 restarting pipe`);
             pipeCtrl = new AbortController();
             _startVideoPipe(`${videoUrl}?t=${videoEl.currentTime.toFixed(3)}`);
             _iframePlay.call(videoEl).catch(() => {
             });
           } else {
-            console.warn("[AML MV buf:recover] pipe restart did not recover \u2014 aborting session");
+            console.warn("[Adam MV buf:recover] pipe restart did not recover \u2014 aborting session");
             _abortMV("pipe-dead");
           }
         } else {
@@ -2672,11 +2681,11 @@
             _bufWaitStart = Date.now();
             videoEl.pause();
             mkAudio.muted = true;
-            console.warn(`[AML MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s \u2192 pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"}`);
+            console.warn(`[Adam MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s \u2192 pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"}`);
           } else {
             if (lead >= BUF_HIGH) _pipeRestarted = false;
             if (videoEl.paused && !_userPaused) {
-              console.warn(`[AML MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s \u2014 retrying play`);
+              console.warn(`[Adam MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s \u2014 retrying play`);
               _iframePlay.call(videoEl).catch(() => {
               });
             } else {
@@ -2693,16 +2702,16 @@
       if (exitBtn) exitBtn.style.removeProperty("pointer-events");
       _mvGateOpen = true;
       if (_vsegVideo || _wcVideo || _nativeVideo) {
-        _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV] audio play rejected:", e.message));
+        _iframePlay.call(mkAudio).catch((e) => console.warn("[Adam MV] audio play rejected:", e.message));
         return;
       }
       const audCt = mkAudio.currentTime;
       const vidCt = videoEl.currentTime;
       const vidBufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
       const canSyncToAudio = Math.abs(vidCt - audCt) > 0.05 && audCt <= vidBufEnd + 1;
-      console.log(`[AML MV buf:gate] A/V gate open audio=${audCt.toFixed(2)} video=${vidCt.toFixed(2)} vidBufEnd=${vidBufEnd.toFixed(2)} canSyncToAudio=${canSyncToAudio}`);
+      console.log(`[Adam MV buf:gate] A/V gate open audio=${audCt.toFixed(2)} video=${vidCt.toFixed(2)} vidBufEnd=${vidBufEnd.toFixed(2)} canSyncToAudio=${canSyncToAudio}`);
       if (canSyncToAudio) videoEl.currentTime = audCt;
-      _iframePlay.call(videoEl).catch((e) => console.warn("[AML MV] av-gate play rejected:", e.message));
+      _iframePlay.call(videoEl).catch((e) => console.warn("[Adam MV] av-gate play rejected:", e.message));
       _startDynBuf();
     };
     mkAudio.addEventListener("canplay", () => {
@@ -2721,7 +2730,7 @@
       const onErr = (ev) => {
         audioSb.removeEventListener("updateend", onEnd);
         const detail = `code=${ev.target?.error?.code} msg=${ev.target?.error?.message}`;
-        console.error(`[AML MV-A] SourceBuffer ERROR event: ${detail}`);
+        console.error(`[Adam MV-A] SourceBuffer ERROR event: ${detail}`);
         rej(new Error(`audio SB error: ${detail}`));
       };
       audioSb.addEventListener("updateend", onEnd, { once: true });
@@ -2757,14 +2766,14 @@
         const chunk = chunkIn + 1;
         const bufAfter = _mvaBufStr();
         const grew = bufBefore !== bufAfter;
-        window.__amlCaptureChunk?.("mv-audio", chunk, value, bufBefore, bufAfter, grew);
+        window.__adamCaptureChunk?.("mv-audio", chunk, value, bufBefore, bufAfter, grew);
         if (!grew && chunk > 1)
           console.warn(`[INTERCEPT] chunk#${chunk} DID NOT grow buffer! Encrypted fragment rejected by browser MSE.`);
         return { chunk, shouldBreak: false };
       } catch (e) {
         console.error(`[INTERCEPT APPEND-ERR] chunk#${chunkIn + 1} threw ${e.name}: ${e.message}`);
         if (e.name === "InvalidStateError") {
-          console.warn(`[AML MV-A] InvalidStateError chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} \u2014 retrying`);
+          console.warn(`[Adam MV-A] InvalidStateError chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} \u2014 retrying`);
           await _waitAudIdle();
           if (signal.aborted || audioMs.readyState !== "open") return { chunk: chunkIn, shouldBreak: true };
           audioSb.appendBuffer(value);
@@ -2772,7 +2781,7 @@
           const chunk = chunkIn + 1;
           return { chunk, shouldBreak: false };
         } else if (e.name === "QuotaExceededError") {
-          console.warn(`[AML MV-A] QuotaExceeded chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} \u2014 evicting`);
+          console.warn(`[Adam MV-A] QuotaExceeded chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} \u2014 evicting`);
           await evictAudio();
           await _waitAudIdle();
           if (signal.aborted || audioMs.readyState !== "open") return { chunk: chunkIn, shouldBreak: true };
@@ -2790,7 +2799,7 @@
       }
     }
     const runAudioPipe = async (signal) => {
-      console.log(`[AML MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)}`);
+      console.log(`[Adam MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)}`);
       const t0 = performance.now();
       const resp = await fetch(audioUrl, { signal });
       if (!resp.ok) throw new Error(`audio ${resp.status}`);
@@ -2800,7 +2809,7 @@
         if (audioMs.readyState !== "open" || audioSb.buffered.length === 0) return;
         const evictTo = Math.max(0, mkAudio.currentTime - 30);
         if (evictTo > audioSb.buffered.start(0) + 1) {
-          console.log(`[AML MV-A] evict 0-${evictTo.toFixed(2)}s t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()}`);
+          console.log(`[Adam MV-A] evict 0-${evictTo.toFixed(2)}s t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()}`);
           await _waitAudIdle();
           await new Promise((res, rej) => {
             audioSb.addEventListener("updateend", res, { once: true });
@@ -2834,13 +2843,13 @@
                   await _waitAudIdle();
                   if (audioMs.readyState === "open") audioSb.abort();
                   audioSb.timestampOffset = -hls_base;
-                  console.log(`[AML MV-A] timestampOffset=${(-hls_base).toFixed(2)}s (HLS base=${hls_base.toFixed(2)}s)`);
+                  console.log(`[Adam MV-A] timestampOffset=${(-hls_base).toFixed(2)}s (HLS base=${hls_base.toFixed(2)}s)`);
                   audioSb.appendBuffer(value);
                   await _waitAudIdle();
                 }
               }
             } catch (e) {
-              console.warn(`[AML MV-A] offset-probe failed (${e.name}: ${e.message}) \u2014 fallback: sync ct`);
+              console.warn(`[Adam MV-A] offset-probe failed (${e.name}: ${e.message}) \u2014 fallback: sync ct`);
               await _waitAudIdle().catch(() => {
               });
               if (audioSb.buffered.length > 0 && mkAudio.currentTime < audioSb.buffered.start(0))
@@ -2872,7 +2881,7 @@
       }
     };
     runAudioPipe(_audioPipeCtrl.signal).catch((e) => {
-      if (!_audioPipeCtrl.signal.aborted) console.error("[AML MV] audio pipe error:", e);
+      if (!_audioPipeCtrl.signal.aborted) console.error("[Adam MV] audio pipe error:", e);
     });
     try {
       if (ms.readyState !== "open") {
@@ -2883,7 +2892,7 @@
         });
       }
     } catch (e) {
-      console.warn(`[AML MV-V] video MSE sourceopen failed: ${e.message}`);
+      console.warn(`[Adam MV-V] video MSE sourceopen failed: ${e.message}`);
       _audioPipeCtrl.abort();
       mkAudio.pause();
       mkAudio.src = "";
@@ -2907,7 +2916,7 @@
     const videoCodecStr = rawVideoCodec.split(",").map((c) => c.trim()).find((c) => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? "avc1.640028";
     const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
     if (!_wcVideo && !_mp4Video && !MediaSource.isTypeSupported(videoMime)) {
-      console.error(`[AML MV] video codec not supported: ${videoMime} \u2014 skipping track`);
+      console.error(`[Adam MV] video codec not supported: ${videoMime} \u2014 skipping track`);
       _audioPipeCtrl.abort();
       mkAudio.pause();
       mkAudio.src = "";
@@ -2924,11 +2933,11 @@
         }
       }
       if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
-      _amlNextRef?.().catch(() => {
+      _adamNextRef?.().catch(() => {
       });
       return;
     }
-    console.log(`[AML MV] video codec="${videoCodecStr}"`);
+    console.log(`[Adam MV] video codec="${videoCodecStr}"`);
     let videoSb = _wcVideo || _mp4Video || _nativeVideo ? null : ms.addSourceBuffer(videoMime);
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
@@ -2983,13 +2992,13 @@
         return false;
       }
       await _waitVidIdle();
-      console.log(`[AML MV-pipe] evicted ${start.toFixed(1)}-${cutoff.toFixed(1)}s (ct=${videoEl.currentTime.toFixed(1)}) buf=${_bufRanges(videoSb)}`);
+      console.log(`[Adam MV-pipe] evicted ${start.toFixed(1)}-${cutoff.toFixed(1)}s (ct=${videoEl.currentTime.toFixed(1)}) buf=${_bufRanges(videoSb)}`);
       return true;
     };
     const _awaitBufferHeadroom = (signal) => new Promise((resolve) => {
       if (signal.aborted || ms.readyState !== "open") return resolve();
       if (_leadAhead() < BUF_MAX_AHEAD) return resolve();
-      console.log(`[AML MV-pipe] backpressure: lead=${_leadAhead().toFixed(1)}s >= ${BUF_MAX_AHEAD}s \u2014 pausing fetch`);
+      console.log(`[Adam MV-pipe] backpressure: lead=${_leadAhead().toFixed(1)}s >= ${BUF_MAX_AHEAD}s \u2014 pausing fetch`);
       let tick = 0;
       const onAbort = () => {
         clearInterval(tick);
@@ -3013,7 +3022,7 @@
         } catch (e) {
           if (e.name === "QuotaExceededError") {
             const keep = [BUF_BACK_KEEP, 8, 2][Math.min(attempt, 2)];
-            console.warn(`[AML MV-pipe] quota exceeded size=${chunk.byteLength} attempt=${attempt + 1} \u2014 evicting to ${keep}s back buffer`);
+            console.warn(`[Adam MV-pipe] quota exceeded size=${chunk.byteLength} attempt=${attempt + 1} \u2014 evicting to ${keep}s back buffer`);
             const freed = await _evictBackBuffer(keep, signal);
             if (!freed && attempt >= 1) {
               throw new Error(`MSE quota exhausted, nothing to evict (buf=${_bufRanges(videoSb)} ct=${videoEl.currentTime.toFixed(2)})`);
@@ -3029,7 +3038,7 @@
       throw new Error(`appendBuffer failed after retries size=${chunk.byteLength} buf=${_bufRanges(videoSb)}`);
     };
     const runVideoPipe = async (url, signal) => {
-      console.log(`[AML MV-pipe] start url=${url.split("?")[1] || "base"} signal.aborted=${signal.aborted}`);
+      console.log(`[Adam MV-pipe] start url=${url.split("?")[1] || "base"} signal.aborted=${signal.aborted}`);
       const resp = await fetch(url, { signal });
       if (!resp.ok) throw new Error(`video ${resp.status}`);
       const reader = resp.body.getReader();
@@ -3062,14 +3071,14 @@
       const mySignal = pipeCtrl.signal;
       runVideoPipe(url, mySignal).catch(async (e) => {
         const aborted = mySignal.aborted;
-        console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+        console.log(`[Adam MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
         if (!aborted && _decodeRetryCount < 3 && e.message.includes("veCode=3")) {
           _decodeRetryCount++;
           _bufWaitStart = Date.now();
           const ct = videoEl.currentTime;
           const badEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : ct;
           const skipTo = _decodeRetryCount === 1 ? ct + 0.5 : Math.max(ct + 0.5, badEnd + 3);
-          console.warn(`[AML MV-pipe] veCode=3 retry #${_decodeRetryCount} (${_decodeRetryCount === 1 ? "recover-in-place" : "skip-past"}) \u2014 clearing SB, seeking to ${skipTo.toFixed(1)}s`);
+          console.warn(`[Adam MV-pipe] veCode=3 retry #${_decodeRetryCount} (${_decodeRetryCount === 1 ? "recover-in-place" : "skip-past"}) \u2014 clearing SB, seeking to ${skipTo.toFixed(1)}s`);
           try {
             _mvVidSeeking = true;
             if (videoSb.updating) {
@@ -3098,7 +3107,7 @@
                 }
               }
               videoSb = ms.addSourceBuffer(videoMime);
-              console.log(`[AML MV-pipe] rebuilt MediaSource for retry (was ended)`);
+              console.log(`[Adam MV-pipe] rebuilt MediaSource for retry (was ended)`);
             }
             _ignoreSeekUntil = Date.now() + 2e3;
             videoEl.currentTime = skipTo;
@@ -3117,9 +3126,9 @@
           return;
         }
         if (!aborted) {
-          console.error(`[AML MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+          console.error(`[Adam MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
           _abortMV(`video-pipe-error`);
-          _amlNextRef?.().catch(() => {
+          _adamNextRef?.().catch(() => {
           });
           setTimeout(() => exitBtn?.click(), 200);
         }
@@ -3250,14 +3259,14 @@
             mkAudio.pause();
             _wcSpinner.style.display = "block";
             _wcDispatchWaiting();
-            console.log(`[AML MV-WC] video underrun \u2014 stalling audio ct=${ct.toFixed(2)}`);
+            console.log(`[Adam MV-WC] video underrun \u2014 stalling audio ct=${ct.toFixed(2)}`);
           } else if (_wcStallPaused && queue.length > 0) {
             _wcStallPaused = false;
             _wcSpinner.style.display = "none";
             _iframePlay.call(mkAudio).catch(() => {
             });
             _wcDispatchPlaying();
-            console.log(`[AML MV-WC] rebuffered \u2014 resuming audio ct=${ct.toFixed(2)} queued=${queue.length}`);
+            console.log(`[Adam MV-WC] rebuffered \u2014 resuming audio ct=${ct.toFixed(2)} queued=${queue.length}`);
           }
         }
         if (++_metricN % 30 === 0) {
@@ -3265,7 +3274,7 @@
           console.log(`[wc-metric] drift=${dms.toFixed(1)}ms buffered=${(_wcBufferedSec || 0).toFixed(2)} q=${queue.length} gen=${gen} outstanding=${wcFramesOpened - wcFramesClosed}`);
         }
         if (_wcRebuffering && _wcRebufStart > 0 && Date.now() - _wcRebufStart > 8e3) {
-          console.warn(`[AML MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1e3).toFixed(1)}s \u2014 restarting ct=${ct.toFixed(2)}`);
+          console.warn(`[Adam MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1e3).toFixed(1)}s \u2014 restarting ct=${ct.toFixed(2)}`);
           _wcRebufStart = 0;
           requestRestart("hang");
         }
@@ -3298,7 +3307,7 @@
               _wcAudioHold = false;
               _wcVW = frame.displayWidth;
               _wcVH = frame.displayHeight;
-              console.log(`[AML MV-WC] first frame decoded ${_wcVW}x${_wcVH} \u2014 opening A/V gate`);
+              console.log(`[Adam MV-WC] first frame decoded ${_wcVW}x${_wcVH} \u2014 opening A/V gate`);
               _resizeScrim();
               tryStart();
               if (!raf) raf = requestAnimationFrame(render);
@@ -3306,7 +3315,7 @@
           },
           error: (e) => {
             if (myGen !== gen) return;
-            console.error(`[AML MV-WC] decode error (attempt ${_wcDecErrCount + 1}/3): ${e.message}`);
+            console.error(`[Adam MV-WC] decode error (attempt ${_wcDecErrCount + 1}/3): ${e.message}`);
             if (_wcDecErrCount++ < 3 && live()) requestRestart("decode-error");
           }
         });
@@ -3320,7 +3329,7 @@
             if (state === "magic") {
               if (buf.length < 4) return;
               if (td.decode(buf.slice(0, 4)) !== "AME1") {
-                console.error("[AML MV-WC] bad ES magic");
+                console.error("[Adam MV-WC] bad ES magic");
                 fetchCtrl.abort();
                 return;
               }
@@ -3343,12 +3352,12 @@
               try {
                 myDec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
               } catch (e) {
-                console.error(`[AML MV-WC] configure failed: ${e.message}`);
+                console.error(`[Adam MV-WC] configure failed: ${e.message}`);
                 fetchCtrl.abort();
                 return;
               }
               waitingForKeyframe = true;
-              console.log(`[AML MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
+              console.log(`[Adam MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
             } else {
               if (buf.length < 17) return;
               const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
@@ -3369,12 +3378,12 @@
               try {
                 myDec.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: tUs, duration: durUs, data }));
               } catch (e) {
-                console.error(`[AML MV-WC] decode() threw: ${e.message}`);
+                console.error(`[Adam MV-WC] decode() threw: ${e.message}`);
               }
             }
           }
         };
-        console.log(`[AML MV-WC] start gen=${myGen} seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
+        console.log(`[Adam MV-WC] start gen=${myGen} seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
         try {
           const esUrl = `${videoUrl}-es${seekSec > 0 ? `?t=${seekSec.toFixed(3)}` : ""}`;
           const resp = await fetch(esUrl, { signal: sig });
@@ -3384,10 +3393,10 @@
             return;
           }
           if (!resp.ok) {
-            console.error(`[AML MV-WC] /video-es ${resp.status} seekSec=${seekSec.toFixed(2)}`);
+            console.error(`[Adam MV-WC] /video-es ${resp.status} seekSec=${seekSec.toFixed(2)}`);
             return;
           }
-          console.log(`[AML MV-WC] /video-es ok gen=${myGen} ct=${mkAudio.currentTime.toFixed(2)}`);
+          console.log(`[Adam MV-WC] /video-es ok gen=${myGen} ct=${mkAudio.currentTime.toFixed(2)}`);
           const reader = resp.body.getReader();
           let chunkN = 0, done = false;
           for (; ; ) {
@@ -3418,7 +3427,7 @@
           if (myGen === gen && myDec.state === "configured") await myDec.flush().catch(() => {
           });
         } catch (e) {
-          if (live()) console.error(`[AML MV-WC] stream error: ${e.message}`);
+          if (live()) console.error(`[Adam MV-WC] stream error: ${e.message}`);
         }
       };
       let _wcSeekTimer = null;
@@ -3439,7 +3448,7 @@
         if (aborted()) return;
         const t = typeof seekSec === "number" ? seekSec : mkAudio.currentTime;
         currentSeekSec = t;
-        console.log(`[AML MV-WC] commit restart (${reason}) gen=${gen} \u2192 ${t.toFixed(2)}s queued=${queue.length}`);
+        console.log(`[Adam MV-WC] commit restart (${reason}) gen=${gen} \u2192 ${t.toFixed(2)}s queued=${queue.length}`);
         gen++;
         try {
           if (dec && dec.state !== "closed") dec.close();
@@ -3510,7 +3519,7 @@
       };
       _wcRebuffering = true;
       _wcRebufStart = Date.now();
-      start(0).catch((e) => console.error("[AML MV-WC] start error:", e.message));
+      start(0).catch((e) => console.error("[Adam MV-WC] start error:", e.message));
     };
     _activeMvControls = {
       play: mvPlay,
@@ -3540,9 +3549,9 @@
       }
     };
     const _setupMP4BoxVideo = () => {
-      console.log("[AML MV-MP4] starting direct fMP4\u2192MSE path");
+      console.log("[Adam MV-MP4] starting direct fMP4\u2192MSE path");
       if (!MediaSource.isTypeSupported(videoMime)) {
-        console.error("[AML MV-MP4] codec not supported:", videoMime, "\u2014 falling back to WebCodecs");
+        console.error("[Adam MV-MP4] codec not supported:", videoMime, "\u2014 falling back to WebCodecs");
         _setupWebCodecsVideo();
         return;
       }
@@ -3595,12 +3604,12 @@
       let _segN = 0;
       const _logBuf = (label) => {
         if (!mp4Sb || !mp4Sb.buffered || mp4Sb.buffered.length === 0) {
-          console.log(`[AML MV-MP4] ${label} buf=(empty) tsOff=${mp4Sb?.timestampOffset?.toFixed(3)}`);
+          console.log(`[Adam MV-MP4] ${label} buf=(empty) tsOff=${mp4Sb?.timestampOffset?.toFixed(3)}`);
           return;
         }
         const b = mp4Sb.buffered;
         const ranges = Array.from({ length: b.length }, (_, i) => `${b.start(i).toFixed(2)}-${b.end(i).toFixed(2)}`).join(" ");
-        console.log(`[AML MV-MP4] ${label} buf=[${ranges}] tsOff=${mp4Sb.timestampOffset.toFixed(3)}`);
+        console.log(`[Adam MV-MP4] ${label} buf=[${ranges}] tsOff=${mp4Sb.timestampOffset.toFixed(3)}`);
       };
       const appendWhenReady = (ab, beforeAppend) => {
         const try_ = () => {
@@ -3613,7 +3622,7 @@
             mp4Sb.appendBuffer(ab);
             mp4Sb.addEventListener("updateend", () => _logBuf(`seg#${_segN}`), { once: true });
           } catch (e) {
-            console.warn("[AML MV-MP4] append:", e.message);
+            console.warn("[Adam MV-MP4] append:", e.message);
           }
         };
         try_();
@@ -3635,9 +3644,9 @@
               const mdia = trak ? findBox(trak.subarray(8), "mdia") : null;
               const mdhd = mdia ? findBox(mdia.subarray(8), "mdhd") : null;
               const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map((v) => v.toString(16).padStart(2, "0")).join(" ") : "null";
-              console.log(`[AML MV-MP4] MOOV raw: size=${box.length}B trak=${trak?.length} mdia=${mdia?.length} mdhd=${mdhd?.length}`);
-              console.log(`[AML MV-MP4] mdhd hex: ${hex(mdhd, mdhd?.length || 0)}`);
-              console.log(`[AML MV-MP4] init ${initBuf.length}B timescale=${timescale}`);
+              console.log(`[Adam MV-MP4] MOOV raw: size=${box.length}B trak=${trak?.length} mdia=${mdia?.length} mdhd=${mdhd?.length}`);
+              console.log(`[Adam MV-MP4] mdhd hex: ${hex(mdhd, mdhd?.length || 0)}`);
+              console.log(`[Adam MV-MP4] init ${initBuf.length}B timescale=${timescale}`);
               _segN = 0;
               appendWhenReady(toAB(initBuf));
             }
@@ -3654,12 +3663,12 @@
               const traf = findBox(moofBox.subarray(8), "traf");
               const tfdtBox = traf ? findBox(traf.subarray(8), "tfdt") : null;
               const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map((v) => v.toString(16).padStart(2, "0")).join(" ") : "null";
-              console.log(`[AML MV-MP4] MOOF#1 raw: moofSize=${moofBox.length} traf=${traf?.length} tfdt=${tfdtBox?.length}`);
-              console.log(`[AML MV-MP4] tfdt hex: ${hex(tfdtBox, tfdtBox?.length || 0)}`);
+              console.log(`[Adam MV-MP4] MOOF#1 raw: moofSize=${moofBox.length} traf=${traf?.length} tfdt=${tfdtBox?.length}`);
+              console.log(`[Adam MV-MP4] tfdt hex: ${hex(tfdtBox, tfdtBox?.length || 0)}`);
               appendWhenReady(seg, () => {
                 const offset = -(tfdt / timescale);
                 mp4Sb.timestampOffset = offset;
-                console.log(`[AML MV-MP4] seg#1 TFDT=${tfdt} timescale=${timescale} \u2192 tsOff=${offset.toFixed(3)}s`);
+                console.log(`[Adam MV-MP4] seg#1 TFDT=${tfdt} timescale=${timescale} \u2192 tsOff=${offset.toFixed(3)}s`);
               });
             } else {
               appendWhenReady(seg);
@@ -3669,7 +3678,7 @@
       };
       fetch(`${ENGINE}/api/v1/playback/${_sessionId}/video-raw`, { signal: fetchCtrl.signal }).then(async (resp) => {
         if (!resp.ok) {
-          console.error("[AML MV-MP4] fetch", resp.status);
+          console.error("[Adam MV-MP4] fetch", resp.status);
           return;
         }
         const reader = resp.body.getReader();
@@ -3689,10 +3698,10 @@
             }
           }, { once: true });
         } catch (e) {
-          if (e.name !== "AbortError") console.error("[AML MV-MP4] read:", e.message);
+          if (e.name !== "AbortError") console.error("[Adam MV-MP4] read:", e.message);
         }
       }).catch((e) => {
-        if (e.name !== "AbortError") console.error("[AML MV-MP4] fetch:", e.message);
+        if (e.name !== "AbortError") console.error("[Adam MV-MP4] fetch:", e.message);
       });
       _wcCleanup = () => fetchCtrl.abort();
     };
@@ -3702,7 +3711,7 @@
       const infoUrl = `${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`;
       const _NET = ["EMPTY", "IDLE", "LOADING", "NO_SOURCE"];
       const _RS = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"];
-      const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : "-"}`, "color:#bf5af2;font-weight:bold", "color:inherit");
+      const _nlog = (ev) => console.log(`%c[Adam MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : "-"}`, "color:#bf5af2;font-weight:bold", "color:inherit");
       ["loadstart", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
       const _startPoll = () => {
         _bufSpinner.style.display = "block";
@@ -3712,7 +3721,7 @@
             const info = await fetch(infoUrl).then((r) => r.json());
             if (info.cached) {
               const _src = info.cdnProxy ? "CDN proxy (instant)" : "faststart cache";
-              console.log(`%c[AML MV native]%c ${_src} ready \u2014 loading`, "color:#30d158;font-weight:bold", "color:inherit");
+              console.log(`%c[Adam MV native]%c ${_src} ready \u2014 loading`, "color:#30d158;font-weight:bold", "color:inherit");
               _bufSpinner.style.display = "none";
               myVid.src = "";
               myVid.load();
@@ -3720,9 +3729,9 @@
               myVid.load();
               return;
             }
-            console.log(`%c[AML MV native]%c cache building (preparing=${info.preparing}) \u2014 retry in 2s`, "color:#ff9f0a;font-weight:bold", "color:inherit");
+            console.log(`%c[Adam MV native]%c cache building (preparing=${info.preparing}) \u2014 retry in 2s`, "color:#ff9f0a;font-weight:bold", "color:inherit");
           } catch (_e) {
-            console.warn("[AML MV native] poll error", _e);
+            console.warn("[Adam MV native] poll error", _e);
           }
           setTimeout(_poll, 2e3);
         };
@@ -3730,14 +3739,14 @@
       };
       myVid.addEventListener("error", () => {
         const e = myVid.error;
-        console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, "color:#ff453a;font-weight:bold", "color:inherit");
+        console.error(`%c[Adam MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, "color:#ff453a;font-weight:bold", "color:inherit");
         if ((e?.code === 2 || e?.code === 3) && !_abortCtrl?.signal.aborted) {
-          console.log("%c[AML MV native]%c transient error \u2014 polling for cache", "color:#ff9f0a;font-weight:bold", "color:inherit");
+          console.log("%c[Adam MV native]%c transient error \u2014 polling for cache", "color:#ff9f0a;font-weight:bold", "color:inherit");
           _startPoll();
           return;
         }
         _abortMV(`video-error-${e?.code ?? "?"}`);
-        _amlNextRef?.().catch(() => {
+        _adamNextRef?.().catch(() => {
         });
         setTimeout(() => exitBtn?.click(), 200);
       });
@@ -3809,7 +3818,7 @@
             return;
           }
         }
-        console.log(`%c[AML MV native]%c seek ${target.toFixed(2)}s via Range`, "color:#bf5af2;font-weight:bold", "color:#30d158");
+        console.log(`%c[Adam MV native]%c seek ${target.toFixed(2)}s via Range`, "color:#bf5af2;font-weight:bold", "color:#30d158");
         _bufSpinner.style.display = "block";
         _reseeking = true;
         try {
@@ -3834,9 +3843,9 @@
       });
       myVid.addEventListener("ended", () => {
         if (_abortCtrl?.signal.aborted) return;
-        console.log(`[AML MV native] ended ct=${myVid.currentTime.toFixed(2)} \u2192 next`);
+        console.log(`[Adam MV native] ended ct=${myVid.currentTime.toFixed(2)} \u2192 next`);
         _abortMV("track-ended");
-        _amlNextRef?.().catch(() => {
+        _adamNextRef?.().catch(() => {
         });
         setTimeout(() => exitBtn?.click(), 200);
       });
@@ -3852,20 +3861,20 @@
         try {
           const info = await fetch(infoUrl).then((r) => r.json());
           if (info.cached) {
-            console.log("%c[AML MV native]%c cache hit \u2014 loading", "color:#30d158;font-weight:bold", "color:inherit");
+            console.log("%c[Adam MV native]%c cache hit \u2014 loading", "color:#30d158;font-weight:bold", "color:inherit");
             _bufSpinner.style.display = "block";
             myVid.src = dlUrl;
             try {
               myVid.load();
             } catch (e) {
-              console.error(`[AML MV native] load() threw: ${e.message}`);
+              console.error(`[Adam MV native] load() threw: ${e.message}`);
             }
             return;
           }
         } catch (_e) {
-          console.warn("[AML MV native] info preflight error", _e);
+          console.warn("[Adam MV native] info preflight error", _e);
         }
-        console.log("%c[AML MV native]%c cache miss \u2014 waiting for HLS decrypt + faststart", "color:#ff9f0a;font-weight:bold", "color:inherit");
+        console.log("%c[Adam MV native]%c cache miss \u2014 waiting for HLS decrypt + faststart", "color:#ff9f0a;font-weight:bold", "color:inherit");
         _startPoll();
       })();
     };
@@ -3929,7 +3938,7 @@
           _seekFreeze = null;
         }
       };
-      const _directVerdicts = window.__amlVsegDirect = window.__amlVsegDirect || {};
+      const _directVerdicts = window.__adamVsegDirect = window.__adamVsegDirect || {};
       const _probeDirect = async (resp, sig) => {
         let url = null, probeVid = null;
         try {
@@ -3960,10 +3969,10 @@
           if (!psb.buffered.length) throw new Error("nothing buffered");
           const start = psb.buffered.start(0);
           if (Math.abs(start - resp.t) > 0.5) throw new Error(`placed at ${start.toFixed(2)}s, engine said ${resp.t.toFixed(2)}s`);
-          console.log(`[AML vseg] direct probe ok: buffered ${start.toFixed(2)}-${psb.buffered.end(0).toFixed(2)}s (tsOffset=${resp.tsOffset})`);
+          console.log(`[Adam vseg] direct probe ok: buffered ${start.toFixed(2)}-${psb.buffered.end(0).toFixed(2)}s (tsOffset=${resp.tsOffset})`);
           return true;
         } catch (e) {
-          console.warn("[AML vseg] direct probe failed:", e?.message || e);
+          console.warn("[Adam vseg] direct probe failed:", e?.message || e);
           return false;
         } finally {
           try {
@@ -3999,7 +4008,7 @@
               break;
             }
             if (!r.ok) {
-              console.warn(`[AML vseg] seg/${nextSeg} HTTP ${r.status}`);
+              console.warn(`[Adam vseg] seg/${nextSeg} HTTP ${r.status}`);
               break;
             }
             const data = await r.arrayBuffer();
@@ -4014,7 +4023,7 @@
             nextSeg++;
           }
         } catch (e) {
-          if (e.name !== "AbortError") console.warn("[AML vseg] fetch loop error:", e);
+          if (e.name !== "AbortError") console.warn("[Adam vseg] fetch loop error:", e);
         }
       };
       ms2.addEventListener("sourceopen", async () => {
@@ -4034,16 +4043,16 @@
           await new Promise((r) => setTimeout(r, 300));
         }
         if (!codecs) {
-          console.error("[AML vseg] no codec from manifest");
+          console.error("[Adam vseg] no codec from manifest");
           return;
         }
         _vsegCodecs = codecs;
         sb = ms2.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
         _vsegSb = sb;
-        sb.addEventListener("error", (e) => console.error("[AML vseg] SourceBuffer error", e));
+        sb.addEventListener("error", (e) => console.error("[Adam vseg] SourceBuffer error", e));
         const initRes = await fetch(`${base}/init`).catch(() => null);
         if (!initRes?.ok) {
-          console.error("[AML vseg] init fetch failed");
+          console.error("[Adam vseg] init fetch failed");
           return;
         }
         const initData = await initRes.arrayBuffer();
@@ -4066,7 +4075,7 @@
         _vsegBufferedSec = seekSec;
         stopFetchLoop();
         const sig = loopAbort.signal;
-        console.log(`[AML vseg] seek to ${seekSec.toFixed(2)}s`);
+        console.log(`[Adam vseg] seek to ${seekSec.toFixed(2)}s`);
         const seekUrl = (noDirect) => `${base}/seek?t=${seekSec}${noDirect ? "&direct=0" : ""}`;
         let resp = await fetch(seekUrl(_directVerdicts[_vsegCodecs] === false), { signal: sig }).then((r) => r.json()).catch(() => null);
         if (sig.aborted) {
@@ -4081,7 +4090,7 @@
           }
           _directVerdicts[_vsegCodecs] = ok;
           if (!ok) {
-            console.warn("[AML vseg] direct seek rejected by the probe \u2014 using the FFmpeg path from now on");
+            console.warn("[Adam vseg] direct seek rejected by the probe \u2014 using the FFmpeg path from now on");
             resp = await fetch(seekUrl(true), { signal: sig }).then((r) => r.json()).catch(() => null);
             if (sig.aborted) {
               _seekHandlerActive = false;
@@ -4119,9 +4128,9 @@
             });
             sb.appendBuffer(initData);
             await waitUpdateEnd();
-            console.log(`[AML vseg] re-initialised SourceBuffer (${resp.direct ? "direct" : "ffmpeg"} init, ${initData.byteLength}B, tsOffset=${tsOff})`);
+            console.log(`[Adam vseg] re-initialised SourceBuffer (${resp.direct ? "direct" : "ffmpeg"} init, ${initData.byteLength}B, tsOffset=${tsOff})`);
           } catch (e) {
-            if (e?.name !== "AbortError") console.error("[AML vseg] re-init failed:", e?.message || e);
+            if (e?.name !== "AbortError") console.error("[Adam vseg] re-init failed:", e?.message || e);
             _seekHandlerActive = false;
             return;
           }
@@ -4175,7 +4184,7 @@
           _vsegMutedForStall = true;
         }
         _bufSpinner.style.display = "block";
-        console.log(`[AML vseg] waiting at ct=${myVid.currentTime.toFixed(2)}`);
+        console.log(`[Adam vseg] waiting at ct=${myVid.currentTime.toFixed(2)}`);
       });
       myVid.addEventListener("playing", () => {
         _clearSeekFreeze();
@@ -4184,7 +4193,7 @@
           _vsegStalled = false;
           const drift = mkAudio.currentTime - myVid.currentTime;
           if (Math.abs(drift) > 0.05) {
-            console.log(`[AML vseg] playing: snap mkAudio ${mkAudio.currentTime.toFixed(2)} \u2192 ${myVid.currentTime.toFixed(2)} (drift=${drift.toFixed(2)}s)`);
+            console.log(`[Adam vseg] playing: snap mkAudio ${mkAudio.currentTime.toFixed(2)} \u2192 ${myVid.currentTime.toFixed(2)} (drift=${drift.toFixed(2)}s)`);
             mkAudio.currentTime = myVid.currentTime;
           }
           if (_vsegMutedForStall) {
@@ -4200,7 +4209,7 @@
         const now = performance.now();
         if (Math.abs(drift) > 0.35 && now - _vsegLastNudge > 500) {
           _vsegLastNudge = now;
-          console.log(`[AML vseg] timeupdate drift=${drift.toFixed(3)}s \u2192 snap`);
+          console.log(`[Adam vseg] timeupdate drift=${drift.toFixed(3)}s \u2192 snap`);
           mkAudio.currentTime = myVid.currentTime;
         }
       });
@@ -4209,7 +4218,7 @@
         _clearSeekFreeze();
         _videoCanPlay = true;
         tryStart();
-        _iframePlay.call(myVid).catch((e) => console.warn("[AML vseg] myVid play rejected:", e.message));
+        _iframePlay.call(myVid).catch((e) => console.warn("[Adam vseg] myVid play rejected:", e.message));
       }, { once: true });
       _abortCtrl.signal.addEventListener("abort", () => {
         stopFetchLoop();
@@ -4221,7 +4230,7 @@
           _vsegMutedForStall = false;
         }
       }, { once: true });
-      console.log("[AML vseg] setup done, waiting for sourceopen");
+      console.log("[Adam vseg] setup done, waiting for sourceopen");
     };
     if (_vsegVideo) _setupVsegVideo();
     else if (_nativeVideo) _setupNativeVideo();
@@ -4291,7 +4300,7 @@
         }
         videoSb.timestampOffset = 0;
         _ignoreSeekUntil = Date.now() + 8e3;
-        console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
+        console.log(`[Adam MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
         if (seekSec < (_durationSec || 1e9) - 1) {
           _startVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`);
         }
@@ -4308,12 +4317,12 @@
     });
     let _playMirrorBusy = false;
     const onVideoPlay = () => {
-      console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
+      console.log(`[Adam MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
       if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
         mkAudio.currentTime = videoEl.currentTime;
       const doPlay = () => {
         _playMirrorBusy = true;
-        return _iframePlay.call(mkAudio).then(() => console.log("[AML MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[AML MV-A] mkAudio.play() rejected:", e.message)).finally(() => {
+        return _iframePlay.call(mkAudio).then(() => console.log("[Adam MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[Adam MV-A] mkAudio.play() rejected:", e.message)).finally(() => {
           _playMirrorBusy = false;
         });
       };
@@ -4334,36 +4343,36 @@
         _bufSpinner.style.display = "none";
         const drift = mkAudio.currentTime - videoEl.currentTime;
         if (Math.abs(drift) > 0.05) {
-          console.log(`[AML MV buf:sync] stall recovery drift=${drift.toFixed(2)}s, snapping audio ct=${videoEl.currentTime.toFixed(2)}`);
+          console.log(`[Adam MV buf:sync] stall recovery drift=${drift.toFixed(2)}s, snapping audio ct=${videoEl.currentTime.toFixed(2)}`);
           mkAudio.currentTime = videoEl.currentTime;
         }
         mkAudio.muted = false;
-        console.log(`[AML MV buf:sync] audio unmuted, video resumed ct=${videoEl.currentTime.toFixed(2)}`);
+        console.log(`[Adam MV buf:sync] audio unmuted, video resumed ct=${videoEl.currentTime.toFixed(2)}`);
       }
     };
     const onVideoPause = () => {
       if (_bufPaused) return;
-      console.log(`[AML MV-V] videoEl pause ct=${videoEl.currentTime.toFixed(2)}`);
+      console.log(`[Adam MV-V] videoEl pause ct=${videoEl.currentTime.toFixed(2)}`);
       mkAudio.pause();
       nativeVidEl?.dispatchEvent(new Event("pause", { bubbles: false }));
       getMKAudio()?.dispatchEvent(new Event("pause", { bubbles: false }));
     };
     const onVideoSeek = () => {
       if (_mvVidSeeking) return;
-      console.log(`[AML MV-V] videoEl seeked ct=${videoEl.currentTime.toFixed(2)}`);
+      console.log(`[Adam MV-V] videoEl seeked ct=${videoEl.currentTime.toFixed(2)}`);
       if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
         mkAudio.currentTime = videoEl.currentTime;
     };
     const onEnded = (ev) => {
       if (_abortCtrl?.signal.aborted) return;
       const src = _wcVideo ? "audio" : ev?.target === videoEl ? "video" : "audio";
-      console.log(`[AML MV] ${src} ended ct=${(videoEl.currentTime || mkAudio.currentTime)?.toFixed(2)}`);
+      console.log(`[Adam MV] ${src} ended ct=${(videoEl.currentTime || mkAudio.currentTime)?.toFixed(2)}`);
       try {
         delete mkAudio.load;
       } catch (_) {
       }
       _abortMV("track-ended");
-      _amlNextRef?.().catch(() => {
+      _adamNextRef?.().catch(() => {
       });
       setTimeout(() => exitBtn?.click(), 200);
     };
@@ -4371,35 +4380,35 @@
     const onVideoError = () => {
       const code = videoEl.error?.code;
       const msg = videoEl.error?.message ?? "";
-      console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+      console.error(`[Adam MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
       if (code === 3) {
         if (_decodeRetryCount === 0) {
-          console.warn(`[AML MV-V] decode error code=3 \u2014 deferring to pipe restart`);
+          console.warn(`[Adam MV-V] decode error code=3 \u2014 deferring to pipe restart`);
           return;
         }
         if (_decodeRetryCount < 3) return;
-        console.warn(`[AML MV] decode error code=3 \u2014 pipe retries exhausted, advancing track`);
+        console.warn(`[Adam MV] decode error code=3 \u2014 pipe retries exhausted, advancing track`);
         _abortMV(`video-error-3`);
-        _amlNextRef?.().catch(() => {
+        _adamNextRef?.().catch(() => {
         });
         setTimeout(() => exitBtn?.click(), 200);
       } else if (code === 4) {
-        console.warn(`[AML MV] src-not-supported (code=4) \u2014 not retryable, advancing track`);
+        console.warn(`[Adam MV] src-not-supported (code=4) \u2014 not retryable, advancing track`);
         _abortMV(`video-error-${code}`);
-        _amlNextRef?.().catch(() => {
+        _adamNextRef?.().catch(() => {
         });
         setTimeout(() => exitBtn?.click(), 200);
       }
     };
-    const onVideoStall = () => console.warn(`[AML MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+    const onVideoStall = () => console.warn(`[Adam MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
     const onVideoWait = () => {
-      console.warn(`[AML MV buf:stall] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+      console.warn(`[Adam MV buf:stall] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
       if (_avStarted && !_videoStalled && !_bufPaused) {
         _videoStalled = true;
         _mvGateOpen = false;
         mkAudio.muted = true;
         _bufSpinner.style.display = "block";
-        console.warn(`[AML MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
+        console.warn(`[Adam MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
       }
     };
     if (!_wcVideo && !_nativeVideo) {
@@ -4413,17 +4422,17 @@
       videoEl.addEventListener("ended", onEnded);
       videoEl.addEventListener("canplay", () => {
         if (_abortCtrl?.signal.aborted) return;
-        console.log(`[AML MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
+        console.log(`[Adam MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
         const checkBuf = () => {
           if (_abortCtrl?.signal.aborted) return;
           const b = videoEl.buffered;
           const lead = b.length > 0 ? b.end(b.length - 1) : 0;
           if (lead >= MV_START_LEAD) {
-            console.log(`[AML MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
+            console.log(`[Adam MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
             _videoCanPlay = true;
             tryStart();
           } else {
-            console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need ${MV_START_LEAD}s)`);
+            console.log(`[Adam MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need ${MV_START_LEAD}s)`);
             videoEl.addEventListener("progress", checkBuf, { once: true });
           }
         };
@@ -4477,7 +4486,7 @@
       }
     };
     const cleanup = () => {
-      console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
+      console.log(`[Adam MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
       if (_wcCleanup) {
         try {
           _wcCleanup();
@@ -4561,7 +4570,7 @@
         myVid.textTracks[i].removeEventListener("cuechange", _renderSubs);
     };
     _abortCtrl.signal.addEventListener("abort", cleanup, { once: true });
-    console.log(`[AML MV] pipeline started session=${_sessionId}`);
+    console.log(`[Adam MV] pipeline started session=${_sessionId}`);
   }
   function _vlcHandleLength(lengthMs, mkAudio) {
     if (!_vlcLengthSet && lengthMs > 0) {
@@ -4571,7 +4580,7 @@
     }
     if (!_nextAlacTried && !_nextAlacSession && _durationSec > 0) {
       _nextAlacTried = true;
-      console.log(`[AML Gapless] trigger at track start (dur=${_durationSec.toFixed(1)}s) \u2014 starting ALAC pre-warm`);
+      console.log(`[Adam Gapless] trigger at track start (dur=${_durationSec.toFixed(1)}s) \u2014 starting ALAC pre-warm`);
       _prewarmNextAlac().catch(() => {
       });
     }
@@ -4586,17 +4595,17 @@
     if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = posMs;
     if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event("timeupdate"));
     if (++_vlcTickCount % 4 === 0) {
-      window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3 });
+      window.adamBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3 });
     }
     if (_seekBurstLog > 0) {
       _seekBurstLog--;
       const delta = posMs > 0 ? posMs - _vlcSeekTargetMs : null;
       const deltaStr = delta !== null ? ` \u0394=${delta >= 0 ? "+" : ""}${delta}ms` : "";
-      console.log(`[AML VLC seek] poll  vlc.posMs=${posMs}ms  ui.pos=${_vlcPosMs}ms  target=${_vlcSeekTargetMs}ms${deltaStr}  state=${state}  frozen=${_vlcSeekFrozen}`);
+      console.log(`[Adam VLC seek] poll  vlc.posMs=${posMs}ms  ui.pos=${_vlcPosMs}ms  target=${_vlcSeekTargetMs}ms${deltaStr}  state=${state}  frozen=${_vlcSeekFrozen}`);
       if (delta !== null && delta < -5e3 && _seekBurstLog > 10 && _sessionId && !_vlcSeekFrozen) {
         _seekBurstLog = 0;
         const reloadMs = _vlcSeekTargetMs;
-        console.warn(`[AML VLC seek] rewind detected \u0394=${delta}ms \u2014 SeekReload fallback to ${reloadMs}ms`);
+        console.warn(`[Adam VLC seek] rewind detected \u0394=${delta}ms \u2014 SeekReload fallback to ${reloadMs}ms`);
         _vlcSeekFrozen = true;
         _vlcPosMs = reloadMs;
         fetch(`${ENGINE}/api/v1/vlc/load`, {
@@ -4612,7 +4621,7 @@
         });
       }
     } else if (_vlcTickCount % 20 === 0) {
-      console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
+      console.log(`[Adam VLC] pos=${posMs}ms state=${state}`);
     }
   }
   function _vlcHandleEnded(posMs, mkAudio) {
@@ -4624,7 +4633,7 @@
     if (posMs < 2e3 && _durationSec > 5 && _vlcRetryCount < 2) {
       _vlcRetryCount++;
       _vlcSeekOffsetMs = 0;
-      console.log(`[AML VLC] premature end at posMs=${posMs} \u2014 reload attempt ${_vlcRetryCount}`);
+      console.log(`[Adam VLC] premature end at posMs=${posMs} \u2014 reload attempt ${_vlcRetryCount}`);
       setTimeout(() => {
         if (!_sessionId) return;
         fetch(`${ENGINE}/api/v1/vlc/load`, {
@@ -4640,7 +4649,7 @@
     if (posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - 3e3 && _vlcRetryCount < 2) {
       _vlcRetryCount++;
       const resumeMs = posMs;
-      console.warn(`[AML VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
+      console.warn(`[Adam VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
       setTimeout(() => {
         if (!_sessionId) return;
         fetch(`${ENGINE}/api/v1/vlc/seek`, {
@@ -4656,10 +4665,10 @@
       return;
     }
     if (_allowCDNTransition) {
-      console.log("[AML VLC] ended \u2014 _amlNext suppressed (CDN gate open)");
+      console.log("[Adam VLC] ended \u2014 _adamNext suppressed (CDN gate open)");
     } else {
-      console.log("[AML VLC] ended \u2192 _amlNext");
-      _amlNextRef?.().catch(() => {
+      console.log("[Adam VLC] ended \u2192 _adamNext");
+      _adamNextRef?.().catch(() => {
       });
     }
   }
@@ -4698,7 +4707,7 @@
       if (state === _vlcPrevState) return;
       const prev = _vlcPrevState;
       _vlcPrevState = state;
-      console.log(`[AML VLC] state: ${prev ?? "null"} \u2192 ${state}  posMs=${posMs}  frozen=${_vlcSeekFrozen}`);
+      console.log(`[Adam VLC] state: ${prev ?? "null"} \u2192 ${state}  posMs=${posMs}  frozen=${_vlcSeekFrozen}`);
       if (_vlcSeekFrozen) return;
       _vlcHandleStateChange(state, prev, posMs, mkAudio);
     } catch (_) {
@@ -4735,20 +4744,20 @@
   }
   function _prewarmScheduleRetry(reason) {
     if (_nextAlacRetries >= 3) {
-      console.warn(`[AML Gapless] ${reason} \u2014 max retries reached, giving up`);
+      console.warn(`[Adam Gapless] ${reason} \u2014 max retries reached, giving up`);
       return;
     }
     _nextAlacRetries++;
-    console.log(`[AML Gapless] ${reason} \u2014 retry ${_nextAlacRetries}/3 in 5s`);
+    console.log(`[Adam Gapless] ${reason} \u2014 retry ${_nextAlacRetries}/3 in 5s`);
     setTimeout(() => {
       if (_nextAlacSession || !_nextAlacTried) return;
       _nextAlacTried = false;
     }, 5e3);
   }
   function _prewarmHandlePrecache(r) {
-    if (r.status === 204) console.log("[AML Gapless] disk cache already populated \u2014 gapless ready \u2713");
-    else if (r.status === 202) console.log("[AML Gapless] disk cache download started in engine background");
-    else console.warn(`[AML Gapless] precache returned unexpected ${r.status}`);
+    if (r.status === 204) console.log("[Adam Gapless] disk cache already populated \u2014 gapless ready \u2713");
+    else if (r.status === 202) console.log("[Adam Gapless] disk cache download started in engine background");
+    else console.warn(`[Adam Gapless] precache returned unexpected ${r.status}`);
   }
   async function _hoverPrewarmById(adamId, isVideo = false) {
     const mk = _mkInstance;
@@ -4779,7 +4788,7 @@
         _hoverSessions.delete(oldest);
       }
       _hoverSessions.set(adamId, { sess, isVideo });
-      console.log(`[AML Hover] pre-warmed ${isVideo ? "MV" : "audio"} ${adamId} \u2192 ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
+      console.log(`[Adam Hover] pre-warmed ${isVideo ? "MV" : "audio"} ${adamId} \u2192 ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
     } catch (_) {
     } finally {
       _hoverInflight.delete(adamId);
@@ -4825,7 +4834,7 @@
     if (nextItem?.type === "music-videos" || nextItem?.type === "musicVideo" || nextItem?.type === "library-music-videos") return;
     if (!_engineCaps.lossless || _streamingQuality === "high-quality") return;
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
-    console.log(`[AML Gapless] opening session for "${nextName}" (${nextAdamId}) attempt=${_nextAlacRetries + 1}`);
+    console.log(`[Adam Gapless] opening session for "${nextName}" (${nextAdamId}) attempt=${_nextAlacRetries + 1}`);
     const t0 = performance.now();
     try {
       const sf = mk.storefrontId ?? "us";
@@ -4843,7 +4852,7 @@
       if (!sessResp.ok) {
         const permanent = sessResp.status === 401 || sessResp.status === 403 || sessResp.status === 404;
         if (permanent) {
-          console.warn(`[AML Gapless] session open failed ${sessResp.status} (permanent) \u2014 will not retry`);
+          console.warn(`[Adam Gapless] session open failed ${sessResp.status} (permanent) \u2014 will not retry`);
         } else {
           _prewarmScheduleRetry(`session open failed ${sessResp.status}`);
         }
@@ -4852,13 +4861,13 @@
       const sess = await sessResp.json();
       const elapsed = ((performance.now() - t0) / 1e3).toFixed(2);
       if (sess.codec !== "alac") {
-        console.log(`[AML Gapless] skipped \u2014 engine returned ${sess.codec} (not lossless) in ${elapsed}s \u2014 will not retry`);
+        console.log(`[Adam Gapless] skipped \u2014 engine returned ${sess.codec} (not lossless) in ${elapsed}s \u2014 will not retry`);
         deleteSession(sess.sessionId);
         return;
       }
       _nextAlacSession = { adamId: nextAdamId, sess };
-      console.log(`[AML Gapless] session ready ${sess.sessionId} dur=${(sess.durationMs / 1e3).toFixed(1)}s in ${elapsed}s \u2014 kicking off disk cache download`);
-      fetch(`${ENGINE}/api/v1/playback/${sess.sessionId}/precache`, { method: "POST" }).then(_prewarmHandlePrecache).catch(() => console.warn("[AML Gapless] precache request failed \u2014 VLC will download on first play"));
+      console.log(`[Adam Gapless] session ready ${sess.sessionId} dur=${(sess.durationMs / 1e3).toFixed(1)}s in ${elapsed}s \u2014 kicking off disk cache download`);
+      fetch(`${ENGINE}/api/v1/playback/${sess.sessionId}/precache`, { method: "POST" }).then(_prewarmHandlePrecache).catch(() => console.warn("[Adam Gapless] precache request failed \u2014 VLC will download on first play"));
     } catch (e) {
       _prewarmScheduleRetry(`pre-warm error: ${e?.message}`);
     }
@@ -4871,7 +4880,7 @@
       const data = await r.json();
       if (_currentAssetId === adamId) {
         _audioAnalysis = data;
-        console.log(`[AML AA] ${adamId} fadeOut=${data.fadeOut?.startMs}\u2013${data.fadeOut?.endMs}ms bpm=${data.bpm || "?"}`);
+        console.log(`[Adam AA] ${adamId} fadeOut=${data.fadeOut?.startMs}\u2013${data.fadeOut?.endMs}ms bpm=${data.bpm || "?"}`);
       }
     } catch {
     }
@@ -4888,7 +4897,7 @@
     if (nextItem?.type === "music-videos" || nextItem?.type === "musicVideo" || nextItem?.type === "library-music-videos") return;
     if (_engineCaps.lossless && _streamingQuality !== "high-quality") return;
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
-    console.log(`[AML Gapless AAC] opening session for "${nextName}" (${nextAdamId})`);
+    console.log(`[Adam Gapless AAC] opening session for "${nextName}" (${nextAdamId})`);
     const t0 = performance.now();
     try {
       const sf = mk.storefrontId ?? "us";
@@ -4907,9 +4916,9 @@
       const sess = await sessResp.json();
       const elapsed = ((performance.now() - t0) / 1e3).toFixed(2);
       _nextAacSession = { adamId: nextAdamId, sess };
-      console.log(`[AML Gapless AAC] session ready ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s in ${elapsed}s`);
+      console.log(`[Adam Gapless AAC] session ready ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s in ${elapsed}s`);
     } catch (e) {
-      console.warn(`[AML Gapless AAC] pre-warm error: ${e?.message}`);
+      console.warn(`[Adam Gapless AAC] pre-warm error: ${e?.message}`);
     }
   }
   async function _prewarmNextMv() {
@@ -4923,7 +4932,7 @@
     const nextAdamId = nextItem?.playParams?.catalogId ?? nextItem?.attributes?.playParams?.catalogId ?? nextItem?.id ?? nextItem?.playParams?.id ?? nextItem?.attributes?.playParams?.id;
     if (!nextAdamId) return;
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
-    console.log(`[AML Gapless MV] opening session for "${nextName}" (${nextAdamId})`);
+    console.log(`[Adam Gapless MV] opening session for "${nextName}" (${nextAdamId})`);
     const t0 = performance.now();
     try {
       const sf = mk.storefrontId ?? "us";
@@ -4943,9 +4952,9 @@
       const sess = await sessResp.json();
       const elapsed = ((performance.now() - t0) / 1e3).toFixed(2);
       _nextMvSession = { adamId: nextAdamId, sess };
-      console.log(`[AML Gapless MV] session ready ${sess.sessionId} dur=${(sess.durationMs / 1e3).toFixed(1)}s in ${elapsed}s`);
+      console.log(`[Adam Gapless MV] session ready ${sess.sessionId} dur=${(sess.durationMs / 1e3).toFixed(1)}s in ${elapsed}s`);
     } catch (e) {
-      console.warn(`[AML Gapless MV] pre-warm error: ${e?.message}`);
+      console.warn(`[Adam Gapless MV] pre-warm error: ${e?.message}`);
     }
   }
   function _discardNextAacStream() {
@@ -4977,7 +4986,7 @@
         return;
       }
       _nextAacStreamResp = { sessionId: sess.sessionId, resp, ctrl };
-      console.log(`[AML Gapless AAC] stream pre-opened for ${sess.sessionId} \u2014 TTFB paid`);
+      console.log(`[Adam Gapless AAC] stream pre-opened for ${sess.sessionId} \u2014 TTFB paid`);
     }).catch(() => {
     });
   }
@@ -5057,7 +5066,7 @@
       _seekFetchCtrl = null;
     }
     _vlcMode = false;
-    window._amlVlcMode = false;
+    window._adamVlcMode = false;
     _vlcPosMs = 0;
     _vlcPaused = false;
     _stopLyricsFreeze();
@@ -5095,26 +5104,26 @@
     if (!isVideo && losslessWanted && _nextAlacSession?.adamId === adamId) {
       const sess = _nextAlacSession.sess;
       _nextAlacSession = null;
-      console.log(`[AML Gapless] \u2713 HIT \u2014 using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s (saved ~2\u20135s webplayback+CDN)`);
+      console.log(`[Adam Gapless] \u2713 HIT \u2014 using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s (saved ~2\u20135s webplayback+CDN)`);
       return sess;
     }
     if (!isVideo && !losslessWanted && _nextAacSession?.adamId === adamId) {
       const sess = _nextAacSession.sess;
       _nextAacSession = null;
-      console.log(`[AML Gapless AAC] \u2713 HIT \u2014 using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
+      console.log(`[Adam Gapless AAC] \u2713 HIT \u2014 using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
       return sess;
     }
     if (isVideo && _nextMvSession?.adamId === adamId) {
       const sess = _nextMvSession.sess;
       _nextMvSession = null;
-      console.log(`[AML Gapless MV] \u2713 HIT \u2014 using pre-warmed ${sess.sessionId} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
+      console.log(`[Adam Gapless MV] \u2713 HIT \u2014 using pre-warmed ${sess.sessionId} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
       return sess;
     }
     if (_hoverSessions.has(adamId)) {
       const entry = _hoverSessions.get(adamId);
       if (entry.isVideo === isVideo) {
         _hoverSessions.delete(adamId);
-        console.log(`[AML Hover] \u2713 HIT \u2014 using hover pre-warmed ${isVideo ? "MV" : "audio"} ${entry.sess.sessionId} codec=${entry.sess.codec} dur=${(entry.sess.durationMs / 1e3).toFixed(1)}s`);
+        console.log(`[Adam Hover] \u2713 HIT \u2014 using hover pre-warmed ${isVideo ? "MV" : "audio"} ${entry.sess.sessionId} codec=${entry.sess.codec} dur=${(entry.sess.durationMs / 1e3).toFixed(1)}s`);
         return entry.sess;
       }
     }
@@ -5140,12 +5149,12 @@
   async function _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl, durationSec, t0) {
     if (pipeCtrl.signal.aborted) return;
     const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
-    console.warn("[AML MSE] pipe error \u2014 recovering from", bufEnd.toFixed(1) + "s:", err.message);
+    console.warn("[Adam MSE] pipe error \u2014 recovering from", bufEnd.toFixed(1) + "s:", err.message);
     if (ms.readyState === "closed") {
-      console.error("[AML MSE] ms=closed, no recovery");
+      console.error("[Adam MSE] ms=closed, no recovery");
       return;
     }
-    if (ms.readyState === "ended") console.warn("[AML MSE] ms=ended (Chrome decode-error path) \u2014 attempting resume");
+    if (ms.readyState === "ended") console.warn("[Adam MSE] ms=ended (Chrome decode-error path) \u2014 attempting resume");
     try {
       const resumeUrl = bufEnd > 1 ? `${myStreamBase}&t=${bufEnd.toFixed(3)}` : myStreamBase;
       const resp = await fetch(resumeUrl, { signal: pipeCtrl.signal });
@@ -5156,7 +5165,7 @@
       await pipeToSourceBuffer(sb, mkAudio, resp, pipeCtrl.signal, ms, durationSec, t0);
     } catch (e2) {
       if (!pipeCtrl.signal.aborted) {
-        console.error("[AML MSE] recovery failed:", e2.message);
+        console.error("[Adam MSE] recovery failed:", e2.message);
         if (ms.readyState === "open") try {
           ms.endOfStream();
         } catch (_) {
@@ -5176,11 +5185,11 @@
     };
     const eos = ms.endOfStream.bind(ms);
     ms.endOfStream = function(...a) {
-      console.warn("[AML MSE] " + at() + " endOfStream(" + a.join(",") + ") ms=" + ms.readyState + " updating=" + sb.updating + " caller:\n" + stack());
+      console.warn("[Adam MSE] " + at() + " endOfStream(" + a.join(",") + ") ms=" + ms.readyState + " updating=" + sb.updating + " caller:\n" + stack());
       return eos(...a);
     };
     for (const ev of ["sourceended", "sourceclose", "sourceopen"]) {
-      ms.addEventListener(ev, () => console.warn("[AML MSE] " + at() + " MediaSource " + ev + " readyState=" + ms.readyState));
+      ms.addEventListener(ev, () => console.warn("[Adam MSE] " + at() + " MediaSource " + ev + " readyState=" + ms.readyState));
     }
     let n = 0, bytes = 0;
     const app = sb.appendBuffer.bind(sb);
@@ -5192,13 +5201,13 @@
         cap.chunks.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d.slice(0)));
       } catch (_) {
       }
-      if (ms.readyState !== "open") console.warn("[AML MSE] " + at() + " append #" + n + " (" + d.byteLength + " B, total " + bytes + ") while ms=" + ms.readyState + " updating=" + sb.updating + " audio.error=" + (audio.error ? audio.error.code + " " + audio.error.message : "none"));
+      if (ms.readyState !== "open") console.warn("[Adam MSE] " + at() + " append #" + n + " (" + d.byteLength + " B, total " + bytes + ") while ms=" + ms.readyState + " updating=" + sb.updating + " audio.error=" + (audio.error ? audio.error.code + " " + audio.error.message : "none"));
       const r = app(d);
-      if (!sb.updating && ms.readyState === "open") console.warn("[AML MSE] " + at() + " append #" + n + " (" + d.byteLength + " B) was DROPPED: the SourceBuffer rejected it and the guard swallowed the error");
+      if (!sb.updating && ms.readyState === "open") console.warn("[Adam MSE] " + at() + " append #" + n + " (" + d.byteLength + " B) was DROPPED: the SourceBuffer rejected it and the guard swallowed the error");
       return r;
     };
-    sb.addEventListener("error", () => console.warn("[AML MSE] " + at() + " SourceBuffer error after append #" + n + " (" + bytes + " B) ms=" + ms.readyState));
-    audio.addEventListener("error", () => console.warn("[AML MSE] " + at() + " audio error " + (audio.error ? audio.error.code + " " + audio.error.message : "none") + " ms=" + ms.readyState), { once: true });
+    sb.addEventListener("error", () => console.warn("[Adam MSE] " + at() + " SourceBuffer error after append #" + n + " (" + bytes + " B) ms=" + ms.readyState));
+    audio.addEventListener("error", () => console.warn("[Adam MSE] " + at() + " audio error " + (audio.error ? audio.error.code + " " + audio.error.message : "none") + " ms=" + ms.readyState), { once: true });
   }
   async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     _seekable = sess.capabilities?.seekable ?? false;
@@ -5230,7 +5239,7 @@
     const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
     _traceMediaSource(ms, sb, mkAudio);
     sb.addEventListener("error", () => {
-      console.error("[AML MSE] SourceBuffer error \u2014 audio.error=" + (mkAudio.error ? mkAudio.error.code + " " + mkAudio.error.message : "none") + " src=" + (mkAudio.currentSrc ? mkAudio.currentSrc.slice(0, 24) : "(empty)") + " ms=" + ms.readyState + " updating=" + sb.updating + " buf=" + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + "-" + sb.buffered.end(sb.buffered.length - 1).toFixed(1) + "s" : "empty"));
+      console.error("[Adam MSE] SourceBuffer error \u2014 audio.error=" + (mkAudio.error ? mkAudio.error.code + " " + mkAudio.error.message : "none") + " src=" + (mkAudio.currentSrc ? mkAudio.currentSrc.slice(0, 24) : "(empty)") + " ms=" + ms.readyState + " updating=" + sb.updating + " buf=" + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + "-" + sb.buffered.end(sb.buffered.length - 1).toFixed(1) + "s" : "empty"));
     });
     _activeSb = sb;
     _activeMs = ms;
@@ -5265,7 +5274,7 @@
     if (_nextAacStreamResp?.sessionId === _sessionId) {
       pipeInput = _nextAacStreamResp.resp;
       _nextAacStreamResp = null;
-      console.log(`[AML Gapless AAC] \u2713 stream HIT \u2014 using pre-opened response for ${_sessionId}`);
+      console.log(`[Adam Gapless AAC] \u2713 stream HIT \u2014 using pre-opened response for ${_sessionId}`);
     } else if (_nextAacStreamResp) {
       _discardNextAacStream();
     }
@@ -5337,18 +5346,18 @@
         mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
         return;
       }
-      _nativePlay().catch((e) => console.warn("[AML MSE] play():", e));
+      _nativePlay().catch((e) => console.warn("[Adam MSE] play():", e));
     };
     if (mkAudio.readyState >= 3) tryPlay();
     else mkAudio.addEventListener("canplay", tryPlay, { once: true });
     const onAACEnded = () => {
       if (ctrl.signal.aborted) return;
       if (_allowCDNTransition) {
-        console.log("[AML MSE] ended \u2014 _amlNext suppressed (CDN gate open)");
+        console.log("[Adam MSE] ended \u2014 _adamNext suppressed (CDN gate open)");
         return;
       }
-      console.log("[AML MSE] audio ended \u2192 _amlNext");
-      _amlNextRef?.().catch(() => {
+      console.log("[Adam MSE] audio ended \u2192 _adamNext");
+      _adamNextRef?.().catch(() => {
       });
     };
     mkAudio.addEventListener("ended", onAACEnded);
@@ -5361,11 +5370,11 @@
       _msePaused = false;
       unbridgeDuration();
     }, { once: true });
-    console.log(`[AML MSE] AAC stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+    console.log(`[Adam MSE] AAC stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
   }
   async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
     _vlcMode = true;
-    window._amlVlcMode = true;
+    window._adamVlcMode = true;
     _allowCDNTransition = false;
     const _silentMs = new MediaSource();
     const _silentUrl = URL.createObjectURL(_silentMs);
@@ -5439,7 +5448,7 @@
       configurable: true
     });
     mkAudio.pause = () => {
-      console.log(`[AML VLC] pause() \u2192 pause`);
+      console.log(`[Adam VLC] pause() \u2192 pause`);
       _vlcPaused = true;
       mkAudio.dispatchEvent(new Event("pause"));
       _startLyricsFreeze(mkAudio);
@@ -5465,7 +5474,7 @@
     }, { once: true });
     mkAudio.dispatchEvent(new Event("canplay"));
     startVLCPoll(mkAudio);
-    console.log(`[AML Engine] VLC playing +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+    console.log(`[Adam Engine] VLC playing +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
     ctrl.signal.addEventListener("abort", () => {
       unbridgeDuration();
       stopVLCPoll();
@@ -5483,7 +5492,7 @@
   async function _triggerDirectPlay(adamId, mk) {
     if (!adamId) return;
     if (_isVideoId(adamId)) {
-      console.log(`[AML DirectPlay] skip ${adamId} \u2014 music video, deferring to NPIDF path`);
+      console.log(`[Adam DirectPlay] skip ${adamId} \u2014 music video, deferring to NPIDF path`);
       return;
     }
     const mkAudio = getMKAudio();
@@ -5498,7 +5507,7 @@
     installPlayProxy(mkAudio);
     const sf = mk.storefrontId ?? "us";
     const t0 = performance.now();
-    console.log(`[AML DirectPlay] \u2192 ${adamId} (pre-NPIDF fast path)`);
+    console.log(`[Adam DirectPlay] \u2192 ${adamId} (pre-NPIDF fast path)`);
     await waitForLossless(T().losslessWait);
     if (genStale(myGen)) return;
     try {
@@ -5517,7 +5526,7 @@
       });
       if (genStale(myGen)) return;
       if (!sessResp.ok) {
-        console.error("[AML DirectPlay] Session error:", sessResp.status);
+        console.error("[Adam DirectPlay] Session error:", sessResp.status);
         _directPlayAdamId = null;
         setPlayState(PLAY_STATE.IDLE, "direct:session-error");
         return;
@@ -5536,7 +5545,7 @@
       _currentAssetId = adamId;
       _videoCodec = null;
       _mvVideoHeights = [];
-      console.log(`[AML DirectPlay] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+      console.log(`[Adam DirectPlay] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
       showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
       bridgeDuration(mk, _durationSec);
       _slInitForTrack(adamId);
@@ -5562,7 +5571,7 @@
       }
     } catch (err) {
       if (!genStale(myGen)) {
-        console.error("[AML DirectPlay] Error:", err);
+        console.error("[Adam DirectPlay] Error:", err);
         _directPlayAdamId = null;
         setPlayState(PLAY_STATE.IDLE, "direct:error");
       }
@@ -5584,12 +5593,12 @@
       clearTimeout(_externalPlayGateTimer);
       _externalPlayGateTimer = null;
     }
-    console.log(`[AML Engine] NPIDF confirmed \u2014 direct play in progress/active for ${htcAdamId}, skipping re-open`);
+    console.log(`[Adam Engine] NPIDF confirmed \u2014 direct play in progress/active for ${htcAdamId}, skipping re-open`);
     return true;
   }
   function _htcDiscardStalePrewarms(adamId) {
     if (_nextAlacSession && _nextAlacSession.adamId !== adamId) {
-      console.log(`[AML Gapless] MISS \u2014 pre-warm was for ${_nextAlacSession.adamId}, playing ${adamId} \u2014 discarding`);
+      console.log(`[Adam Gapless] MISS \u2014 pre-warm was for ${_nextAlacSession.adamId}, playing ${adamId} \u2014 discarding`);
       deleteSession(_nextAlacSession.sess.sessionId);
       _nextAlacSession = null;
     }
@@ -5599,7 +5608,7 @@
       _discardNextAacStream();
     }
     if (_nextMvSession && _nextMvSession.adamId !== adamId) {
-      console.log(`[AML Gapless MV] MISS \u2014 pre-warm was for ${_nextMvSession.adamId}, playing ${adamId} \u2014 discarding`);
+      console.log(`[Adam Gapless MV] MISS \u2014 pre-warm was for ${_nextMvSession.adamId}, playing ${adamId} \u2014 discarding`);
       deleteSession(_nextMvSession.sess.sessionId);
       _nextMvSession = null;
     }
@@ -5621,14 +5630,14 @@
     const adamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
     const sf = mk.storefrontId ?? "us";
     if (!adamId) {
-      console.warn("[AML Engine] No Adam ID");
+      console.warn("[Adam Engine] No Adam ID");
       return;
     }
     _currentAssetId = adamId;
     _slInitForTrack(adamId);
     _htcDiscardStalePrewarms(adamId);
     const t0 = performance.now();
-    console.log(`[AML Engine] \u2192 ${item.attributes?.name ?? adamId} (id=${adamId} sf=${sf})`);
+    console.log(`[Adam Engine] \u2192 ${item.attributes?.name ?? adamId} (id=${adamId} sf=${sf})`);
     const mkAudio = getMKAudio();
     if (mkAudio) {
       if (!mkAudio.paused && !mkAudio.ended) mkAudio.pause();
@@ -5658,7 +5667,7 @@
       _videoCodec = sess.capabilities?.videoCodec || null;
       _mvVideoHeights = sess.videoHeights ?? [];
       _audioAnalysis = null;
-      console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+      console.log(`[Adam Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
       {
         const left = await leaveLossless({
           live: _vlcLive,
@@ -5667,7 +5676,7 @@
         });
         if (left.stopped) {
           if (left.ok) _vlcLive = false;
-          else console.warn("[AML Handoff] libvlc stop did not complete; continuing");
+          else console.warn("[Adam Handoff] libvlc stop did not complete; continuing");
           if (genStale(myGen)) return;
         }
       }
@@ -5707,7 +5716,7 @@
       if (!_abortCtrl?.signal.aborted) {
         const mk2 = window.MusicKit?.getInstance?.();
         console.error(
-          "[AML Engine] Playback error:",
+          "[Adam Engine] Playback error:",
           err,
           "\n  adamId=",
           _currentAssetId,
@@ -5725,12 +5734,12 @@
       setPlayState(PLAY_STATE.IDLE, "htc:error");
     }
   }
-  var _HIST_KEY = "aml_play_history";
+  var _HIST_KEY = "adam_play_history";
   var _HIST_MAX = 50;
   var _queueHistory = [];
   async function _histLoadAsync() {
     try {
-      const raw = await window.amlBridge?.storeRead(_HIST_KEY);
+      const raw = await window.adamBridge?.storeRead(_HIST_KEY);
       if (raw) {
         _queueHistory = JSON.parse(raw);
         return;
@@ -5741,7 +5750,7 @@
       const legacy = localStorage.getItem(_HIST_KEY);
       if (legacy) {
         _queueHistory = JSON.parse(legacy);
-        await window.amlBridge?.storeWrite(_HIST_KEY, legacy);
+        await window.adamBridge?.storeWrite(_HIST_KEY, legacy);
         localStorage.removeItem(_HIST_KEY);
       }
     } catch (_) {
@@ -5749,7 +5758,7 @@
   }
   async function _histSaveAsync() {
     try {
-      await window.amlBridge?.storeWrite(_HIST_KEY, JSON.stringify(_queueHistory));
+      await window.adamBridge?.storeWrite(_HIST_KEY, JSON.stringify(_queueHistory));
     } catch (_) {
     }
   }
@@ -5784,11 +5793,11 @@
   }
   function _histClear() {
     _queueHistory = [];
-    window.amlBridge?.storeDelete(_HIST_KEY).catch(() => {
+    window.adamBridge?.storeDelete(_HIST_KEY).catch(() => {
     });
     _histRender();
   }
-  var _RESUME_KEY = "aml_resume_state";
+  var _RESUME_KEY = "adam_resume_state";
   var _RESUME_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
   var _resumeEnabled = true;
   var _resumeState = null;
@@ -5827,21 +5836,21 @@
     if (!_resumeDirty || !_resumeState) return;
     _resumeDirty = false;
     try {
-      await window.amlBridge?.storeWrite(_RESUME_KEY, JSON.stringify(_resumeState));
+      await window.adamBridge?.storeWrite(_RESUME_KEY, JSON.stringify(_resumeState));
     } catch (_) {
     }
   }
   function _resumeClear() {
     _resumeState = null;
     _resumeDirty = false;
-    window.amlBridge?.storeDelete(_RESUME_KEY).catch(() => {
+    window.adamBridge?.storeDelete(_RESUME_KEY).catch(() => {
     });
   }
   function _resumeShowChip(mk, saved) {
-    if (document.getElementById("aml-resume-chip")) return;
+    if (document.getElementById("adam-resume-chip")) return;
     const FF = "font-family:-apple-system,SF Pro Text,system-ui,sans-serif;";
     const chip = document.createElement("div");
-    chip.id = "aml-resume-chip";
+    chip.id = "adam-resume-chip";
     chip.style.cssText = "position:fixed;bottom:110px;right:22px;z-index:99997;display:flex;align-items:center;gap:12px;max-width:360px;padding:12px 14px;border-radius:14px;background:rgba(30,30,32,0.92);border:0.5px solid rgba(255,255,255,0.14);box-shadow:0 10px 40px rgba(0,0,0,0.55);backdrop-filter:blur(28px) saturate(1.8);-webkit-backdrop-filter:blur(28px) saturate(1.8);transform:translateY(20px);opacity:0;transition:transform 0.3s,opacity 0.3s;" + FF;
     if (saved.artworkUrl) {
       const art = document.createElement("img");
@@ -5879,7 +5888,7 @@
       chip.style.transform = "translateY(0)";
     });
     setTimeout(() => {
-      if (document.getElementById("aml-resume-chip")) close();
+      if (document.getElementById("adam-resume-chip")) close();
     }, 2e4);
   }
   function _resumeSeekWhenReady(mk, saved) {
@@ -5929,7 +5938,7 @@
       }
       _resumeSeekWhenReady(mk, saved);
     } catch (e) {
-      console.warn("[AML Resume] restore failed, falling back to single track:", e?.message);
+      console.warn("[Adam Resume] restore failed, falling back to single track:", e?.message);
       try {
         await mk.setQueue({ song: saved.adamId });
         await mk.play();
@@ -5940,7 +5949,7 @@
   }
   async function _resumeSetup(mk) {
     try {
-      const raw = await window.amlBridge?.storeRead("resumeEnabled");
+      const raw = await window.adamBridge?.storeRead("resumeEnabled");
       if (raw === "false" || raw === false) _resumeEnabled = false;
     } catch (_) {
     }
@@ -5949,7 +5958,7 @@
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) _resumeFlush();
     });
-    window.amlBridge?.onFlushAndQuit?.(() => {
+    window.adamBridge?.onFlushAndQuit?.(() => {
       _resumeMark();
       _resumeFlush();
     });
@@ -5964,7 +5973,7 @@
     if (!_resumeEnabled) return;
     let saved = null;
     try {
-      const raw = await window.amlBridge?.storeRead(_RESUME_KEY);
+      const raw = await window.adamBridge?.storeRead(_RESUME_KEY);
       if (raw) saved = JSON.parse(raw);
     } catch (_) {
     }
@@ -5987,7 +5996,7 @@
   async function _deepLinkOpen(mk, intent) {
     const { type, id, sf } = intent;
     if (!id) return;
-    console.log(`[AML DeepLink] type=${type} id=${id} sf=${sf}`);
+    console.log(`[Adam DeepLink] type=${type} id=${id} sf=${sf}`);
     if (sf && sf !== mk.storefrontId) {
       try {
         await mk.changeUserStorefront(sf);
@@ -6017,20 +6026,20 @@
           window.dispatchEvent(new PopStateEvent("popstate"));
           break;
         default:
-          console.warn(`[AML DeepLink] unknown type: ${type}`);
+          console.warn(`[Adam DeepLink] unknown type: ${type}`);
       }
     } catch (e) {
-      console.error("[AML DeepLink] navigation error:", e.message);
+      console.error("[Adam DeepLink] navigation error:", e.message);
     }
   }
   function _deepLinkSetup(mk) {
-    window.amlBridge?.onOpenUrl?.((intent) => {
+    window.adamBridge?.onOpenUrl?.((intent) => {
       _deepLinkOpen(mk, intent).catch(() => {
       });
     });
   }
   function _discordUpdateNow() {
-    if (!_discordEnabled || !window.amlBridge?.discordUpdate) return;
+    if (!_discordEnabled || !window.adamBridge?.discordUpdate) return;
     const item = _mkInstance?.nowPlayingItem;
     if (!item || !_currentAssetId) return;
     const a = item.attributes ?? {};
@@ -6043,7 +6052,7 @@
     const itemType = isVideo ? "music-video" : "song";
     const slug = (a.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "track";
     const appleUrl = `https://music.apple.com/${sf}/${itemType}/${slug}/${_currentAssetId}`;
-    window.amlBridge.discordUpdate({
+    window.adamBridge.discordUpdate({
       name: a.name || "",
       artist: a.artistName || "",
       album: a.albumName || "",
@@ -6057,7 +6066,7 @@
   }
   async function _discordSetup() {
     try {
-      const raw = await window.amlBridge?.storeRead("discordEnabled");
+      const raw = await window.adamBridge?.storeRead("discordEnabled");
       _discordEnabled = raw === "true" || raw === true;
     } catch (_) {
     }
@@ -6076,7 +6085,7 @@
   var _scrobbleTimer = null;
   async function _lastfmRefreshStatus() {
     try {
-      const s = await window.amlBridge?.lastfmStatus();
+      const s = await window.adamBridge?.lastfmStatus();
       _lastfmConnected = !!s?.connected;
       return s;
     } catch (_) {
@@ -6085,7 +6094,7 @@
   }
   async function _lbRefreshStatus() {
     try {
-      const s = await window.amlBridge?.lbStatus();
+      const s = await window.adamBridge?.lbStatus();
       _lbConnected = !!s?.connected;
       return s;
     } catch (_) {
@@ -6112,8 +6121,8 @@
       albumArtist: a.albumArtistName || a.artistName || "",
       duration: durSec || void 0
     };
-    if (_lastfmConnected) window.amlBridge?.lastfmNowPlaying?.(meta);
-    if (_lbConnected) window.amlBridge?.lbNowPlaying?.(meta);
+    if (_lastfmConnected) window.adamBridge?.lastfmNowPlaying?.(meta);
+    if (_lbConnected) window.adamBridge?.lbNowPlaying?.(meta);
     if (durSec && durSec < 30) return;
     const thresholdSec = durSec ? Math.min(240, durSec / 2) : 60;
     const startedAt = Date.now();
@@ -6121,8 +6130,8 @@
       if (_scrobbleTimer !== myTimer) return;
       _scrobbleTimer = null;
       const scrob = { ...meta, timestamp: Math.floor(startedAt / 1e3) };
-      if (_lastfmConnected) window.amlBridge?.lastfmScrobble?.(scrob);
-      if (_lbConnected) window.amlBridge?.lbScrobble?.(scrob);
+      if (_lastfmConnected) window.adamBridge?.lastfmScrobble?.(scrob);
+      if (_lbConnected) window.adamBridge?.lbScrobble?.(scrob);
     }, thresholdSec * 1e3);
     _scrobbleTimer = myTimer;
   }
@@ -6155,7 +6164,7 @@
       _audioGain.connect(_audioCtx.destination);
       return true;
     } catch (e) {
-      console.warn("[AML Audio] WebAudio graph unavailable:", e?.message);
+      console.warn("[Adam Audio] WebAudio graph unavailable:", e?.message);
       _audioGraphFailed = true;
       _audioCtx = _audioSrc = _audioGain = _audioAnalyser = null;
       return false;
@@ -6236,12 +6245,12 @@
     if (!_soundCheckEnabled || !_sessionId) return;
     const lkfs = await _scFetchLoudness();
     if (!Number.isFinite(lkfs)) {
-      console.log("[AML SoundCheck] no ludt loudness in stream");
+      console.log("[Adam SoundCheck] no ludt loudness in stream");
       return;
     }
     const factor = Math.max(0, Math.min(1, Math.pow(10, (SC_TARGET_LKFS - lkfs) / 20)));
     _scFactor = factor;
-    console.log(`[AML SoundCheck] loudness=${lkfs.toFixed(2)} LKFS \u2192 factor=${factor.toFixed(3)} (${(20 * Math.log10(factor || 1)).toFixed(2)} dB)`);
+    console.log(`[Adam SoundCheck] loudness=${lkfs.toFixed(2)} LKFS \u2192 factor=${factor.toFixed(3)} (${(20 * Math.log10(factor || 1)).toFixed(2)} dB)`);
     if (factor >= 0.999) return;
     if (_vlcMode) {
       _scVlcReapply?.();
@@ -6265,7 +6274,7 @@
   }
   async function _scSetup() {
     try {
-      const raw = await window.amlBridge?.storeRead("soundCheckEnabled");
+      const raw = await window.adamBridge?.storeRead("soundCheckEnabled");
       _soundCheckEnabled = raw === "true" || raw === true;
     } catch (_) {
     }
@@ -6367,9 +6376,9 @@
       const audioBuf = await _xfDecodeCtx.decodeAudioData(bytes.buffer);
       _xfPlannedSec = _xfAnalyzeEnding(audioBuf);
       _xfPlanSession = cache.sessionId;
-      console.log(`[AML Crossfade] adaptive plan: ${_xfPlannedSec.toFixed(1)}s fade (session ${cache.sessionId})`);
+      console.log(`[Adam Crossfade] adaptive plan: ${_xfPlannedSec.toFixed(1)}s fade (session ${cache.sessionId})`);
     } catch (e) {
-      console.log("[AML Crossfade] adaptive offline analysis unavailable, using live sampling:", e?.message);
+      console.log("[Adam Crossfade] adaptive offline analysis unavailable, using live sampling:", e?.message);
     }
   }
   function _xfAdaptiveDuration() {
@@ -6462,17 +6471,17 @@
   }
   function _xfSetMode(mode) {
     _crossfadeMode = mode;
-    window.amlBridge?.setTweak("crossfade-mode", mode);
+    window.adamBridge?.setTweak("crossfade-mode", mode);
     _xfRecompute();
   }
   function _xfSetManualSec(sec) {
     _crossfadeManual = Math.max(0, Math.min(12, sec));
-    window.amlBridge?.setTweak("crossfade-sec", _crossfadeManual);
+    window.adamBridge?.setTweak("crossfade-sec", _crossfadeManual);
     if (_crossfadeMode === "manual") _xfRecompute();
   }
   async function _xfSetup() {
     try {
-      const prefs = await window.amlBridge?.getPrefs();
+      const prefs = await window.adamBridge?.getPrefs();
       const v = Number(prefs?.["crossfade-sec"]);
       if (Number.isFinite(v) && v >= 0) _crossfadeManual = Math.min(12, v);
       const m = prefs?.["crossfade-mode"];
@@ -6483,12 +6492,12 @@
     } catch (_) {
     }
   }
-  var _amlToastTimer = null;
-  function _amlToast(text) {
-    let el = document.getElementById("aml-toast");
+  var _adamToastTimer = null;
+  function _adamToast(text) {
+    let el = document.getElementById("adam-toast");
     if (!el) {
       el = document.createElement("div");
-      el.id = "aml-toast";
+      el.id = "adam-toast";
       el.style.cssText = "position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(10px);z-index:99999;padding:9px 18px;border-radius:20px;background:rgba(30,30,32,0.92);border:0.5px solid rgba(255,255,255,0.14);color:#fff;font-size:13px;font-weight:500;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;pointer-events:none;opacity:0;box-shadow:0 8px 30px rgba(0,0,0,0.5);backdrop-filter:blur(24px) saturate(1.8);-webkit-backdrop-filter:blur(24px) saturate(1.8);transition:opacity 0.2s,transform 0.2s;";
       document.body.appendChild(el);
     }
@@ -6497,8 +6506,8 @@
       el.style.opacity = "1";
       el.style.transform = "translateX(-50%) translateY(0)";
     });
-    clearTimeout(_amlToastTimer);
-    _amlToastTimer = setTimeout(() => {
+    clearTimeout(_adamToastTimer);
+    _adamToastTimer = setTimeout(() => {
       el.style.opacity = "0";
       el.style.transform = "translateX(-50%) translateY(10px)";
     }, 1600);
@@ -6522,7 +6531,7 @@
       if (loved) {
         await mk.api.music(`/v1/me/ratings/songs/${id}`, {}, { fetchOptions: { method: "DELETE" } });
         _lovedState[id] = false;
-        _amlToast("Removed from Favourites");
+        _adamToast("Removed from Favourites");
       } else {
         await mk.api.music(
           `/v1/me/ratings/songs/${id}`,
@@ -6530,12 +6539,12 @@
           { fetchOptions: { method: "PUT", body: JSON.stringify({ type: "rating", attributes: { value: 1 } }) } }
         );
         _lovedState[id] = true;
-        _amlToast("\u2665  Loved");
+        _adamToast("\u2665  Loved");
       }
       _reemitMpris?.();
     } catch (e) {
-      console.warn("[AML Love] toggle failed:", e?.message);
-      _amlToast("Could not update Favourite");
+      console.warn("[Adam Love] toggle failed:", e?.message);
+      _adamToast("Could not update Favourite");
     }
   }
   var _hotkeysEnabled = true;
@@ -6577,7 +6586,7 @@
       a.volume = v;
     } catch (_) {
     }
-    _amlToast(`Volume ${Math.round(v * 100)}%`);
+    _adamToast(`Volume ${Math.round(v * 100)}%`);
   }
   function _hotkeyRun(action) {
     const mk = _mkInstance;
@@ -6633,15 +6642,15 @@
   }
   async function _hotkeySaveBindings() {
     try {
-      await window.amlBridge?.storeWrite("hotkeyBindings", JSON.stringify(_hotkeyBindings));
+      await window.adamBridge?.storeWrite("hotkeyBindings", JSON.stringify(_hotkeyBindings));
     } catch (_) {
     }
   }
   async function _hotkeysSetup() {
     try {
-      const raw = await window.amlBridge?.storeRead("hotkeysEnabled");
+      const raw = await window.adamBridge?.storeRead("hotkeysEnabled");
       if (raw === "false" || raw === false) _hotkeysEnabled = false;
-      const b = await window.amlBridge?.storeRead("hotkeyBindings");
+      const b = await window.adamBridge?.storeRead("hotkeyBindings");
       if (b) {
         const parsed = JSON.parse(b);
         for (const a of _HOTKEY_ACTIONS) if (parsed[a.id]) _hotkeyBindings[a.id] = parsed[a.id];
@@ -6674,7 +6683,7 @@
     }
   }
   function _histRender() {
-    const section = document.getElementById("aml-history-section");
+    const section = document.getElementById("adam-history-section");
     if (!section) return;
     if (_queueHistory.length === 0) {
       section.style.display = "none";
@@ -6682,46 +6691,46 @@
     }
     section.style.display = "";
     section.innerHTML = `
-        <div class="aml-hs-header">
-            <span class="aml-hs-title">History</span>
+        <div class="adam-hs-header">
+            <span class="adam-hs-title">History</span>
         </div>
-        <div class="aml-hs-list">
+        <div class="adam-hs-list">
         ${_queueHistory.slice(0, 30).map((h) => `
-            <div class="aml-hs-item" data-catalog-id="${_histEscape(h.catalogId)}">
-                ${h.artworkUrl ? `<img class="aml-hs-art" src="${_histEscape(h.artworkUrl)}" loading="lazy">` : `<div class="aml-hs-art aml-hs-art-ph"></div>`}
-                <div class="aml-hs-meta">
-                    <div class="aml-hs-name">${_histEscape(h.name)}</div>
-                    <div class="aml-hs-artist">${_histEscape(h.artist)}</div>
+            <div class="adam-hs-item" data-catalog-id="${_histEscape(h.catalogId)}">
+                ${h.artworkUrl ? `<img class="adam-hs-art" src="${_histEscape(h.artworkUrl)}" loading="lazy">` : `<div class="adam-hs-art adam-hs-art-ph"></div>`}
+                <div class="adam-hs-meta">
+                    <div class="adam-hs-name">${_histEscape(h.name)}</div>
+                    <div class="adam-hs-artist">${_histEscape(h.artist)}</div>
                 </div>
-                ${h.duration ? `<span class="aml-hs-dur">${_histEscape(h.duration)}</span>` : ""}
+                ${h.duration ? `<span class="adam-hs-dur">${_histEscape(h.duration)}</span>` : ""}
             </div>`).join("")}
         </div>`;
   }
   function _histInjectStyles() {
-    if (document.getElementById("aml-hist-css")) return;
+    if (document.getElementById("adam-hist-css")) return;
     const s = document.createElement("style");
-    s.id = "aml-hist-css";
+    s.id = "adam-hist-css";
     s.textContent = `
-#aml-history-section {
+#adam-history-section {
     border-bottom: 1px solid var(--separator, rgba(128,128,128,.18));
     padding-bottom: 8px;
     margin-bottom: 4px;
 }
-.aml-hs-header {
+.adam-hs-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 10px var(--side-panel-horizontal-padding, 20px) 8px;
 }
-.aml-hs-title {
+.adam-hs-title {
     font-size: 17px;
     font-weight: 700;
     letter-spacing: normal;
     text-transform: none;
     opacity: 1;
 }
-.aml-hs-list { padding-bottom: 4px; max-height: 300px; overflow-y: auto; scrollbar-width: thin; }
-.aml-hs-item {
+.adam-hs-list { padding-bottom: 4px; max-height: 300px; overflow-y: auto; scrollbar-width: thin; }
+.adam-hs-item {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -6732,8 +6741,8 @@
     transition: background .12s;
     box-sizing: border-box;
 }
-.aml-hs-item:hover { background: var(--systemFillTertiary, rgba(128,128,128,.14)); }
-.aml-hs-art {
+.adam-hs-item:hover { background: var(--systemFillTertiary, rgba(128,128,128,.14)); }
+.adam-hs-art {
     width: 40px;
     height: 40px;
     border-radius: 4px;
@@ -6741,23 +6750,23 @@
     flex-shrink: 0;
     background: rgba(128,128,128,.18);
 }
-.aml-hs-art-ph { background: rgba(128,128,128,.18); }
-.aml-hs-meta { min-width: 0; flex: 1; }
-.aml-hs-name {
+.adam-hs-art-ph { background: rgba(128,128,128,.18); }
+.adam-hs-meta { min-width: 0; flex: 1; }
+.adam-hs-name {
     font-size: 13px;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.aml-hs-artist {
+.adam-hs-artist {
     font-size: 11px;
     opacity: .55;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.aml-hs-dur {
+.adam-hs-dur {
     font-size: 11px;
     font-variant-numeric: tabular-nums;
     opacity: .55;
@@ -6771,29 +6780,29 @@
     const panel = document.querySelector(".side-panel");
     if (!panel) return;
     if (!_histEnabled) {
-      panel.querySelector("#aml-history-section")?.remove();
+      panel.querySelector("#adam-history-section")?.remove();
       return;
     }
-    if (panel.querySelector("#aml-history-section")) return;
+    if (panel.querySelector("#adam-history-section")) return;
     const div = document.createElement("div");
-    div.id = "aml-history-section";
+    div.id = "adam-history-section";
     div.addEventListener("click", (e) => {
-      const item = e.target.closest(".aml-hs-item");
-      if (item?.dataset.catalogId) window._amlHistPlay(item.dataset.catalogId);
+      const item = e.target.closest(".adam-hs-item");
+      if (item?.dataset.catalogId) window._adamHistPlay(item.dataset.catalogId);
     });
     panel.prepend(div);
     _histRender();
   }
   async function setupQueueHistory(mk) {
     _histInjectStyles();
-    window._amlHistClear = _histClear;
-    window._amlHistPlay = (catalogId) => {
+    window._adamHistClear = _histClear;
+    window._adamHistPlay = (catalogId) => {
       if (!catalogId) return;
       mk.setQueue({ song: catalogId }).then(() => mk.play()).catch(() => {
       });
     };
     try {
-      const pref = await window.amlBridge?.storeRead("historyEnabled");
+      const pref = await window.adamBridge?.storeRead("historyEnabled");
       if (pref !== null && pref !== void 0) _histEnabled = pref !== "false" && pref !== false;
     } catch (_) {
     }
@@ -6802,11 +6811,11 @@
     watchDomSettled(_histInject);
   }
   async function setup() {
-    if (window.__amlEngineMounted) return;
-    window.__amlEngineMounted = true;
+    if (window.__adamEngineMounted) return;
+    window.__adamEngineMounted = true;
     blockAppleCDN();
-    let _amlLastGotoMs = 0;
-    const _inGotoWindow = () => performance.now() - _amlLastGotoMs < 1e3 || _playState === PLAY_STATE.OPENING || _playState === PLAY_STATE.STREAMING;
+    let _adamLastGotoMs = 0;
+    const _inGotoWindow = () => performance.now() - _adamLastGotoMs < 1e3 || _playState === PLAY_STATE.OPENING || _playState === PLAY_STATE.STREAMING;
     const _isSpuriousDialog = (el) => el?.tagName === "DIALOG" && el?.dataset?.testid === "dialog" && el?.classList?.contains("error");
     const _origShowModal = HTMLDialogElement.prototype.showModal;
     HTMLDialogElement.prototype.showModal = function() {
@@ -6814,7 +6823,7 @@
         const mkAudio = getMKAudio();
         const mk2 = window.MusicKit?.getInstance?.();
         console.error(
-          "[AML] Error dialog showModal triggered \u2014 dumping state:",
+          "[Adam] Error dialog showModal triggered \u2014 dumping state:",
           "\n  playState   =",
           _playState,
           "\n  generation  =",
@@ -6839,7 +6848,7 @@
           this.innerText?.slice(0, 200)
         );
         if (_inGotoWindow()) {
-          console.log("[AML] Suppressed error dialog showModal (goto window)");
+          console.log("[Adam] Suppressed error dialog showModal (goto window)");
           return;
         }
       }
@@ -6850,28 +6859,28 @@
       const dlg = document.querySelector('dialog[data-testid="dialog"].error[open]');
       if (dlg) {
         dlg.close();
-        console.log("[AML] Closed spurious error dialog (goto window)");
+        console.log("[Adam] Closed spurious error dialog (goto window)");
       }
     }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["open"] });
     try {
-      const msg = await window._amlEngine?.waitFor("engine.snapshot", T().sseWait);
+      const msg = await window._adamEngine?.waitFor("engine.snapshot", T().sseWait);
       const snap = msg?.payload?.snapshot;
       const gen = msg?.meta?.generation ?? "?";
       const why = msg?.meta?.reason ?? "?";
       _snapshotEventId = msg?.meta?.id ?? -1;
       if (snap?.capabilities) {
         _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-        window._amlLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+        window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
       }
-      console.log(`[AML Engine] Engine ready \u2014 drm.session=${snap?.drm?.session ?? "unknown"} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
+      console.log(`[Adam Engine] Engine ready \u2014 drm.session=${snap?.drm?.session ?? "unknown"} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
-      console.warn("[AML Engine] Engine snapshot timeout:", e.message, "\u2014 continuing");
+      console.warn("[Adam Engine] Engine snapshot timeout:", e.message, "\u2014 continuing");
     }
-    window.amlBridge?.getPrefs().then((p) => {
+    window.adamBridge?.getPrefs().then((p) => {
       if (p["streaming-quality"]) _streamingQuality = p["streaming-quality"];
       if (p["lossless-enabled"] === false) _streamingQuality = "high-quality";
       if (p["downloads-quality"]) _downloadsQuality = p["downloads-quality"];
-      window._amlLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+      window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
       const body = {};
       if (p.prewarmLimitMB != null) body.prewarmLimitMB = p.prewarmLimitMB;
       if (p.persistLimitMB != null) body.persistLimitMB = p.persistLimitMB;
@@ -6881,10 +6890,10 @@
         });
     }).catch(() => {
     });
-    window._amlEngine?.on("drm", (msg) => {
+    window._adamEngine?.on("drm", (msg) => {
       const eventId = msg?.meta?.id ?? Infinity;
       if (eventId <= _snapshotEventId) {
-        console.log(`[AML Engine] DRM event ${eventId} skipped (predates snapshot ${_snapshotEventId})`);
+        console.log(`[Adam Engine] DRM event ${eventId} skipped (predates snapshot ${_snapshotEventId})`);
         return;
       }
       const snap = msg?.payload;
@@ -6892,17 +6901,17 @@
       const sess = snap?.state?.session ?? "unknown";
       if (snap?.capabilities) {
         _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-        window._amlLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+        window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
       }
-      console.log(`[AML Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
+      console.log(`[Adam Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
       if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
       if (snap?.challenge?.type === "credentials") {
-        console.log("[AML Engine] DRM credential challenge \u2014 opening sign-in form");
-        window.__amlOpenEngineSettings?.();
+        console.log("[Adam Engine] DRM credential challenge \u2014 opening sign-in form");
+        window.__adamOpenEngineSettings?.();
       }
     });
     const mk = await waitForMusicKit();
-    console.log("[AML Engine] MusicKit ready");
+    console.log("[Adam Engine] MusicKit ready");
     const _pushLibraryTokens = () => {
       try {
         const mkut = mk.musicUserToken;
@@ -6919,7 +6928,7 @@
       }
     };
     _pushLibraryTokens();
-    window._amlEngine?.on("sse.open", _pushLibraryTokens);
+    window._adamEngine?.on("sse.open", _pushLibraryTokens);
     mk.addEventListener("authorizationStatusDidChange", _pushLibraryTokens);
     async function _mkFetchAll(mkInst, basePath, extraParams, onProgress) {
       const items = [];
@@ -6984,7 +6993,7 @@
         const mkForAuth = window.MusicKit?.getInstance?.();
         if (!mkForAuth) return;
         if (mkForAuth.authorizationStatus !== 3) {
-          console.log("[AML Library] auto-sync: waiting for web UI login (MK status=" + mkForAuth.authorizationStatus + ")");
+          console.log("[Adam Library] auto-sync: waiting for web UI login (MK status=" + mkForAuth.authorizationStatus + ")");
           const _onAuth = async () => {
             mk.removeEventListener("authorizationStatusDidChange", _onAuth);
             await _maybeAutoSync();
@@ -6994,15 +7003,15 @@
         }
         const status = await fetch(ENGINE + "/api/v1/library/status").then((r) => r.json()).catch(() => null);
         if (!status?.needsSync) return;
-        console.log("[AML Library] auto-sync: cache needs refresh (web auth)");
+        console.log("[Adam Library] auto-sync: cache needs refresh (web auth)");
         const result = await _syncLibraryViaJS();
         if (result.songs === 0) {
-          console.log("[AML Library] auto-sync: library is empty \u2014 will not retry for 24h");
+          console.log("[Adam Library] auto-sync: library is empty \u2014 will not retry for 24h");
         } else {
-          console.log(`[AML Library] auto-sync done: ${result.songs} songs, ${result.playlists} playlists`);
+          console.log(`[Adam Library] auto-sync done: ${result.songs} songs, ${result.playlists} playlists`);
         }
       } catch (e) {
-        console.log("[AML Library] auto-sync failed:", e.message || e);
+        console.log("[Adam Library] auto-sync failed:", e.message || e);
       }
     };
     setTimeout(_maybeAutoSync, 2e3);
@@ -7011,7 +7020,7 @@
     mk.play = function() {
       if (_vlcMode) {
         if (_vlcPaused) {
-          console.log("[AML VLC] mk.play() \u2192 resume");
+          console.log("[Adam VLC] mk.play() \u2192 resume");
           _vlcPaused = false;
           fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
           });
@@ -7027,7 +7036,7 @@
     };
     mk.pause = function() {
       if (_vlcMode) {
-        console.log("[AML VLC] mk.pause() \u2192 pause");
+        console.log("[Adam VLC] mk.pause() \u2192 pause");
         _vlcPaused = true;
         getMKAudio()?.dispatchEvent(new Event("pause"));
         fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
@@ -7042,29 +7051,29 @@
       return _origMKPause();
     };
     installMKSeekInterceptor(mk);
-    let _amlAdvancing = false;
-    let _amlAdvancingTimer = null;
-    let _amlGotoTarget = null;
-    let _amlGotoTargetId = null;
+    let _adamAdvancing = false;
+    let _adamAdvancingTimer = null;
+    let _adamGotoTarget = null;
+    let _adamGotoTargetId = null;
     function _clearAdvancing() {
-      _amlAdvancing = false;
-      clearTimeout(_amlAdvancingTimer);
-      _amlAdvancingTimer = null;
+      _adamAdvancing = false;
+      clearTimeout(_adamAdvancingTimer);
+      _adamAdvancingTimer = null;
     }
-    async function _amlGoto(ci, ii) {
-      if (_amlAdvancing) {
-        console.log("[AML] _amlGoto busy, ignoring ci=", ci, "ii=", ii);
+    async function _adamGoto(ci, ii) {
+      if (_adamAdvancing) {
+        console.log("[Adam] _adamGoto busy, ignoring ci=", ci, "ii=", ii);
         return;
       }
-      _amlAdvancing = true;
-      _amlTransitioning = true;
-      _amlLastGotoMs = performance.now();
-      _amlNavInternal = true;
-      _amlPendingCI = ci;
-      _amlPendingII = ii;
+      _adamAdvancing = true;
+      _adamTransitioning = true;
+      _adamLastGotoMs = performance.now();
+      _adamNavInternal = true;
+      _adamPendingCI = ci;
+      _adamPendingII = ii;
       const targetFlat = _sessionFlatIdx(ci, ii);
-      _amlGotoTarget = targetFlat;
-      console.log("[AML] _amlGoto ci=", ci, "ii=", ii, "flat=", targetFlat);
+      _adamGotoTarget = targetFlat;
+      console.log("[Adam] _adamGoto ci=", ci, "ii=", ii, "flat=", targetFlat);
       stopVLCPoll();
       const _gotoAudio = getMKAudio();
       if (_gotoAudio && _nativeSrcSet) {
@@ -7106,61 +7115,61 @@
       const targetSongId = _sessionContainers[ci]?.items[ii];
       const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => extractItemId(it) === targetSongId) : null;
       if (targetItem) sendMprisMetadata(targetItem);
-      _amlAdvancingTimer = setTimeout(() => {
-        _amlGotoTarget = null;
-        _amlGotoTargetId = null;
+      _adamAdvancingTimer = setTimeout(() => {
+        _adamGotoTarget = null;
+        _adamGotoTargetId = null;
         _allowCDNTransition = false;
-        _amlTransitioning = false;
-        _amlNavInternal = false;
-        _amlPendingCI = -1;
-        _amlPendingII = -1;
+        _adamTransitioning = false;
+        _adamNavInternal = false;
+        _adamPendingCI = -1;
+        _adamPendingII = -1;
         _clearAdvancing();
       }, 6e3);
       const mkCurrentItems = mk.queue?.items ?? [];
       const mkDirectIdx = targetSongId ? mkCurrentItems.findIndex((it) => extractItemId(it) === targetSongId) : -1;
       const targetIsVideo = _isVideoId(targetSongId);
       if (mkDirectIdx >= 0 && !targetIsVideo) {
-        _amlGotoTarget = mkDirectIdx;
-        _amlGotoTargetId = targetSongId ?? null;
+        _adamGotoTarget = mkDirectIdx;
+        _adamGotoTargetId = targetSongId ?? null;
         await mk.changeToMediaAtIndex(mkDirectIdx).catch(() => {
         });
       } else {
         const allIds = _sessionFlatIds();
         if (!allIds.length) {
-          clearTimeout(_amlAdvancingTimer);
+          clearTimeout(_adamAdvancingTimer);
           _clearAdvancing();
-          _amlGotoTarget = null;
-          _amlGotoTargetId = null;
+          _adamGotoTarget = null;
+          _adamGotoTargetId = null;
           _allowCDNTransition = false;
-          _amlTransitioning = false;
-          _amlNavInternal = false;
-          _amlPendingCI = -1;
-          _amlPendingII = -1;
+          _adamTransitioning = false;
+          _adamNavInternal = false;
+          _adamPendingCI = -1;
+          _adamPendingII = -1;
           return;
         }
         const songIds = targetIsVideo ? allIds : allIds.filter((id) => !_isVideoId(id));
         const songIdx = targetIsVideo ? -1 : songIds.indexOf(targetSongId);
         if (targetIsVideo) {
           const desc = { musicVideo: targetSongId };
-          console.log("[AML] _amlGoto mixed/MV session \u2014 targeted setQueue " + JSON.stringify(desc));
-          _amlGotoTarget = 0;
-          _amlGotoTargetId = targetSongId ?? null;
+          console.log("[Adam] _adamGoto mixed/MV session \u2014 targeted setQueue " + JSON.stringify(desc));
+          _adamGotoTarget = 0;
+          _adamGotoTargetId = targetSongId ?? null;
           await mk.setQueue(desc).catch(() => {
           });
           await mk.changeToMediaAtIndex(0).catch(() => {
           });
         } else if (songIdx >= 0 && songIds.length !== allIds.length) {
-          console.log("[AML] _amlGoto mixed session \u2014 songs only, idx=" + songIdx + " of " + songIds.length);
-          _amlGotoTarget = songIdx;
-          _amlGotoTargetId = targetSongId ?? null;
+          console.log("[Adam] _adamGoto mixed session \u2014 songs only, idx=" + songIdx + " of " + songIds.length);
+          _adamGotoTarget = songIdx;
+          _adamGotoTargetId = targetSongId ?? null;
           await mk.setQueue({ songs: songIds }).catch(() => {
           });
           await mk.changeToMediaAtIndex(songIdx).catch(() => {
           });
         } else {
           const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
-          _amlGotoTarget = targetIdx;
-          _amlGotoTargetId = targetSongId ?? null;
+          _adamGotoTarget = targetIdx;
+          _adamGotoTargetId = targetSongId ?? null;
           await mk.setQueue({ songs: allIds }).catch(() => {
           });
           await mk.changeToMediaAtIndex(targetIdx).catch(() => {
@@ -7172,46 +7181,46 @@
       const mkAudio = document.querySelector("audio");
       if (mkAudio && !_vlcMode) mkAudio.dispatchEvent(new Event("waiting"));
     }
-    async function _amlNext(manual = false) {
+    async function _adamNext(manual = false) {
       const repeat = mk.repeatMode ?? 0;
       const ci = _sessionContainerIdx, ii = _sessionItemIdx;
       const cur = _sessionContainers[ci];
       if (repeat === 1 && !manual) {
-        if (ci >= 0) await _amlGoto(ci, ii);
+        if (ci >= 0) await _adamGoto(ci, ii);
         return;
       }
       if (!cur) return;
       if (ii + 1 < cur.items.length) {
-        await _amlGoto(ci, ii + 1);
+        await _adamGoto(ci, ii + 1);
       } else if (repeat === 2) {
-        await _amlGoto(ci, 0);
+        await _adamGoto(ci, 0);
       } else if (ci + 1 < _sessionContainers.length) {
-        await _amlGoto(ci + 1, 0);
+        await _adamGoto(ci + 1, 0);
       } else {
         const mkItems = mk.queue?.items ?? [];
         const freshIds = mkItems.map(extractItemId).filter((id) => id && !cur.items.includes(id));
         if (freshIds.length) {
           cur.items.push(...freshIds);
-          await _amlGoto(ci, ii + 1);
+          await _adamGoto(ci, ii + 1);
         } else if (mk.queue?.playbackMode === 1 && _mkOrigSkipToNext) {
-          console.log("[AML Station] end of snapshot \u2014 delegating to MK native skip for station fetch");
+          console.log("[Adam Station] end of snapshot \u2014 delegating to MK native skip for station fetch");
           _mkOrigSkipToNext();
         }
       }
     }
-    async function _amlPrev() {
+    async function _adamPrev() {
       const ci = _sessionContainerIdx, ii = _sessionItemIdx;
       if (ci < 0) return;
       if (ii > 0) {
-        await _amlGoto(ci, ii - 1);
+        await _adamGoto(ci, ii - 1);
       } else if (ci > 0) {
-        await _amlGoto(ci - 1, _sessionContainers[ci - 1].items.length - 1);
+        await _adamGoto(ci - 1, _sessionContainers[ci - 1].items.length - 1);
       }
     }
     const _mkOrigSkipToNext = mk.skipToNextItem?.bind(mk);
-    mk.skipToNextItem = () => _amlNext(true);
-    mk.skipToPreviousItem = _amlPrev;
-    _amlNextRef = _amlNext;
+    mk.skipToNextItem = () => _adamNext(true);
+    mk.skipToPreviousItem = _adamPrev;
+    _adamNextRef = _adamNext;
     function _ownedGoto(ids, startId, label, closeGate) {
       const items = ids.slice();
       const target = startId && items.includes(startId) ? startId : items[0];
@@ -7221,9 +7230,9 @@
         ci = _sessionContainers.length - 1;
       }
       const ii = Math.max(0, _sessionContainers[ci].items.indexOf(target));
-      if (_AML_DEBUG) console.log(`[MK-DBG] ${label} \u2192 owned change: ${items.length} track(s) ci=${ci} ii=${ii} target=${target}`);
+      if (_ADAM_DEBUG) console.log(`[MK-DBG] ${label} \u2192 owned change: ${items.length} track(s) ci=${ci} ii=${ii} target=${target}`);
       if (closeGate) closeGate();
-      return _amlGoto(ci, ii).then(() => _AML_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change dispatched`)).catch((err) => _AML_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change failed:`, err?.message || err));
+      return _adamGoto(ci, ii).then(() => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change dispatched`)).catch((err) => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change failed:`, err?.message || err));
     }
     function _normalizeStartId(desc) {
       const raw = desc?.startWith?.id;
@@ -7292,7 +7301,7 @@
       return `/com/apple/music/track/${String(id).replace(/[^A-Za-z0-9_]/g, "_")}`;
     }
     function sendMprisMetadata(item) {
-      if (!window.amlBridge?.mprisUpdate || !item) return;
+      if (!window.adamBridge?.mprisUpdate || !item) return;
       const a = item.attributes ?? {};
       const artTemplate = a.artwork?.url ?? "";
       const artUrl = artTemplate.replace("{w}", "1000").replace("{h}", "1000");
@@ -7314,7 +7323,7 @@
       if (Number.isFinite(a.popularity)) meta["xesam:autoRating"] = Math.max(0, Math.min(1, a.popularity / 100));
       const iid = extractItemId(item);
       if (iid && iid in _lovedState) meta["xesam:userRating"] = _lovedState[iid] ? 1 : 0;
-      window.amlBridge.mprisUpdate({
+      window.adamBridge.mprisUpdate({
         metadata: meta,
         shuffle: mk.shuffleMode === 1
       });
@@ -7327,11 +7336,11 @@
     };
     function sendMprisStatus(status, { isResume = false } = {}) {
       const seeked = isResume && status === "Playing" && _vlcPosMs > 0;
-      window.amlBridge?.mprisUpdate?.({ status, position: _mprisPosMs() * 1e3, seeked });
+      window.adamBridge?.mprisUpdate?.({ status, position: _mprisPosMs() * 1e3, seeked });
     }
     function _pushMiniState() {
       const a = getMKAudio();
-      window.amlBridge?.mprisUpdate?.({
+      window.adamBridge?.mprisUpdate?.({
         volume: a && Number.isFinite(a.volume) ? Math.round(a.volume * 100) : 100,
         repeat: mk.repeatMode ?? 0,
         shuffle: mk.shuffleMode === 1,
@@ -7339,25 +7348,25 @@
       });
     }
     _pushMiniStateRef = _pushMiniState;
-    window.amlBridge?.onMiniSync?.(() => {
+    window.adamBridge?.onMiniSync?.(() => {
       try {
         if (mk.nowPlayingItem) sendMprisMetadata(mk.nowPlayingItem);
         _pushMiniState();
         const playing = mk.playbackState === window.MusicKit?.PlaybackStates?.playing;
-        window.amlBridge?.mprisUpdate?.({ status: playing ? "Playing" : "Paused", position: _mprisPosMs() * 1e3 });
+        window.adamBridge?.mprisUpdate?.({ status: playing ? "Playing" : "Paused", position: _mprisPosMs() * 1e3 });
       } catch (_) {
       }
     });
-    window.amlBridge?.onMprisCmd?.((cmd) => {
+    window.adamBridge?.onMprisCmd?.((cmd) => {
       if (cmd && typeof cmd === "object") {
         if (cmd.type === "seek") {
           const targetMs = Math.max(0, _mprisPosMs() + cmd.deltaMs);
           mk.seekToTime(targetMs / 1e3);
-          window.amlBridge?.mprisUpdate?.({ position: targetMs * 1e3, seeked: true });
+          window.adamBridge?.mprisUpdate?.({ position: targetMs * 1e3, seeked: true });
         } else if (cmd.type === "setPosition") {
           const targetMs = Math.max(0, cmd.ms);
           mk.seekToTime(targetMs / 1e3);
-          window.amlBridge?.mprisUpdate?.({ position: targetMs * 1e3, seeked: true });
+          window.adamBridge?.mprisUpdate?.({ position: targetMs * 1e3, seeked: true });
         } else if (cmd.type === "setLoopStatus") {
           const loopMap = { "None": 0, "Track": 1, "Playlist": 2 };
           const mode = loopMap[cmd.value];
@@ -7406,21 +7415,21 @@
           });
           break;
         case "next":
-          _amlNext(true).catch(() => {
+          _adamNext(true).catch(() => {
           });
           break;
         case "previous":
           if (mk.currentPlaybackTime > 3) mk.seekToTime(0);
-          else _amlPrev().catch(() => {
+          else _adamPrev().catch(() => {
           });
           break;
       }
     });
     mk.addEventListener("shuffleModeDidChange", () => {
-      window.amlBridge?.mprisUpdate?.({ shuffle: mk.shuffleMode === 1 });
+      window.adamBridge?.mprisUpdate?.({ shuffle: mk.shuffleMode === 1 });
     });
     mk.addEventListener("repeatModeDidChange", () => {
-      window.amlBridge?.mprisUpdate?.({ repeat: mk.repeatMode ?? 0 });
+      window.adamBridge?.mprisUpdate?.({ repeat: mk.repeatMode ?? 0 });
     });
     const _qId = (item) => item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
     function _prewarmLibraryPlaylist(playlistId) {
@@ -7434,9 +7443,9 @@
         // NOTE: [aria-label*="Play"] removed — matches product-lockup nav links (false positive)
       );
       if (!_vlcMode && _dbgPlaySel) {
-        console.log("[AML AAC-GATE] click caught vlc=" + _vlcMode + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
+        console.log("[Adam AAC-GATE] click caught vlc=" + _vlcMode + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
         if (_dbgPlaySel?.dataset?.testid === "click-action" && (_dbgPlaySel?.href?.includes("/music-video/") || !!e.target?.closest?.('[class*="vertical-video"]'))) {
-          console.log("[AML AAC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
+          console.log("[Adam AAC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
           return;
         }
         if (_allowCDNTransition) return;
@@ -7537,7 +7546,7 @@
         _directPlayPromise = aacCatalogId ? _triggerDirectPlay(aacCatalogId, mk) : null;
         if (_directPlayPromise) _directPlayPromise.catch(() => {
         });
-        if (_AML_DEBUG) console.log("[AML click] external play in AAC mode \u2014 opening CDN gate playbackState=" + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null") + " catalogId=" + (aacCatalogId || "not-found") + (aacSetQueueDesc ? " desc=" + JSON.stringify(aacSetQueueDesc) : "") + (_aacPlaylistId ? " playlist=" + _aacPlaylistId + " (pre-fetching)" : "") + " target=" + (e.target?.tagName || "?") + " testId=" + (e.target?.closest("[data-testid]")?.dataset?.testid || "none") + " matched=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 40) || "?"));
+        if (_ADAM_DEBUG) console.log("[Adam click] external play in AAC mode \u2014 opening CDN gate playbackState=" + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null") + " catalogId=" + (aacCatalogId || "not-found") + (aacSetQueueDesc ? " desc=" + JSON.stringify(aacSetQueueDesc) : "") + (_aacPlaylistId ? " playlist=" + _aacPlaylistId + " (pre-fetching)" : "") + " target=" + (e.target?.tagName || "?") + " testId=" + (e.target?.closest("[data-testid]")?.dataset?.testid || "none") + " matched=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 40) || "?"));
         _allowCDNTransition = true;
         const _aacMkApiSaved = {
           setQueue: mk.setQueue,
@@ -7571,25 +7580,25 @@
         const _aacOwnedGoto = (ids, startId, label) => _ownedGoto(ids, startId, label, _aacCloseGate);
         mk.setQueue = (...a) => {
           const desc = a[0];
-          if (_AML_DEBUG) console.log("[MK-DBG AAC] mk.setQueue() args=" + JSON.stringify(a).slice(0, 400));
+          if (_ADAM_DEBUG) console.log("[MK-DBG AAC] mk.setQueue() args=" + JSON.stringify(a).slice(0, 400));
           if (desc?.playlists && desc?.startWith?.id) {
             const startCid = _normalizeStartId(desc);
-            if (_AML_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 resolving pre-fetched tracks, startWith=" + startCid);
+            if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 resolving pre-fetched tracks, startWith=" + startCid);
             return _resolvePlaylistCatalogIds().then((catalogIds) => {
               if (catalogIds.length > 1) {
                 return _aacOwnedGoto(catalogIds, startCid, "playlist/local");
               }
-              if (_AML_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 cache cold, passthrough");
+              if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 cache cold, passthrough");
               if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
               _externalPlayGateTimer = setTimeout(() => {
-                if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
                 _aacCloseGate();
               }, 45e3);
               const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
               if (p2?.then) p2.then(
-                () => _AML_DEBUG && console.log("[MK-DBG AAC] playlists \u2192 passthrough resolved"),
+                () => _ADAM_DEBUG && console.log("[MK-DBG AAC] playlists \u2192 passthrough resolved"),
                 (err) => {
-                  if (_AML_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 passthrough rejected:", err?.message || err);
+                  if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 passthrough rejected:", err?.message || err);
                   _aacCloseGate();
                 }
               );
@@ -7599,20 +7608,20 @@
           if (desc?.albums?.length === 1 && typeof desc.albums[0] === "string" && desc.albums[0].startsWith("l.")) {
             const albumId = desc.albums[0];
             const startWithLid = desc.startWith?.id ?? null;
-            if (_AML_DEBUG) console.log("[MK-DBG AAC] albums \u2192 querying local cache for " + albumId);
+            if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 querying local cache for " + albumId);
             const fetchPromise = fetch(`${ENGINE}/api/v1/library/albums/${encodeURIComponent(albumId)}/tracks`).then((r) => r.ok ? r.json() : null).catch(() => null);
             return Promise.race([fetchPromise, new Promise((res) => setTimeout(() => res(null), 3e3))]).then((result) => {
               const tracks = result?.tracks || [];
               const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
               if (catalogIds.length > 0) {
-                if (_AML_DEBUG) console.log("[MK-DBG AAC] albums \u2192 local cache: " + catalogIds.length + " tracks");
+                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 local cache: " + catalogIds.length + " tracks");
                 const startCid = startWithLid ? (tracks.find((t) => t.lid === startWithLid) || {}).cid : _pendingExternalClickCatalogId || null;
                 return _aacOwnedGoto(catalogIds, startCid, "albums/local");
               }
-              if (_AML_DEBUG) console.log("[MK-DBG AAC] albums \u2192 cache cold, fetching tracks via MK REST");
+              if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 cache cold, fetching tracks via MK REST");
               if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
               _externalPlayGateTimer = setTimeout(() => {
-                if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
                 _aacCloseGate();
               }, 2e4);
               const mkInst = window.MusicKit?.getInstance?.();
@@ -7623,7 +7632,7 @@
                   return pp?.catalogId || (pp?.isLibrary ? null : pp?.id) || null;
                 }).filter((id) => id && /^\d{6,}$/.test(id));
                 if (directIds.length > 0) {
-                  if (_AML_DEBUG) console.log("[MK-DBG AAC] albums \u2192 REST fetch: " + directIds.length + " tracks (store for next time)");
+                  if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 REST fetch: " + directIds.length + " tracks (store for next time)");
                   const cacheTracks = items.map((item) => ({
                     id: item.id,
                     attributes: item.attributes,
@@ -7643,17 +7652,17 @@
                   return _aacOwnedGoto(directIds, startCid, "albums/REST");
                 }
                 const _coldTimeout = mk.playbackState === 2 ? 65e3 : 45e3;
-                if (_AML_DEBUG) console.log("[MK-DBG AAC] albums \u2192 REST empty, last-resort Apple setQueue (timeout=" + _coldTimeout / 1e3 + "s)");
+                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 REST empty, last-resort Apple setQueue (timeout=" + _coldTimeout / 1e3 + "s)");
                 if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
                 _externalPlayGateTimer = setTimeout(() => {
-                  if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout after setQueue)");
+                  if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout after setQueue)");
                   _aacCloseGate();
                 }, _coldTimeout);
                 const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
                 if (p2?.then) p2.then(
-                  () => _AML_DEBUG && console.log("[MK-DBG AAC] setQueue resolved"),
+                  () => _ADAM_DEBUG && console.log("[MK-DBG AAC] setQueue resolved"),
                   (err) => {
-                    if (_AML_DEBUG) console.log("[MK-DBG AAC] setQueue rejected:", err?.message || err);
+                    if (_ADAM_DEBUG) console.log("[MK-DBG AAC] setQueue rejected:", err?.message || err);
                     _aacCloseGate();
                   }
                 );
@@ -7665,10 +7674,10 @@
           if (startWithId) {
             const swType = desc?.startWith?.type;
             if (swType === "albums") {
-              if (_AML_DEBUG) console.log("[MK-DBG AAC] startWith type=albums, id=" + startWithId + " \u2192 fetching tracks");
+              if (_ADAM_DEBUG) console.log("[MK-DBG AAC] startWith type=albums, id=" + startWithId + " \u2192 fetching tracks");
               if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
               _externalPlayGateTimer = setTimeout(() => {
-                if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
                 _aacCloseGate();
               }, 2e4);
               const mkInst = window.MusicKit?.getInstance?.();
@@ -7676,15 +7685,15 @@
               return albumFetch.then((items) => {
                 const trackIds = items.map((item) => item?.id).filter((id) => id && /^\d{6,}$/.test(id));
                 if (trackIds.length > 0) {
-                  if (_AML_DEBUG) console.log("[MK-DBG AAC] album resolved: " + trackIds.length + " tracks");
+                  if (_ADAM_DEBUG) console.log("[MK-DBG AAC] album resolved: " + trackIds.length + " tracks");
                   return _aacOwnedGoto(trackIds, trackIds[0], "albums/catalog");
                 }
-                if (_AML_DEBUG) console.log("[MK-DBG AAC] album fetch empty, passthrough");
+                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] album fetch empty, passthrough");
                 const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
                 if (p2?.then) p2.then(
-                  () => _AML_DEBUG && console.log("[MK-DBG AAC] album passthrough resolved"),
+                  () => _ADAM_DEBUG && console.log("[MK-DBG AAC] album passthrough resolved"),
                   (err) => {
-                    if (_AML_DEBUG) console.log("[MK-DBG AAC] album passthrough rejected:", err?.message || err);
+                    if (_ADAM_DEBUG) console.log("[MK-DBG AAC] album passthrough rejected:", err?.message || err);
                     _aacCloseGate();
                   }
                 );
@@ -7692,22 +7701,22 @@
               });
             }
             if (swType === "playlists") {
-              if (_AML_DEBUG) console.log("[MK-DBG AAC] startWith type=playlists, id=" + startWithId + " \u2192 resolving");
+              if (_ADAM_DEBUG) console.log("[MK-DBG AAC] startWith type=playlists, id=" + startWithId + " \u2192 resolving");
               return _resolvePlaylistCatalogIds().then((catalogIds) => {
                 if (catalogIds.length > 1) {
                   return _aacOwnedGoto(catalogIds, catalogIds[0], "playlists/startWith");
                 }
-                if (_AML_DEBUG) console.log("[MK-DBG AAC] playlist resolve empty, passthrough");
+                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlist resolve empty, passthrough");
                 if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
                 _externalPlayGateTimer = setTimeout(() => {
-                  if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                  if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
                   _aacCloseGate();
                 }, 45e3);
                 const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
                 if (p2?.then) p2.then(
-                  () => _AML_DEBUG && console.log("[MK-DBG AAC] playlists passthrough resolved"),
+                  () => _ADAM_DEBUG && console.log("[MK-DBG AAC] playlists passthrough resolved"),
                   (err) => {
-                    if (_AML_DEBUG) console.log("[MK-DBG AAC] playlists passthrough rejected:", err?.message || err);
+                    if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists passthrough rejected:", err?.message || err);
                     _aacCloseGate();
                   }
                 );
@@ -7722,7 +7731,7 @@
             if (albumUrlId && mkInstAlbum?.storefrontId) {
               if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
               _externalPlayGateTimer = setTimeout(() => {
-                if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
                 _aacCloseGate();
               }, 2e4);
               return mkInstAlbum.api.music(`/v1/catalog/${mkInstAlbum.storefrontId}/albums/${encodeURIComponent(albumUrlId)}/tracks`, { limit: 100 }).then((res) => res?.data?.data || []).catch(() => []).then((items) => {
@@ -7737,25 +7746,25 @@
           }
           if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
           _externalPlayGateTimer = setTimeout(() => {
-            if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout after setQueue)");
+            if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout after setQueue)");
             _aacCloseGate();
           }, 45e3);
           const p = _aacMkApiSaved.setQueue.apply(mk, a);
           if (p?.then) p.then(
-            () => _AML_DEBUG && console.log("[MK-DBG AAC] setQueue resolved"),
+            () => _ADAM_DEBUG && console.log("[MK-DBG AAC] setQueue resolved"),
             (err) => {
-              if (_AML_DEBUG) console.log("[MK-DBG AAC] setQueue rejected:", err?.message || err);
+              if (_ADAM_DEBUG) console.log("[MK-DBG AAC] setQueue rejected:", err?.message || err);
               _aacCloseGate();
             }
           );
           return p;
         };
         mk.changeToMediaAtIndex = (idx) => {
-          if (_AML_DEBUG) console.log("[MK-DBG AAC] mk.changeToMediaAtIndex(" + idx + ")");
+          if (_ADAM_DEBUG) console.log("[MK-DBG AAC] mk.changeToMediaAtIndex(" + idx + ")");
           const p = _aacMkApiSaved.changeToMediaAtIndex.call(mk, idx);
           if (p?.then) p.then(
-            () => _AML_DEBUG && console.log("[MK-DBG AAC] ctmi resolved"),
-            (err) => _AML_DEBUG && console.log("[MK-DBG AAC] ctmi rejected:", err?.message || err)
+            () => _ADAM_DEBUG && console.log("[MK-DBG AAC] ctmi resolved"),
+            (err) => _ADAM_DEBUG && console.log("[MK-DBG AAC] ctmi rejected:", err?.message || err)
           );
           return p;
         };
@@ -7763,10 +7772,10 @@
         const _aacGateEvts = ["pause", "play", "playing", "waiting", "stalled", "error", "emptied", "loadstart", "canplay", "canplaythrough", "ended"];
         const _aacGateEvtHandler = (ev) => {
           const el = _aacGateAudioEl;
-          if (_AML_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el?.paused + " readyState=" + el?.readyState + " src=" + (el?.src || "").slice(0, 60));
+          if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el?.paused + " readyState=" + el?.readyState + " src=" + (el?.src || "").slice(0, 60));
         };
         if (_aacGateAudioEl) _aacGateEvts.forEach((t) => _aacGateAudioEl.addEventListener(t, _aacGateEvtHandler));
-        const _aacGateStateListener = () => _AML_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
+        const _aacGateStateListener = () => _ADAM_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
         mk.addEventListener("playbackStateDidChange", _aacGateStateListener);
         const _aacGateTracingCleanup = () => {
           if (_aacGateAudioEl) _aacGateEvts.forEach((t) => _aacGateAudioEl.removeEventListener(t, _aacGateEvtHandler));
@@ -7776,7 +7785,7 @@
         _savedGateTracingCleanup = _aacGateTracingCleanup;
         if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
         _externalPlayGateTimer = setTimeout(() => {
-          if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+          if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
           _aacCloseGate();
         }, 2e4);
         const _aacDesc = _domWalkIsMV && _isVideoId(aacCatalogId) ? null : aacSetQueueDesc ?? (aacCatalogId ? { song: aacCatalogId } : null);
@@ -7787,9 +7796,9 @@
         return;
       }
       if (_vlcMode && _dbgPlaySel) {
-        console.log("[AML VLC-GATE] click caught vlc=" + _vlcMode + " saved=" + !!_mkApiSaved + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
+        console.log("[Adam VLC-GATE] click caught vlc=" + _vlcMode + " saved=" + !!_mkApiSaved + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
         if (_dbgPlaySel?.dataset?.testid === "click-action" && (_dbgPlaySel?.href?.includes("/music-video/") || !!e.target?.closest?.('[class*="vertical-video"]'))) {
-          console.log("[AML VLC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
+          console.log("[Adam VLC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
           return;
         }
         if (_mkApiSaved) return;
@@ -7843,8 +7852,8 @@
           if (qItems?.length && _pendingExternalClickCatalogId) {
             _pendingExternalClickQueueIdx = qItems.findIndex((it) => extractItemId(it) === _pendingExternalClickCatalogId);
           }
-          if (_AML_DEBUG && qItems?.length && !window._amlQueueItemDumped) {
-            window._amlQueueItemDumped = true;
+          if (_ADAM_DEBUG && qItems?.length && !window._adamQueueItemDumped) {
+            window._adamQueueItemDumped = true;
             const it = qItems[0];
             const allKeys = /* @__PURE__ */ new Set();
             let proto = it;
@@ -7859,7 +7868,7 @@
               } catch (_) {
               }
             }
-            console.log("[AML queue-item dump]", JSON.stringify(dump, (_, v) => typeof v === "function" ? "[fn]" : v, 2).slice(0, 4e3));
+            console.log("[Adam queue-item dump]", JSON.stringify(dump, (_, v) => typeof v === "function" ? "[fn]" : v, 2).slice(0, 4e3));
           }
         } catch (_) {
         }
@@ -7873,7 +7882,7 @@
           }
         } catch (_) {
         }
-        if (_AML_DEBUG) console.log("[AML click] external play while VLC active \u2014 opening CDN gate playbackState=" + mk.playbackState + " amlGotoTarget=" + _amlGotoTarget + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null") + " catalogId=" + (_pendingExternalClickCatalogId || "not-found") + (_pendingPlaylistId ? " playlist=" + _pendingPlaylistId + " (pre-fetching)" : ""));
+        if (_ADAM_DEBUG) console.log("[Adam click] external play while VLC active \u2014 opening CDN gate playbackState=" + mk.playbackState + " adamGotoTarget=" + _adamGotoTarget + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null") + " catalogId=" + (_pendingExternalClickCatalogId || "not-found") + (_pendingPlaylistId ? " playlist=" + _pendingPlaylistId + " (pre-fetching)" : ""));
         _allowCDNTransition = true;
         _ourBlobUrl = null;
         _mkApiSaved = { play: mk.play, setQueue: mk.setQueue, changeToMediaAtIndex: mk.changeToMediaAtIndex };
@@ -7898,16 +7907,16 @@
                 const tracks = result?.tracks || [];
                 const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
                 if (catalogIds.length > 1) {
-                  if (_AML_DEBUG) console.log("[MK-DBG] setQueue \u2192 local cache: " + catalogIds.length + " tracks, startWith=" + catalogId);
+                  if (_ADAM_DEBUG) console.log("[MK-DBG] setQueue \u2192 local cache: " + catalogIds.length + " tracks, startWith=" + catalogId);
                   const pDesc = { songs: catalogIds };
                   if (catalogIds.includes(catalogId)) pDesc.startWith = { id: catalogId };
                   const p2 = _mkApiSaved.setQueue.call(mk, pDesc);
-                  if (p2?.then) p2.then(() => _AML_DEBUG && console.log("[MK-DBG] local cache resolved"), (e2) => _AML_DEBUG && console.log("[MK-DBG] local cache rejected:", e2?.message || String(e2)));
+                  if (p2?.then) p2.then(() => _ADAM_DEBUG && console.log("[MK-DBG] local cache resolved"), (e2) => _ADAM_DEBUG && console.log("[MK-DBG] local cache rejected:", e2?.message || String(e2)));
                   return p2;
                 }
-                if (_AML_DEBUG) console.log("[MK-DBG] setQueue \u2192 passthrough (cache cold) catalogId=" + catalogId);
+                if (_ADAM_DEBUG) console.log("[MK-DBG] setQueue \u2192 passthrough (cache cold) catalogId=" + catalogId);
                 const p = _mkApiSaved.setQueue.apply(mk, a);
-                if (p?.then) p.then(() => _AML_DEBUG && console.log("[MK-DBG] passthrough resolved"), (e2) => _AML_DEBUG && console.log("[MK-DBG] passthrough rejected:", e2?.message || String(e2)));
+                if (p?.then) p.then(() => _ADAM_DEBUG && console.log("[MK-DBG] passthrough resolved"), (e2) => _ADAM_DEBUG && console.log("[MK-DBG] passthrough rejected:", e2?.message || String(e2)));
                 return p;
               });
             }
@@ -7922,8 +7931,8 @@
                 if (cur2) {
                   if (!cur2.items.includes(id)) cur2.items.push(id);
                   const ii = cur2.items.indexOf(id);
-                  console.log("[AML VLC] \u2192 _amlGoto(" + ci2 + "," + ii + ") id=" + id + " via click-idx=" + _pendingExternalClickQueueIdx);
-                  _amlGoto(ci2, ii).catch(() => {
+                  console.log("[Adam VLC] \u2192 _adamGoto(" + ci2 + "," + ii + ") id=" + id + " via click-idx=" + _pendingExternalClickQueueIdx);
+                  _adamGoto(ci2, ii).catch(() => {
                   });
                   return true;
                 }
@@ -7932,8 +7941,8 @@
             for (let c = 0; c < _sessionContainers.length; c++) {
               const ii = (_sessionContainers[c]?.items ?? []).indexOf(id);
               if (ii >= 0) {
-                console.log("[AML VLC] \u2192 _amlGoto(" + c + "," + ii + ") id=" + id);
-                _amlGoto(c, ii).catch(() => {
+                console.log("[Adam VLC] \u2192 _adamGoto(" + c + "," + ii + ") id=" + id);
+                _adamGoto(c, ii).catch(() => {
                 });
                 return true;
               }
@@ -7944,8 +7953,8 @@
             if (cur && mkQ2?.length && mkQ2.findIndex((it) => extractItemId(it) === id) >= 0) {
               if (!cur.items.includes(id)) cur.items.push(id);
               const ii = cur.items.indexOf(id);
-              console.log("[AML VLC] \u2192 _amlGoto(" + ci + "," + ii + ") id=" + id + " (added to container)");
-              _amlGoto(ci, ii).catch(() => {
+              console.log("[Adam VLC] \u2192 _adamGoto(" + ci + "," + ii + ") id=" + id + " (added to container)");
+              _adamGoto(ci, ii).catch(() => {
               });
               return true;
             }
@@ -7955,15 +7964,15 @@
             const startId = _normalizeStartId(desc);
             if (startId) {
               if (_vlcGotoById(startId)) return;
-              console.log("[AML VLC] url-setQueue \u2192 passthrough (not in queue, id=" + startId + ")");
+              console.log("[Adam VLC] url-setQueue \u2192 passthrough (not in queue, id=" + startId + ")");
             }
           }
           const clickId = _pendingExternalClickCatalogId;
           if (clickId) {
             if (_vlcGotoById(clickId)) return;
-            console.log("[AML VLC] setQueue(" + Object.keys(desc ?? {}).join("/") + ") \u2192 passthrough (id=" + clickId + " not in queue)");
+            console.log("[Adam VLC] setQueue(" + Object.keys(desc ?? {}).join("/") + ") \u2192 passthrough (id=" + clickId + " not in queue)");
           }
-          console.log("[AML VLC] passthrough with teardown \u2014 handing off to MK");
+          console.log("[Adam VLC] passthrough with teardown \u2014 handing off to MK");
           const _origSQ = _mkApiSaved.setQueue;
           if (_externalPlayGateTimer) {
             clearTimeout(_externalPlayGateTimer);
@@ -8018,10 +8027,10 @@
         const _gateEvts = ["pause", "play", "playing", "waiting", "stalled", "error", "emptied", "loadstart", "canplay", "canplaythrough", "ended"];
         const _gateEvtHandler = (ev) => {
           const el = _gateAudioEl;
-          if (_AML_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el?.paused + " readyState=" + el?.readyState + " src=" + (el?.src || "").slice(0, 60));
+          if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el?.paused + " readyState=" + el?.readyState + " src=" + (el?.src || "").slice(0, 60));
         };
         if (_gateAudioEl) _gateEvts.forEach((t) => _gateAudioEl.addEventListener(t, _gateEvtHandler));
-        const _gateStateListener = () => _AML_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
+        const _gateStateListener = () => _ADAM_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
         mk.addEventListener("playbackStateDidChange", _gateStateListener);
         const _gateTracingCleanup = () => {
           if (_gateAudioEl) _gateEvts.forEach((t) => _gateAudioEl.removeEventListener(t, _gateEvtHandler));
@@ -8055,7 +8064,7 @@
           }
           _allowCDNTransition = false;
           _externalPlayGateTimer = null;
-          if (_AML_DEBUG) console.log("[AML click] CDN gate reset (safety timeout)");
+          if (_ADAM_DEBUG) console.log("[Adam click] CDN gate reset (safety timeout)");
         }, 2e4);
       }
       const PS = window.MusicKit?.PlaybackStates;
@@ -8080,12 +8089,12 @@
           const cur2 = _sessionContainers[ci];
           const intraIdx = cur2 ? cur2.items.indexOf(newNext) : -1;
           if (intraIdx >= 0 && intraIdx !== _sessionItemIdx + 1) {
-            console.log("[aml] track-click: non-linear same-playlist jump to ci=", ci, "ii=", intraIdx);
-            _amlGoto(ci, intraIdx).catch(() => {
+            console.log("[adam] track-click: non-linear same-playlist jump to ci=", ci, "ii=", intraIdx);
+            _adamGoto(ci, intraIdx).catch(() => {
             });
           } else {
-            console.log("[aml] track-click: inserted at next, calling _amlNext");
-            _amlNext(true).catch(() => {
+            console.log("[adam] track-click: inserted at next, calling _adamNext");
+            _adamNext(true).catch(() => {
             });
           }
         }
@@ -8122,27 +8131,27 @@
         }
       }
       if (added) {
-        console.log(`[AML Station] queueItemsDidChange \u2014 added ${added} new item(s) to container, total=${activeCur.items.length}`);
+        console.log(`[Adam Station] queueItemsDidChange \u2014 added ${added} new item(s) to container, total=${activeCur.items.length}`);
         _updateTransportButtons();
       }
     });
     mk.addEventListener("nowPlayingItemDidChange", async () => {
-      console.log("[NPIDF] fired item=" + (mk.nowPlayingItem?.attributes?.name || "null") + " allowCDN=" + _allowCDNTransition + " amlGotoTarget=" + _amlGotoTarget);
-      if (_amlGotoTarget !== null) {
+      console.log("[NPIDF] fired item=" + (mk.nowPlayingItem?.attributes?.name || "null") + " allowCDN=" + _allowCDNTransition + " adamGotoTarget=" + _adamGotoTarget);
+      if (_adamGotoTarget !== null) {
         const item2 = mk.nowPlayingItem;
         if (!item2) return;
         const itemId = extractItemId(item2);
-        const targetItem = mk.queue?.items?.[_amlGotoTarget];
-        const targetId = _amlGotoTargetId || extractItemId(targetItem);
+        const targetItem = mk.queue?.items?.[_adamGotoTarget];
+        const targetId = _adamGotoTargetId || extractItemId(targetItem);
         if (targetId && itemId !== targetId) {
-          console.log("[AML] NPIDF filtered: spurious event for", item2?.attributes?.name, "(advancing to idx", _amlGotoTarget, "target id", targetId, ")");
+          console.log("[Adam] NPIDF filtered: spurious event for", item2?.attributes?.name, "(advancing to idx", _adamGotoTarget, "target id", targetId, ")");
           return;
         }
-        _amlGotoTarget = null;
-        _amlGotoTargetId = null;
-        _amlTransitioning = false;
-        clearTimeout(_amlAdvancingTimer);
-        _amlAdvancingTimer = null;
+        _adamGotoTarget = null;
+        _adamGotoTargetId = null;
+        _adamTransitioning = false;
+        clearTimeout(_adamAdvancingTimer);
+        _adamAdvancingTimer = null;
       }
       _clearAdvancing();
       let item = mk.nowPlayingItem;
@@ -8169,15 +8178,15 @@
         _pendingPlaylistFetch = null;
         _allowCDNTransition = false;
       }
-      const wasInternal = _amlNavInternal;
-      _amlNavInternal = false;
+      const wasInternal = _adamNavInternal;
+      _adamNavInternal = false;
       if (item) {
         const songId = extractItemId(item);
-        if (wasInternal && _amlPendingCI >= 0) {
-          _sessionContainerIdx = _amlPendingCI;
-          _sessionItemIdx = _amlPendingII;
-          _amlPendingCI = -1;
-          _amlPendingII = -1;
+        if (wasInternal && _adamPendingCI >= 0) {
+          _sessionContainerIdx = _adamPendingCI;
+          _sessionItemIdx = _adamPendingII;
+          _adamPendingCI = -1;
+          _adamPendingII = -1;
         } else if (songId) {
           const cur = _sessionContainers[_sessionContainerIdx];
           if (cur && cur.items[_sessionItemIdx] === songId) {
@@ -8245,10 +8254,10 @@
       }
       handleTrackChange(mk);
       _updateTransportButtons();
-      window._amlSmartCache?.onTrackChange(mk);
+      window._adamSmartCache?.onTrackChange(mk);
       if (item) {
         const id = item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
-        window._amlSmartCache?.recordPlay(id);
+        window._adamSmartCache?.recordPlay(id);
         sendMprisMetadata(item);
       } else {
         sendMprisStatus("Stopped");
@@ -8256,7 +8265,7 @@
     });
     mk.addEventListener("playbackStateDidChange", () => {
       const PS = window.MusicKit?.PlaybackStates;
-      console.log(`[AML Engine] state=${mk.playbackState} (playing=${PS?.playing})`);
+      console.log(`[Adam Engine] state=${mk.playbackState} (playing=${PS?.playing})`);
       const s = mk.playbackState;
       if (s === PS?.playing) {
         if (!_vlcMode || _vlcPosMs > 0) sendMprisStatus("Playing", { isResume: _vlcPaused });
@@ -8268,26 +8277,26 @@
       if (!_vlcMode) return;
       if (s === PS?.playing) {
         if (_vlcPaused) {
-          console.log("[AML VLC] playbackStateDidChange \u2192 playing \u2192 resume");
+          console.log("[Adam VLC] playbackStateDidChange \u2192 playing \u2192 resume");
           _vlcPaused = false;
           fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
           });
         }
       } else if (s === PS?.paused) {
-        console.log("[AML VLC] playbackStateDidChange \u2192 paused \u2192 pause");
+        console.log("[Adam VLC] playbackStateDidChange \u2192 paused \u2192 pause");
         _vlcPaused = true;
         fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
         });
       }
     });
-    const cache = window._amlSmartCache;
+    const cache = window._adamSmartCache;
     if (cache) {
       cache.observeNavigation(() => mk);
       cache.warmOnStartup(mk);
     }
     if (mk.nowPlayingItem) handleTrackChange(mk);
   }
-  setup().catch((e) => console.error("[AML Engine] setup:", e));
+  setup().catch((e) => console.error("[Adam Engine] setup:", e));
   (function initSearchSuggestionsPortal() {
     let portaled = null;
     function positionPortal(el) {
@@ -8334,8 +8343,8 @@
     });
     observer.observe(document.body, { childList: true, subtree: true });
     function wireSearchInput(input) {
-      if (!input || input._amlPortalWired) return;
-      input._amlPortalWired = true;
+      if (!input || input._adamPortalWired) return;
+      input._adamPortalWired = true;
       function startPoll() {
         if (tryScan()) return;
         let attempts = 0;
@@ -8396,14 +8405,14 @@
       if (!statsEl || !headings.contains(statsEl)) {
         statsEl?.remove();
         statsEl = document.createElement("p");
-        statsEl.id = "aml-tracklist-stats";
+        statsEl.id = "adam-tracklist-stats";
         headings.appendChild(statsEl);
         lastText = null;
       }
       if (src && (!restEl || restEl.previousElementSibling !== src)) {
         restEl?.remove();
         restEl = document.createElement("p");
-        restEl.id = "aml-tracklist-footer-rest";
+        restEl.id = "adam-tracklist-footer-rest";
         src.after(restEl);
         lastText = null;
       }
@@ -8426,204 +8435,204 @@
   })();
   (function initArtTheme() {
     const BODY_VARS = [
-      "--aml-nav-bg",
-      "--aml-nav-border",
-      "--aml-accent",
-      "--aml-accent-active",
+      "--adam-nav-bg",
+      "--adam-nav-border",
+      "--adam-accent",
+      "--adam-accent-active",
       "--keyColor",
-      "--aml-art-page-bg",
-      "--aml-art-glow-a",
-      "--aml-art-glow-b",
-      "--aml-art-raised",
-      "--aml-art-on-accent",
-      "--aml-art-src"
+      "--adam-art-page-bg",
+      "--adam-art-glow-a",
+      "--adam-art-glow-b",
+      "--adam-art-raised",
+      "--adam-art-on-accent",
+      "--adam-art-src"
     ];
-    const BG_LAYER_IDS = ["_amlBlurBg", "_amlAccentBg", "_amlCustomBg", "_amlArtBlur", "_amlArtBg"];
+    const BG_LAYER_IDS = ["_adamBlurBg", "_adamAccentBg", "_adamCustomBg", "_adamArtBlur", "_adamArtBg"];
     let enabled = true;
     let lastSrc = null;
     let token = 0;
     const style = document.createElement("style");
-    style.id = "aml-art-theme-style";
+    style.id = "adam-art-theme-style";
     style.textContent = `
         /* \u2500\u2500 hide Apple's full-page artwork wash \u2500\u2500 */
-        [data-aml-page-art] { visibility: hidden !important; }
+        [data-adam-page-art] { visibility: hidden !important; }
 
         /* \u2500\u2500 blurred artwork backdrop \u2500\u2500 */
         /* Sits below the gradient glow layer. ::before = blurred artwork fill;
            ::after = palette-tinted dark overlay so content stays legible. */
-        #_amlArtBlur {
+        #_adamArtBlur {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             opacity: 0; transition: opacity .8s ease;
             overflow: hidden;
         }
-        #_amlArtBlur::before {
+        #_adamArtBlur::before {
             content: ''; position: absolute; inset: -8%;
-            background-image: var(--aml-art-src, none);
+            background-image: var(--adam-art-src, none);
             background-size: cover; background-position: center;
             filter: blur(80px) saturate(1.6);
         }
-        #_amlArtBlur::after {
+        #_adamArtBlur::after {
             content: ''; position: absolute; inset: 0;
-            background: var(--aml-nav-bg, rgba(0,0,0,0.35));
+            background: var(--adam-nav-bg, rgba(0,0,0,0.35));
             opacity: 0.55;
         }
-        body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+        body[data-adam-art-theme] #_adamArtBlur { opacity: 1; }
 
         /* \u2500\u2500 Mode isolation: hide wallpaper blur layers in non-blur modes \u2500\u2500 */
-        /* main.mjs injects #_amlBlurBg + #_amlBlurTint for blur mode but
+        /* main.mjs injects #_adamBlurBg + #_adamBlurTint for blur mode but
            never removes them. When the user switches to accent or custom CSS the layers
            must disappear so they don't bleed through as ghost colours. */
-        body[data-aml-mode="accent"] #_amlBlurBg,
-        body[data-aml-mode="accent"] #_amlBlurTint,
-        body[data-aml-mode="custom"] #_amlBlurBg,
-        body[data-aml-mode="custom"] #_amlBlurTint { opacity: 0 !important; transition: opacity .4s ease !important; }
+        body[data-adam-mode="accent"] #_adamBlurBg,
+        body[data-adam-mode="accent"] #_adamBlurTint,
+        body[data-adam-mode="custom"] #_adamBlurBg,
+        body[data-adam-mode="custom"] #_adamBlurTint { opacity: 0 !important; transition: opacity .4s ease !important; }
 
         /* \u2500\u2500 gradient glow layer (sits above the blur) \u2500\u2500 */
         /* pageBg removed \u2014 the blur layer's tint overlay provides the dark base. */
-        #_amlArtBg {
+        #_adamArtBg {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             opacity: 0; transition: opacity .6s ease;
             background:
-                radial-gradient(60% 55% at 12% 8%, var(--aml-art-glow-a, transparent), transparent 70%),
-                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%);
+                radial-gradient(60% 55% at 12% 8%, var(--adam-art-glow-a, transparent), transparent 70%),
+                radial-gradient(55% 50% at 92% 88%, var(--adam-art-glow-b, transparent), transparent 70%);
         }
-        body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
+        body[data-adam-art-theme] #_adamArtBg { opacity: 1; }
 
         /* \u2500\u2500 page body: hue-tinted dark base \u2500\u2500 */
-        body[data-aml-art-theme] { background: var(--aml-art-page-bg) !important; }
-        body[data-aml-art-theme] .body-container,
-        body[data-aml-art-theme] .app-container,
-        body[data-aml-art-theme] main,
-        body[data-aml-art-theme] .content-container,
-        body[data-aml-art-theme] [data-main-content],
-        body[data-aml-art-theme] .scrollable-page,
-        body[data-aml-art-theme] .album-container,
-        body[data-aml-art-theme] .section,
-        body[data-aml-art-theme] .section-content,
-        body[data-aml-art-theme] .container-detail-header,
-        body[data-aml-art-theme] .container-detail-header-wrapper { background: transparent !important; }
+        body[data-adam-art-theme] { background: var(--adam-art-page-bg) !important; }
+        body[data-adam-art-theme] .body-container,
+        body[data-adam-art-theme] .app-container,
+        body[data-adam-art-theme] main,
+        body[data-adam-art-theme] .content-container,
+        body[data-adam-art-theme] [data-main-content],
+        body[data-adam-art-theme] .scrollable-page,
+        body[data-adam-art-theme] .album-container,
+        body[data-adam-art-theme] .section,
+        body[data-adam-art-theme] .section-content,
+        body[data-adam-art-theme] .container-detail-header,
+        body[data-adam-art-theme] .container-detail-header-wrapper { background: transparent !important; }
         /* Remove section dividers that show as black lines */
-        body[data-aml-art-theme] .section,
-        body[data-aml-art-theme] .album-container,
-        body[data-aml-art-theme] .container-detail-header { border-color: var(--aml-nav-border) !important; }
+        body[data-adam-art-theme] .section,
+        body[data-adam-art-theme] .album-container,
+        body[data-adam-art-theme] .container-detail-header { border-color: var(--adam-nav-border) !important; }
 
         /* \u2500\u2500 navigation sidebar \u2500\u2500 */
-        body[data-aml-art-theme] nav.navigation {
-            background: var(--aml-nav-bg) !important;
-            border-right-color: var(--aml-nav-border) !important;
+        body[data-adam-art-theme] nav.navigation {
+            background: var(--adam-nav-bg) !important;
+            border-right-color: var(--adam-nav-border) !important;
         }
-        body[data-aml-art-theme] .navigation-item__link:hover { background: var(--aml-art-raised) !important; }
-        body[data-aml-art-theme] .navigation-item--selected .navigation-item__link { background: var(--aml-accent-active) !important; }
-        body[data-aml-art-theme] .navigation-item--selected .navigation-item__label,
-        body[data-aml-art-theme] .navigation-item--selected .navigation-item__icon { color: var(--aml-accent) !important; }
+        body[data-adam-art-theme] .navigation-item__link:hover { background: var(--adam-art-raised) !important; }
+        body[data-adam-art-theme] .navigation-item--selected .navigation-item__link { background: var(--adam-accent-active) !important; }
+        body[data-adam-art-theme] .navigation-item--selected .navigation-item__label,
+        body[data-adam-art-theme] .navigation-item--selected .navigation-item__icon { color: var(--adam-accent) !important; }
 
         /* \u2500\u2500 footer player bar \u2500\u2500 */
         /* Leave Apple's player bar completely unstyled. The --keyColor override on
-           body[data-aml-art-theme] (see keyColor propagation below) already swaps
+           body[data-adam-art-theme] (see keyColor propagation below) already swaps
            the accent colour (play button, scrubber fill, etc.) from pink to the
            art-derived accent. No background, blur or clip-path changes needed. */
         /* Light text on nav sidebar, side panel and context menus */
-        body[data-aml-art-theme] nav.navigation,
-        body[data-aml-art-theme] .side-panel,
-        body[data-aml-art-theme] .contextual-menu { color: rgba(255,255,255,0.85) !important; }
-        body[data-aml-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
-        body[data-aml-art-theme] .search-input__text-field { color: rgba(255,255,255,0.85) !important; }
+        body[data-adam-art-theme] nav.navigation,
+        body[data-adam-art-theme] .side-panel,
+        body[data-adam-art-theme] .contextual-menu { color: rgba(255,255,255,0.85) !important; }
+        body[data-adam-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
+        body[data-adam-art-theme] .search-input__text-field { color: rgba(255,255,255,0.85) !important; }
 
         /* \u2500\u2500 tracklist rows \u2500\u2500 */
-        body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
-        body[data-aml-art-theme] .songs-list-row:hover,
-        body[data-aml-art-theme] .library-track:not(.library-track--header):hover { background: var(--aml-art-raised) !important; }
-        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected,
-        body[data-aml-art-theme] .library-track.is-playing { background: var(--aml-accent-active) !important; }
-        body[data-aml-art-theme] .songs-list__header,
-        body[data-aml-art-theme] .library-track--header { background: transparent !important; }
+        body[data-adam-art-theme] .songs-list-row { border-color: var(--adam-nav-border) !important; }
+        body[data-adam-art-theme] .songs-list-row:hover,
+        body[data-adam-art-theme] .library-track:not(.library-track--header):hover { background: var(--adam-art-raised) !important; }
+        body[data-adam-art-theme] .songs-list-row.songs-list-row--selected,
+        body[data-adam-art-theme] .library-track.is-playing { background: var(--adam-accent-active) !important; }
+        body[data-adam-art-theme] .songs-list__header,
+        body[data-adam-art-theme] .library-track--header { background: transparent !important; }
 
         /* \u2500\u2500 primary actions (Play / Shuffle / Add) \u2500\u2500 */
-        body[data-aml-art-theme] .primary-actions__button--play button {
-            background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
+        body[data-adam-art-theme] .primary-actions__button--play button {
+            background: var(--adam-accent) !important; color: var(--adam-art-on-accent) !important;
         }
-        body[data-aml-art-theme] .primary-actions__button--play button svg,
-        body[data-aml-art-theme] .primary-actions__button--play button svg path { fill: var(--aml-art-on-accent) !important; }
-        body[data-aml-art-theme] .primary-actions__button--shuffle button,
-        body[data-aml-art-theme] .primary-actions__button--add-to-library button { background: var(--aml-art-raised) !important; }
+        body[data-adam-art-theme] .primary-actions__button--play button svg,
+        body[data-adam-art-theme] .primary-actions__button--play button svg path { fill: var(--adam-art-on-accent) !important; }
+        body[data-adam-art-theme] .primary-actions__button--shuffle button,
+        body[data-adam-art-theme] .primary-actions__button--add-to-library button { background: var(--adam-art-raised) !important; }
 
         /* \u2500\u2500 context menus \u2500\u2500 */
-        body[data-aml-art-theme] .contextual-menu {
-            background: var(--aml-nav-bg) !important;
-            border: 1px solid var(--aml-nav-border) !important;
+        body[data-adam-art-theme] .contextual-menu {
+            background: var(--adam-nav-bg) !important;
+            border: 1px solid var(--adam-nav-border) !important;
             backdrop-filter: blur(20px) !important;
             -webkit-backdrop-filter: blur(20px) !important;
         }
-        body[data-aml-art-theme] .contextual-menu-item > button:hover,
-        body[data-aml-art-theme] .contextual-menu-item > a:hover { background: var(--aml-art-raised) !important; }
+        body[data-adam-art-theme] .contextual-menu-item > button:hover,
+        body[data-adam-art-theme] .contextual-menu-item > a:hover { background: var(--adam-art-raised) !important; }
 
         /* \u2500\u2500 search \u2500\u2500 */
-        body[data-aml-art-theme] .search-input__text-field,
-        body[data-aml-art-theme] .search-input-wrapper { background: var(--aml-art-raised) !important; }
-        body[data-aml-art-theme] .search-scope-bar__pill-option--selected {
-            background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
+        body[data-adam-art-theme] .search-input__text-field,
+        body[data-adam-art-theme] .search-input-wrapper { background: var(--adam-art-raised) !important; }
+        body[data-adam-art-theme] .search-scope-bar__pill-option--selected {
+            background: var(--adam-accent) !important; color: var(--adam-art-on-accent) !important;
         }
 
         /* \u2500\u2500 side panel / Up Next \u2500\u2500 */
-        body[data-aml-art-theme] .side-panel {
-            background: var(--aml-nav-bg) !important;
-            border-left-color: var(--aml-nav-border) !important;
+        body[data-adam-art-theme] .side-panel {
+            background: var(--adam-nav-bg) !important;
+            border-left-color: var(--adam-nav-border) !important;
             backdrop-filter: blur(20px) !important;
             -webkit-backdrop-filter: blur(20px) !important;
         }
-        body[data-aml-art-theme] .up-next-item:hover { background: var(--aml-art-raised) !important; }
+        body[data-adam-art-theme] .up-next-item:hover { background: var(--adam-art-raised) !important; }
 
         /* \u2500\u2500 shelf / grid \u2500\u2500 */
-        body[data-aml-art-theme] .shelf,
-        body[data-aml-art-theme] section.shelf-grid,
-        body[data-aml-art-theme] .shelf-grid__body { background: transparent !important; }
+        body[data-adam-art-theme] .shelf,
+        body[data-adam-art-theme] section.shelf-grid,
+        body[data-adam-art-theme] .shelf-grid__body { background: transparent !important; }
 
         /* \u2500\u2500 keyColor propagation for amp-* web components \u2500\u2500 */
-        body[data-aml-art-theme] { --keyColor: var(--aml-accent); }
+        body[data-adam-art-theme] { --keyColor: var(--adam-accent); }
     `;
     (document.head || document.documentElement).appendChild(style);
     function markPageArt() {
       const vw = innerWidth, vh = innerHeight;
-      for (const el of document.querySelectorAll(".artwork-component:not([data-aml-page-art])")) {
+      for (const el of document.querySelectorAll(".artwork-component:not([data-adam-page-art])")) {
         if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
         const r = el.getBoundingClientRect();
-        if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute("data-aml-page-art", "");
+        if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute("data-adam-page-art", "");
       }
     }
     function ensureBgLayers() {
       let ref = document.body.firstElementChild;
       while (ref && BG_LAYER_IDS.includes(ref.id)) ref = ref.nextElementSibling;
-      if (!document.getElementById("_amlArtBg")) {
+      if (!document.getElementById("_adamArtBg")) {
         const l = document.createElement("div");
-        l.id = "_amlArtBg";
+        l.id = "_adamArtBg";
         document.body.insertBefore(l, ref);
       }
-      if (!document.getElementById("_amlArtBlur")) {
+      if (!document.getElementById("_adamArtBlur")) {
         const l = document.createElement("div");
-        l.id = "_amlArtBlur";
-        document.body.insertBefore(l, document.getElementById("_amlArtBg"));
+        l.id = "_adamArtBlur";
+        document.body.insertBefore(l, document.getElementById("_adamArtBg"));
       }
     }
     function apply(roles, artSrc) {
       const b = document.body.style;
-      b.setProperty("--aml-nav-bg", roles.navBg);
-      b.setProperty("--aml-nav-border", roles.border);
-      b.setProperty("--aml-accent", roles.accent);
-      b.setProperty("--aml-accent-active", roles.accentActive);
+      b.setProperty("--adam-nav-bg", roles.navBg);
+      b.setProperty("--adam-nav-border", roles.border);
+      b.setProperty("--adam-accent", roles.accent);
+      b.setProperty("--adam-accent-active", roles.accentActive);
       b.setProperty("--keyColor", roles.accent);
-      b.setProperty("--aml-art-page-bg", roles.pageBg);
-      b.setProperty("--aml-art-glow-a", roles.glowA);
-      b.setProperty("--aml-art-glow-b", roles.glowB);
-      b.setProperty("--aml-art-raised", roles.raised);
-      b.setProperty("--aml-art-on-accent", roles.onAccent);
-      b.setProperty("--aml-art-src", artSrc ? `url("${artSrc.replace(/"/g, "%22")}")` : "none");
+      b.setProperty("--adam-art-page-bg", roles.pageBg);
+      b.setProperty("--adam-art-glow-a", roles.glowA);
+      b.setProperty("--adam-art-glow-b", roles.glowB);
+      b.setProperty("--adam-art-raised", roles.raised);
+      b.setProperty("--adam-art-on-accent", roles.onAccent);
+      b.setProperty("--adam-art-src", artSrc ? `url("${artSrc.replace(/"/g, "%22")}")` : "none");
       ensureBgLayers();
-      document.body.setAttribute("data-aml-art-theme", "");
+      document.body.setAttribute("data-adam-art-theme", "");
     }
     function clear() {
       if (!document.body) return;
       for (const v of BODY_VARS) document.body.style.removeProperty(v);
-      document.body.removeAttribute("data-aml-art-theme");
+      document.body.removeAttribute("data-adam-art-theme");
     }
     async function computeRoles(src, headerArt) {
       try {
@@ -8649,7 +8658,7 @@
       if (!document.body) return;
       markPageArt();
       if (!enabled) {
-        if (lastSrc !== null || document.body.hasAttribute("data-aml-art-theme")) {
+        if (lastSrc !== null || document.body.hasAttribute("data-adam-art-theme")) {
           clear();
           lastSrc = null;
           token++;
@@ -8678,17 +8687,17 @@
       if (roles) apply(roles, src);
       else clear();
     }
-    window.addEventListener("aml:art-theme", (e) => {
+    window.addEventListener("adam:art-theme", (e) => {
       enabled = !!e.detail;
       lastSrc = null;
       sync();
     });
-    window.amlBridge?.getPrefs?.().then((p) => {
+    window.adamBridge?.getPrefs?.().then((p) => {
       if (!document.body) return;
       enabled = p?.artTheme !== false;
-      if (p?.artThemeMode) window.amlBridge.setTweak("artThemeMode", null);
+      if (p?.artThemeMode) window.adamBridge.setTweak("artThemeMode", null);
       const startupMode = p?.themeMode || "accent";
-      document.body.setAttribute("data-aml-mode", startupMode);
+      document.body.setAttribute("data-adam-mode", startupMode);
       sync();
     }).catch(() => {
     });
@@ -8717,7 +8726,7 @@
       e.preventDefault();
     }
   });
-  window.amlClearSession = function() {
+  window.adamClearSession = function() {
     stopVLCPoll();
     if (_pipeCtrl) {
       _pipeCtrl.abort();
@@ -8763,17 +8772,17 @@
       _mkInstance?.pause?.();
     } catch (_) {
     }
-    console.log("[AML] amlClearSession: all playback stopped and session released");
+    console.log("[Adam] adamClearSession: all playback stopped and session released");
   };
-  window.amlStartSession = async function(adamId, sf) {
+  window.adamStartSession = async function(adamId, sf) {
     const mk = _mkInstance;
     if (!mk) {
-      console.warn("[AML] amlStartSession: no MK instance");
+      console.warn("[Adam] adamStartSession: no MK instance");
       return null;
     }
     const storefront = sf ?? mk.storefrontId ?? "us";
     const losslessWanted = _engineCaps.lossless && _streamingQuality !== "high-quality";
-    console.log(`[AML] amlStartSession adamId=${adamId} sf=${storefront} lossless=${losslessWanted}`);
+    console.log(`[Adam] adamStartSession adamId=${adamId} sf=${storefront} lossless=${losslessWanted}`);
     const r = await fetch(`${ENGINE}/api/v1/playback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -8786,14 +8795,14 @@
       })
     });
     if (!r.ok) {
-      console.error(`[AML] amlStartSession: engine ${r.status}`);
+      console.error(`[Adam] adamStartSession: engine ${r.status}`);
       return null;
     }
     const sess = await r.json();
-    console.log(`[AML] amlStartSession: session=${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
+    console.log(`[Adam] adamStartSession: session=${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs / 1e3).toFixed(1)}s`);
     return sess;
   };
-  window.amlGetQueueInfo = function() {
+  window.adamGetQueueInfo = function() {
     const mk = _mkInstance;
     return {
       items: mk?.queue?.items ?? [],
@@ -8807,7 +8816,7 @@
     };
   };
   (function setupEngineSettings() {
-    if (!window.amlBridge) return;
+    if (!window.adamBridge) return;
     let injected = false;
     const FF = "font-family:-apple-system,SF Pro Text,system-ui,sans-serif;";
     function dot(ok) {
@@ -9044,13 +9053,13 @@
       return wrap;
     }
     function getDialog() {
-      let dlg = document.getElementById("aml-settings-dialog");
+      let dlg = document.getElementById("adam-settings-dialog");
       if (dlg) return dlg;
       dlg = document.createElement("dialog");
-      dlg.id = "aml-settings-dialog";
+      dlg.id = "adam-settings-dialog";
       const st = document.createElement("style");
       st.textContent = `
-            #aml-settings-dialog {
+            #adam-settings-dialog {
                 position:fixed; inset:0; margin:auto;
                 width:min(660px,calc(100vw - 48px));
                 max-height:min(82vh,760px); overflow-y:auto;
@@ -9061,41 +9070,41 @@
                 box-shadow:0 32px 80px rgba(0,0,0,0.8),0 0 0 0.5px rgba(255,255,255,0.07);
                 padding:0 32px 32px; color:rgba(255,255,255,0.9);
                 font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
-                --aml-settings-accent:#fc3c44;
+                --adam-settings-accent:#fc3c44;
             }
-            #aml-settings-dialog :where(input,button,select,textarea):focus-visible {
-                outline:2px solid var(--aml-settings-accent) !important;
+            #adam-settings-dialog :where(input,button,select,textarea):focus-visible {
+                outline:2px solid var(--adam-settings-accent) !important;
                 outline-offset:2px;
             }
-            #aml-settings-dialog :where(input[type="range"],input[type="checkbox"],input[type="radio"]) {
-                accent-color:var(--aml-settings-accent) !important;
+            #adam-settings-dialog :where(input[type="range"],input[type="checkbox"],input[type="radio"]) {
+                accent-color:var(--adam-settings-accent) !important;
             }
-            #aml-settings-close {
+            #adam-settings-close {
                 position:sticky; top:18px; float:right; z-index:10;
                 margin-left:auto; flex-shrink:0;
             }
-            #aml-settings-dialog::backdrop {
+            #adam-settings-dialog::backdrop {
                 background:rgba(0,0,0,0.35);
                 backdrop-filter:blur(20px) saturate(1.4);
                 -webkit-backdrop-filter:blur(20px) saturate(1.4);
             }
-            #aml-settings-dialog::-webkit-scrollbar { width:4px; }
-            #aml-settings-dialog::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18);border-radius:2px; }
-            @keyframes _aml-pop-in  { from{opacity:0;transform:scale(0.94) translateY(10px)} to{opacity:1;transform:scale(1) translateY(0)} }
-            @keyframes _aml-pop-out { from{opacity:1;transform:scale(1) translateY(0)}       to{opacity:0;transform:scale(0.96) translateY(5px)} }
-            @keyframes _aml-bd-in   { from{opacity:0} to{opacity:1} }
-            @keyframes _aml-bd-out  { from{opacity:1} to{opacity:0} }
-            @keyframes _aml-spin    { to{transform:rotate(360deg)} }
-            ._aml-spinner { display:inline-block;width:10px;height:10px;border:1.5px solid rgba(255,255,255,0.18);border-top-color:rgba(255,255,255,0.6);border-radius:50%;animation:_aml-spin .7s linear infinite;flex-shrink:0; }
-            #aml-settings-dialog.aml-opening { animation:_aml-pop-in  .32s cubic-bezier(.34,1.4,.64,1) forwards; }
-            #aml-settings-dialog.aml-closing { animation:_aml-pop-out .2s  cubic-bezier(.32,0,.67,0) forwards; }
-            #aml-settings-dialog.aml-opening::backdrop { animation:_aml-bd-in  .28s ease forwards; }
-            #aml-settings-dialog.aml-closing::backdrop { animation:_aml-bd-out .18s ease-in forwards; }
+            #adam-settings-dialog::-webkit-scrollbar { width:4px; }
+            #adam-settings-dialog::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18);border-radius:2px; }
+            @keyframes _adam-pop-in  { from{opacity:0;transform:scale(0.94) translateY(10px)} to{opacity:1;transform:scale(1) translateY(0)} }
+            @keyframes _adam-pop-out { from{opacity:1;transform:scale(1) translateY(0)}       to{opacity:0;transform:scale(0.96) translateY(5px)} }
+            @keyframes _adam-bd-in   { from{opacity:0} to{opacity:1} }
+            @keyframes _adam-bd-out  { from{opacity:1} to{opacity:0} }
+            @keyframes _adam-spin    { to{transform:rotate(360deg)} }
+            ._adam-spinner { display:inline-block;width:10px;height:10px;border:1.5px solid rgba(255,255,255,0.18);border-top-color:rgba(255,255,255,0.6);border-radius:50%;animation:_adam-spin .7s linear infinite;flex-shrink:0; }
+            #adam-settings-dialog.adam-opening { animation:_adam-pop-in  .32s cubic-bezier(.34,1.4,.64,1) forwards; }
+            #adam-settings-dialog.adam-closing { animation:_adam-pop-out .2s  cubic-bezier(.32,0,.67,0) forwards; }
+            #adam-settings-dialog.adam-opening::backdrop { animation:_adam-bd-in  .28s ease forwards; }
+            #adam-settings-dialog.adam-closing::backdrop { animation:_adam-bd-out .18s ease-in forwards; }
         `;
       document.head.appendChild(st);
       document.body.appendChild(dlg);
       dlg.addEventListener("click", (e) => {
-        document.querySelectorAll(".aml-qdrop-menu").forEach((m) => {
+        document.querySelectorAll(".adam-qdrop-menu").forEach((m) => {
           m.style.display = "none";
         });
         if (e.target === dlg) closeSettings();
@@ -9104,15 +9113,15 @@
     }
     function closeSettings() {
       _hotkeyCapture = null;
-      const dlg = document.getElementById("aml-settings-dialog");
+      const dlg = document.getElementById("adam-settings-dialog");
       if (!dlg?.open) return;
-      dlg.classList.replace("aml-opening", "aml-closing") || dlg.classList.add("aml-closing");
+      dlg.classList.replace("adam-opening", "adam-closing") || dlg.classList.add("adam-closing");
       dlg.addEventListener("animationend", () => {
-        dlg.classList.remove("aml-closing");
+        dlg.classList.remove("adam-closing");
         dlg.close();
       }, { once: true });
     }
-    function _amlMiniBtn(onClick) {
+    function _adamMiniBtn(onClick) {
       const b = document.createElement("button");
       b.innerHTML = _svgReset;
       b.title = "Reset to default";
@@ -9128,7 +9137,7 @@
       b.onclick = onClick;
       return b;
     }
-    function _amlIOSToggle(on, onChange) {
+    function _adamIOSToggle(on, onChange) {
       let _on = !!on;
       const track = document.createElement("div");
       track.style.cssText = "position:relative;width:34px;height:20px;border-radius:10px;background:" + (_on ? "#fc3c44" : "rgba(255,255,255,0.2)") + ";cursor:pointer;flex-shrink:0;transition:background 0.2s;box-sizing:border-box;";
@@ -9153,44 +9162,44 @@
       };
       return track;
     }
-    function _amlMakeQualityDropdown(prefKey, prefs, qualityOpts, onChange) {
+    function _adamMakeQualityDropdown(prefKey, prefs, qualityOpts, onChange) {
       const saved = prefs[prefKey] ?? "lossless";
       let current = saved;
       const wrap = document.createElement("div");
       wrap.style.cssText = "position:relative;display:inline-block;";
       const btn = document.createElement("div");
-      btn.className = "aml-qdrop-btn";
+      btn.className = "adam-qdrop-btn";
       const btnLabel = document.createElement("span");
       btnLabel.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
       const chevron = document.createElement("span");
-      chevron.className = "aml-qdrop-chevron";
+      chevron.className = "adam-qdrop-chevron";
       chevron.innerHTML = "&#9660;";
       btn.append(btnLabel, chevron);
       const menu = document.createElement("div");
-      menu.className = "aml-qdrop-menu";
+      menu.className = "adam-qdrop-menu";
       menu.style.cssText += "display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:10;";
       function setOption(value, save) {
         current = value;
         const opt = qualityOpts.find((o) => o.value === value);
         btnLabel.textContent = opt ? opt.label : value;
         const sv = String(value);
-        menu.querySelectorAll(".aml-qdrop-item").forEach((el) => {
+        menu.querySelectorAll(".adam-qdrop-item").forEach((el) => {
           el.classList.toggle("selected", el.dataset.value === sv);
         });
         if (save) {
-          window.amlBridge?.setTweak(prefKey, value);
+          window.adamBridge?.setTweak(prefKey, value);
           if (prefKey === "streaming-quality") _streamingQuality = value;
           onChange?.(value);
         }
       }
       qualityOpts.forEach(({ value, label }) => {
         const item = document.createElement("div");
-        item.className = "aml-qdrop-item";
+        item.className = "adam-qdrop-item";
         item.dataset.value = value;
         const accent = document.createElement("div");
-        accent.className = "aml-qdrop-accent";
+        accent.className = "adam-qdrop-accent";
         const lbl = document.createElement("div");
-        lbl.className = "aml-qdrop-item-label";
+        lbl.className = "adam-qdrop-item-label";
         lbl.textContent = label;
         item.append(accent, lbl);
         item.addEventListener("mousedown", (e) => {
@@ -9205,7 +9214,7 @@
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const open = menu.style.display !== "none";
-        document.querySelectorAll(".aml-qdrop-menu").forEach((m) => {
+        document.querySelectorAll(".adam-qdrop-menu").forEach((m) => {
           m.style.display = "none";
         });
         if (!open) {
@@ -9216,7 +9225,7 @@
       });
       return { wrap, setValue: (v) => setOption(v, false) };
     }
-    function _amlGenPalette(hex, appearance) {
+    function _adamGenPalette(hex, appearance) {
       hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : "#fc3c44";
       const r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
       const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2;
@@ -9234,7 +9243,7 @@
       }
       return { accent: hex, bgColor: `hsla(${hi},${Math.round(si * 0.5)}%,10%,1)`, navBg: `hsla(${hi},${Math.round(si * 0.8)}%,14%,0.72)`, navBorder: `hsla(${hi},${Math.round(si * 0.7)}%,50%,0.25)`, accentActive: `hsla(${hi},${Math.round(si * 0.9)}%,60%,0.28)` };
     }
-    function _amlCssColorToHex(str) {
+    function _adamCssColorToHex(str) {
       if (/^#[0-9a-fA-F]{6}$/.test(str)) return str;
       const m = str.match(/hsla?\((\d+),\s*([\d.]+)%,\s*([\d.]+)%/);
       if (!m) return "#336699";
@@ -9245,9 +9254,9 @@
       };
       return "#" + [f(0), f(8), f(4)].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("");
     }
-    function _amlRenderPaletteEditor(container, thInfo, st) {
+    function _adamRenderPaletteEditor(container, thInfo, st) {
       container.innerHTML = "";
-      const pal = st.curPalette || _amlGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
+      const pal = st.curPalette || _adamGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
       const paletteKeys = [
         { key: "bgColor", label: "Background" },
         { key: "accent", label: "Accent" },
@@ -9264,13 +9273,13 @@
         swatchWrap.style.cssText = `height:30px;border-radius:6px;background:${pal[key] || "#333"};border:1px solid rgba(255,255,255,0.1);position:relative;overflow:hidden;cursor:pointer;`;
         const picker = document.createElement("input");
         picker.type = "color";
-        picker.value = _amlCssColorToHex(pal[key] || "#336699");
+        picker.value = _adamCssColorToHex(pal[key] || "#336699");
         picker.style.cssText = "position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;";
         picker.oninput = () => {
           pal[key] = picker.value;
           swatchWrap.style.background = picker.value;
           st.curPalette = { ...pal };
-          window.amlBridge.setThemePalette(key, picker.value);
+          window.adamBridge.setThemePalette(key, picker.value);
         };
         swatchWrap.appendChild(picker);
         const lbl = document.createElement("div");
@@ -9284,10 +9293,10 @@
       const resetBtn = makeBtn("Reset to system accent");
       resetBtn.style.cssText += "margin:10px 0;display:block;";
       resetBtn.onclick = async () => {
-        const newPal = await window.amlBridge.resetThemePalette();
+        const newPal = await window.adamBridge.resetThemePalette();
         if (newPal) {
           st.curPalette = newPal;
-          _amlRenderPaletteEditor(container, thInfo, st);
+          _adamRenderPaletteEditor(container, thInfo, st);
         }
       };
       container.appendChild(resetBtn);
@@ -9316,8 +9325,8 @@
             const pr = st.thPresets.find((x) => x.name === name);
             if (pr) {
               st.curPalette = pr.palette;
-              window.amlBridge.applyThemePreset(name);
-              _amlRenderPaletteEditor(container, thInfo, st);
+              window.adamBridge.applyThemePreset(name);
+              _adamRenderPaletteEditor(container, thInfo, st);
             }
           };
           chip.appendChild(cl);
@@ -9327,7 +9336,7 @@
             del.style.cssText = "border:none;background:transparent;color:rgba(255,255,255,0.35);cursor:pointer;padding:0 0 0 4px;display:inline-flex;align-items:center;";
             del.onclick = () => {
               st.thPresets = st.thPresets.filter((x) => x.name !== name);
-              window.amlBridge.deleteThemePreset(name);
+              window.adamBridge.deleteThemePreset(name);
               renderPresets();
             };
             chip.appendChild(del);
@@ -9358,7 +9367,7 @@
       const doSave = async () => {
         const name = saveNameInput.value.trim();
         if (!name) return;
-        const newPresets = await window.amlBridge.saveThemePreset(name);
+        const newPresets = await window.adamBridge.saveThemePreset(name);
         if (newPresets) {
           const builtins = st.thPresets.filter((x) => x.builtin);
           st.thPresets = [...builtins, ...newPresets];
@@ -9382,11 +9391,11 @@
       const exportBtn = makeBtn("Export");
       exportBtn.onclick = async () => {
         const name = prompt("Preset name to export (leave blank for current palette):") || "current";
-        await window.amlBridge.exportThemePreset(name);
+        await window.adamBridge.exportThemePreset(name);
       };
       const importBtn = makeBtn("Import");
       importBtn.onclick = async () => {
-        const preset = await window.amlBridge.importThemePreset();
+        const preset = await window.adamBridge.importThemePreset();
         if (preset) {
           st.thPresets = st.thPresets.filter((x) => x.name !== preset.name);
           st.thPresets.push(preset);
@@ -9453,33 +9462,33 @@
       const wrap = document.createElement("div");
       wrap.style.cssText = "position:relative;display:inline-block;min-width:180px;";
       const btn = document.createElement("div");
-      btn.className = "aml-qdrop-btn";
+      btn.className = "adam-qdrop-btn";
       btn.style.cssText += "font-size:12px;";
       const btnLabel = document.createElement("span");
       btnLabel.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
       const chevron = document.createElement("span");
-      chevron.className = "aml-qdrop-chevron";
+      chevron.className = "adam-qdrop-chevron";
       chevron.innerHTML = "&#9660;";
       btn.append(btnLabel, chevron);
       const menu = document.createElement("div");
-      menu.className = "aml-qdrop-menu";
+      menu.className = "adam-qdrop-menu";
       menu.style.cssText += "display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:20;min-width:100%;";
       function setOpt(v, save) {
         current = v;
         const opt = options.find((o) => o.value === v);
         btnLabel.textContent = opt ? opt.label : v;
         const sv = String(v);
-        menu.querySelectorAll(".aml-qdrop-item").forEach((el) => el.classList.toggle("selected", el.dataset.value === sv));
+        menu.querySelectorAll(".adam-qdrop-item").forEach((el) => el.classList.toggle("selected", el.dataset.value === sv));
         if (save) onSave(v);
       }
       options.forEach(({ value, label }) => {
         const item = document.createElement("div");
-        item.className = "aml-qdrop-item";
+        item.className = "adam-qdrop-item";
         item.dataset.value = value;
         const accent = document.createElement("div");
-        accent.className = "aml-qdrop-accent";
+        accent.className = "adam-qdrop-accent";
         const lbl = document.createElement("div");
-        lbl.className = "aml-qdrop-item-label";
+        lbl.className = "adam-qdrop-item-label";
         lbl.textContent = label;
         item.append(accent, lbl);
         item.addEventListener("mousedown", (e) => {
@@ -9494,7 +9503,7 @@
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const open = menu.style.display !== "none";
-        document.querySelectorAll(".aml-qdrop-menu").forEach((m) => {
+        document.querySelectorAll(".adam-qdrop-menu").forEach((m) => {
           m.style.display = "none";
         });
         if (!open) {
@@ -9510,7 +9519,7 @@
       return unknown.length ? `Unknown variables: ${unknown.map((n) => "{" + n + "}").join(", ")}` : "";
     };
     const _dlRenderTemplate = (val) => (val || "").replace(/\{([^}:]+)(?::[^}]+)?\}/g, (_, k) => _DL_EX[k] || _DL_EX[k.toLowerCase()] || `{${k}}`);
-    function _amlMakeTemplateRow(label, presets, savedValue, prefKey, suffix, prefs, updatePreview) {
+    function _adamMakeTemplateRow(label, presets, savedValue, prefKey, suffix, prefs, updatePreview) {
       const isCustom = !presets.some((p) => p.value === savedValue);
       const rowWrap = document.createElement("div");
       rowWrap.style.cssText = "display:flex;flex-direction:column;gap:5px;";
@@ -9518,7 +9527,7 @@
       topRow.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
       const customLbl = document.createElement("span");
       customLbl.style.cssText = FF + "display:inline-flex;align-items:center;gap:6px;color:rgba(255,255,255,0.4);font-size:11px;flex-shrink:0;";
-      const _customToggleEl = _amlIOSToggle(isCustom, () => syncMode && syncMode());
+      const _customToggleEl = _adamIOSToggle(isCustom, () => syncMode && syncMode());
       const customCb = _customToggleEl._cb;
       customLbl.append(_customToggleEl, document.createTextNode("Custom"));
       const resetBtn = document.createElement("button");
@@ -9534,7 +9543,7 @@
         resetBtn.style.color = "rgba(255,255,255,0.38)";
       };
       const { wrap: ddWrap, getValue, setValue } = _dlDropdown(presets, isCustom ? presets[0].value : savedValue, (v) => {
-        window.amlBridge?.setTweak(prefKey, v);
+        window.adamBridge?.setTweak(prefKey, v);
         exampleEl.textContent = _dlRenderTemplate(v) + (suffix || "");
         updatePreview();
       });
@@ -9567,7 +9576,7 @@
           validMsg.style.color = "#30d158";
           validMsg.textContent = val ? "\u2713 Valid" : "";
           customInp.style.borderColor = val ? "rgba(48,209,88,0.4)" : "rgba(255,255,255,0.15)";
-          window.amlBridge?.setTweak(prefKey, val);
+          window.adamBridge?.setTweak(prefKey, val);
           exampleEl.textContent = val ? _dlRenderTemplate(val) + (suffix || "") : "";
           updatePreview();
         }
@@ -9583,7 +9592,7 @@
           customInp.value = getValue();
           applyCustom(customInp.value);
         } else {
-          window.amlBridge?.setTweak(prefKey, getValue());
+          window.adamBridge?.setTweak(prefKey, getValue());
           exampleEl.textContent = _dlRenderTemplate(getValue()) + (suffix || "");
           updatePreview();
         }
@@ -9591,7 +9600,7 @@
       resetBtn.onclick = () => {
         customCb.checked = false;
         setValue(presets[0].value);
-        window.amlBridge?.setTweak(prefKey, presets[0].value);
+        window.adamBridge?.setTweak(prefKey, presets[0].value);
         exampleEl.textContent = _dlRenderTemplate(presets[0].value) + (suffix || "");
         updatePreview();
         syncMode();
@@ -9605,7 +9614,7 @@
       const { wrap, body: stBody } = makeSection("Engine Status");
       function spinner() {
         const s = document.createElement("span");
-        s.className = "_aml-spinner";
+        s.className = "_adam-spinner";
         return s;
       }
       function renderStatusRows(d) {
@@ -9694,7 +9703,7 @@
       blurSl.style.cssText = "flex:1;accent-color:#fc3c44;margin:0 10px;";
       blurSl.oninput = () => {
         blurVal.textContent = `${blurSl.value}px`;
-        window.amlBridge.setGlassBlur(+blurSl.value);
+        window.adamBridge.setGlassBlur(+blurSl.value);
       };
       const blurR = document.createElement("div");
       blurR.style.cssText = "display:flex;align-items:center;flex:1;";
@@ -9703,7 +9712,7 @@
       blurR.appendChild(makeResetBtn("glass blur", () => {
         blurSl.value = 20;
         blurVal.textContent = "20px";
-        window.amlBridge.setGlassBlur(20);
+        window.adamBridge.setGlassBlur(20);
       }));
       dBody.appendChild(makeRow("Glass blur", blurR, "Sidebar and UI element blur intensity", false));
       const bgBlurVal = document.createElement("span");
@@ -9718,7 +9727,7 @@
       bgBlurSl.style.cssText = "flex:1;accent-color:#fc3c44;margin:0 10px;";
       bgBlurSl.oninput = () => {
         bgBlurVal.textContent = `${bgBlurSl.value}px`;
-        window.amlBridge.setBgBlur(+bgBlurSl.value);
+        window.adamBridge.setBgBlur(+bgBlurSl.value);
       };
       const bgBlurR = document.createElement("div");
       bgBlurR.style.cssText = "display:flex;align-items:center;flex:1;";
@@ -9727,7 +9736,7 @@
       bgBlurR.appendChild(makeResetBtn("background blur", () => {
         bgBlurSl.value = 18;
         bgBlurVal.textContent = "18px";
-        window.amlBridge.setBgBlur(18);
+        window.adamBridge.setBgBlur(18);
       }));
       dBody.appendChild(makeRow("Background blur", bgBlurR, "Wallpaper blur (requires a wallpaper to be set)", false));
       const navOpVal = document.createElement("span");
@@ -9743,7 +9752,7 @@
       navOpSl.style.cssText = "flex:1;accent-color:#fc3c44;margin:0 10px;";
       navOpSl.oninput = () => {
         navOpVal.textContent = Math.round(+navOpSl.value * 100) + "%";
-        window.amlBridge.setNavOpacity(+navOpSl.value);
+        window.adamBridge.setNavOpacity(+navOpSl.value);
       };
       const navOpR = document.createElement("div");
       navOpR.style.cssText = "display:flex;align-items:center;flex:1;";
@@ -9752,7 +9761,7 @@
       navOpR.appendChild(makeResetBtn("sidebar opacity", () => {
         navOpSl.value = 0.72;
         navOpVal.textContent = "72%";
-        window.amlBridge.setNavOpacity(0.72);
+        window.adamBridge.setNavOpacity(0.72);
       }));
       dBody.appendChild(makeRow("Sidebar opacity", navOpR, "How opaque the sidebar background is", false));
       const zoomVal = document.createElement("span");
@@ -9767,7 +9776,7 @@
       zoomSl.style.cssText = "flex:1;accent-color:#fc3c44;margin:0 10px;";
       zoomSl.oninput = () => {
         zoomVal.textContent = `${zoomSl.value}%`;
-        window.amlBridge.setZoom(+zoomSl.value / 100);
+        window.adamBridge.setZoom(+zoomSl.value / 100);
       };
       const zoomR = document.createElement("div");
       zoomR.style.cssText = "display:flex;align-items:center;flex:1;";
@@ -9776,24 +9785,24 @@
       zoomR.appendChild(makeResetBtn("zoom", () => {
         zoomSl.value = 100;
         zoomVal.textContent = "100%";
-        window.amlBridge.setZoom(1);
+        window.adamBridge.setZoom(1);
       }));
       dBody.appendChild(makeRow("Zoom", zoomR, null, false));
-      const toggle = _amlIOSToggle(
+      const toggle = _adamIOSToggle(
         prefs.hideUpsell !== false,
-        (v) => window.amlBridge.setTweak("hideUpsell", v)
+        (v) => window.adamBridge.setTweak("hideUpsell", v)
       );
       dBody.appendChild(makeRow("Hide upsell banners", toggle, null, false));
-      const radioToggle = _amlIOSToggle(
+      const radioToggle = _adamIOSToggle(
         !!prefs.hideRadio,
-        (v) => window.amlBridge.setTweak("hideRadio", v)
+        (v) => window.adamBridge.setTweak("hideRadio", v)
       );
       dBody.appendChild(makeRow("Hide Radio", radioToggle, "Remove Radio from the sidebar", true));
       return wrap;
     }
     async function _buildThemeSection(prefs) {
       const { wrap, body: thBody } = makeSection("Theme");
-      const thInfo = await window.amlBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: "accent", themePalette: null, themePresets: [], customCssPath: null, systemAccent: "#fc3c44", themeAppearance: "dark" }));
+      const thInfo = await window.adamBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: "accent", themePalette: null, themePresets: [], customCssPath: null, systemAccent: "#fc3c44", themeAppearance: "dark" }));
       const blurAvail = !!thInfo.blurAvailable;
       const st = {
         curMode: thInfo.themeMode || (blurAvail ? "blur" : "accent"),
@@ -9801,7 +9810,7 @@
         thPresets: thInfo.themePresets || [],
         curAppearance: thInfo.themeAppearance || "dark"
       };
-      document.body.setAttribute("data-aml-mode", st.curMode);
+      document.body.setAttribute("data-adam-mode", st.curMode);
       function renderCustomCss(container) {
         container.innerHTML = "";
         const pathDiv = document.createElement("div");
@@ -9812,7 +9821,7 @@
         btnsRow.style.cssText = "display:flex;gap:6px;padding-bottom:10px;";
         const browseBtn = makeBtn("Browse & Import CSS");
         browseBtn.onclick = async () => {
-          const fp = await window.amlBridge.importThemeCss();
+          const fp = await window.adamBridge.importThemeCss();
           if (fp) {
             pathDiv.textContent = fp;
             thInfo.customCssPath = fp;
@@ -9820,13 +9829,13 @@
         };
         const clearBtn = makeBtn("Clear");
         clearBtn.onclick = () => {
-          window.amlBridge.setThemeMode("custom");
+          window.adamBridge.setThemeMode("custom");
           pathDiv.textContent = "No file selected";
           thInfo.customCssPath = null;
         };
         const hint = document.createElement("div");
         hint.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.28);padding-top:4px;";
-        hint.textContent = "See aml-custom.example.css in the project root for the template.";
+        hint.textContent = "See adam-custom.example.css in the project root for the template.";
         btnsRow.appendChild(browseBtn);
         btnsRow.appendChild(clearBtn);
         container.appendChild(btnsRow);
@@ -9841,8 +9850,8 @@
           info.textContent = blurAvail ? "Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above." : "Blur is only available on Hyprland and KDE. Your current desktop does not support it.";
           thContentArea.appendChild(info);
         } else if (mode === "accent") {
-          if (!st.curPalette) st.curPalette = _amlGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
-          _amlRenderPaletteEditor(thContentArea, thInfo, st);
+          if (!st.curPalette) st.curPalette = _adamGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
+          _adamRenderPaletteEditor(thContentArea, thInfo, st);
         } else {
           renderCustomCss(thContentArea);
         }
@@ -9872,16 +9881,16 @@
             b.style.color = a ? "rgba(255,255,255,0.88)" : "rgba(255,255,255,0.38)";
             b.style.fontWeight = a ? "500" : "";
           });
-          document.body.setAttribute("data-aml-mode", value);
-          window.amlBridge.setThemeMode(value);
+          document.body.setAttribute("data-adam-mode", value);
+          window.adamBridge.setThemeMode(value);
           renderThemeContent(value);
         };
         modeSeg.appendChild(btn);
       });
       modeRow.appendChild(modeSeg);
-      const artToggle = _amlIOSToggle(prefs.artTheme !== false, (v) => {
-        window.amlBridge.setTweak("artTheme", v);
-        window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: v }));
+      const artToggle = _adamIOSToggle(prefs.artTheme !== false, (v) => {
+        window.adamBridge.setTweak("artTheme", v);
+        window.dispatchEvent(new CustomEvent("adam:art-theme", { detail: v }));
       });
       thBody.appendChild(makeRow("Album art theming", artToggle, "Colour album and playlist pages with a palette from their artwork", false));
       thBody.appendChild(modeRow);
@@ -9891,11 +9900,11 @@
     }
     function _buildAudioSection(prefs, drmSignedIn) {
       const { wrap, body: aqBody } = makeSection("Audio Quality");
-      if (!document.getElementById("aml-quality-dropdown-style")) {
+      if (!document.getElementById("adam-quality-dropdown-style")) {
         const ds = document.createElement("style");
-        ds.id = "aml-quality-dropdown-style";
+        ds.id = "adam-quality-dropdown-style";
         ds.textContent = `
-                .aml-qdrop-btn {
+                .adam-qdrop-btn {
                     display:flex;align-items:center;justify-content:space-between;gap:8px;
                     padding:6px 10px 6px 12px;
                     background:rgba(255,255,255,0.10);
@@ -9905,9 +9914,9 @@
                     font-size:11px;color:rgba(255,255,255,0.88);
                     transition:background 0.15s;user-select:none;white-space:nowrap;
                 }
-                .aml-qdrop-btn:hover { background:rgba(255,255,255,0.15); }
-                .aml-qdrop-chevron { font-size:8px;color:rgba(255,255,255,0.45);flex-shrink:0; }
-                .aml-qdrop-menu {
+                .adam-qdrop-btn:hover { background:rgba(255,255,255,0.15); }
+                .adam-qdrop-chevron { font-size:8px;color:rgba(255,255,255,0.45);flex-shrink:0; }
+                .adam-qdrop-menu {
                     background:rgba(32,32,36,0.72);
                     border:0.5px solid rgba(255,255,255,0.14);
                     border-radius:10px;
@@ -9916,7 +9925,7 @@
                     -webkit-backdrop-filter:blur(40px) saturate(2.0);
                     overflow:hidden;padding:4px 0;
                 }
-                .aml-qdrop-item {
+                .adam-qdrop-item {
                     display:flex;align-items:center;gap:0;
                     padding:0;cursor:pointer;
                     font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
@@ -9924,17 +9933,17 @@
                     transition:background 0.1s;
                     border-radius:0;position:relative;white-space:nowrap;
                 }
-                .aml-qdrop-item:hover { background:rgba(255,255,255,0.07); }
-                .aml-qdrop-accent {
+                .adam-qdrop-item:hover { background:rgba(255,255,255,0.07); }
+                .adam-qdrop-accent {
                     width:3px;align-self:stretch;flex-shrink:0;
                     background:transparent;border-radius:0;
                     transition:background 0.15s;
                 }
-                .aml-qdrop-item.selected .aml-qdrop-accent { background:#fc3c44; }
-                .aml-qdrop-item-label {
+                .adam-qdrop-item.selected .adam-qdrop-accent { background:#fc3c44; }
+                .adam-qdrop-item-label {
                     flex:1;padding:8px 16px 8px 10px;
                 }
-                .aml-qdrop-item.selected .aml-qdrop-item-label { color:#fff;font-weight:500; }
+                .adam-qdrop-item.selected .adam-qdrop-item-label { color:#fff;font-weight:500; }
             `;
         document.head.appendChild(ds);
       }
@@ -9946,15 +9955,15 @@
       ] : [
         { value: "high-quality", label: "High Quality (AAC 256 kbps)" }
       ];
-      const { wrap: sqWrap, setValue: setSQ } = _amlMakeQualityDropdown("streaming-quality", prefs, qualityOpts);
+      const { wrap: sqWrap, setValue: setSQ } = _adamMakeQualityDropdown("streaming-quality", prefs, qualityOpts);
       if (!losslessOn) setSQ("high-quality");
-      const sqResetBtn = _amlMiniBtn(() => {
+      const sqResetBtn = _adamMiniBtn(() => {
         if (!drmSignedIn) return;
         if (!losslessToggle.querySelector("input")?.checked) {
           losslessToggle.querySelector("input").click();
         }
         setSQ("lossless");
-        window.amlBridge?.setTweak("streaming-quality", "lossless");
+        window.adamBridge?.setTweak("streaming-quality", "lossless");
         _streamingQuality = "lossless";
       });
       const sqInner = document.createElement("div");
@@ -9979,8 +9988,8 @@
         true
       );
       let _onLosslessChange = null;
-      const losslessToggle = _amlIOSToggle(losslessOn, (v) => {
-        window.amlBridge?.setTweak("lossless-enabled", v);
+      const losslessToggle = _adamIOSToggle(losslessOn, (v) => {
+        window.adamBridge?.setTweak("lossless-enabled", v);
         _applyLosslessRowState(v);
         if (!v) {
           setSQ("high-quality");
@@ -10050,14 +10059,14 @@
         };
         szSl.onchange = () => {
           const v = +szSl.value;
-          window.amlBridge?.setPref("persistLimitMB", v);
+          window.adamBridge?.setPref("persistLimitMB", v);
           fetch(`${ENGINE}/api/v1/cache/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ persistLimitMB: v }) }).catch(() => {
           });
         };
-        const szResetBtn = _amlMiniBtn(() => {
+        const szResetBtn = _adamMiniBtn(() => {
           szSl.value = 500;
           szVal.textContent = "500 MB";
-          window.amlBridge?.setPref("persistLimitMB", 500);
+          window.adamBridge?.setPref("persistLimitMB", 500);
           fetch(`${ENGINE}/api/v1/cache/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ persistLimitMB: 500 }) }).catch(() => {
           });
         });
@@ -10074,7 +10083,7 @@
         ttlInp.onchange = () => {
           const v = Math.max(1, +ttlInp.value || 5);
           ttlInp.value = v;
-          window.amlBridge?.setPref("persistTTLDays", v);
+          window.adamBridge?.setPref("persistTTLDays", v);
           fetch(`${ENGINE}/api/v1/cache/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ persistTTLDays: v }) }).catch(() => {
           });
         };
@@ -10085,9 +10094,9 @@
         ttlUnit.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.5);";
         ttlUnit.textContent = "days";
         ttlWrap.appendChild(ttlUnit);
-        const ttlResetBtn = _amlMiniBtn(() => {
+        const ttlResetBtn = _adamMiniBtn(() => {
           ttlInp.value = 5;
-          window.amlBridge?.setPref("persistTTLDays", 5);
+          window.adamBridge?.setPref("persistTTLDays", 5);
           fetch(`${ENGINE}/api/v1/cache/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ persistTTLDays: 5 }) }).catch(() => {
           });
         });
@@ -10101,7 +10110,7 @@
           });
         };
         const clearAudioSegBtn = makeBtn("Clear Audio Cache");
-        clearAudioSegBtn.title = "Clears cached AAC audio HLS segments (~/.cache/apple-music-linux/engine/segments/)";
+        clearAudioSegBtn.title = "Clears cached AAC audio HLS segments (~/.cache/adam/engine/segments/)";
         clearAudioSegBtn.onclick = () => {
           fetch(`${ENGINE}/api/v1/cache/playback?what=segments`, { method: "DELETE" }).then(() => openSettings()).catch(() => {
           });
@@ -10135,7 +10144,7 @@
       mvBarWrap.appendChild(mvBarBg);
       mvBarWrap.appendChild(mvBarLabel);
       cBody.appendChild(makeRow("Cache used", mvBarWrap, null, false));
-      const mvToggle = _amlIOSToggle(mvEnabled, (v) => {
+      const mvToggle = _adamIOSToggle(mvEnabled, (v) => {
         mvCapSl.disabled = !v;
         fetch(`${ENGINE}/api/v1/cache/mv`, {
           method: "PUT",
@@ -10168,7 +10177,7 @@
         }).catch(() => {
         });
       };
-      const mvCapResetBtn = _amlMiniBtn(() => {
+      const mvCapResetBtn = _adamMiniBtn(() => {
         mvCapSl.value = 2048;
         mvCapVal.textContent = "2048 MB";
         fetch(`${ENGINE}/api/v1/cache/mv`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ maxBytes: 2 * 1024 * 1024 * 1024 }) }).catch(() => {
@@ -10223,14 +10232,14 @@
       };
       pwSzSl.onchange = () => {
         const v = +pwSzSl.value;
-        window.amlBridge?.setPref("prewarmLimitMB", v);
+        window.adamBridge?.setPref("prewarmLimitMB", v);
         fetch(`${ENGINE}/api/v1/cache/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prewarmLimitMB: v }) }).catch(() => {
         });
       };
-      const pwSzResetBtn = _amlMiniBtn(() => {
+      const pwSzResetBtn = _adamMiniBtn(() => {
         pwSzSl.value = 1024;
         pwSzVal.textContent = "1024 MB";
-        window.amlBridge?.setPref("prewarmLimitMB", 1024);
+        window.adamBridge?.setPref("prewarmLimitMB", 1024);
         fetch(`${ENGINE}/api/v1/cache/config`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prewarmLimitMB: 1024 }) }).catch(() => {
         });
       });
@@ -10263,14 +10272,14 @@
         inp.onblur = () => {
           inp.style.borderColor = "rgba(255,255,255,0.15)";
         };
-        inp.oninput = () => window.amlBridge?.setTweak(prefKey, inp.value);
+        inp.oninput = () => window.adamBridge?.setTweak(prefKey, inp.value);
         return inp;
       }
       function makeMarkerControl(prefKey, defaultVal) {
         const inp = makeMarkerInput(prefKey, defaultVal);
         const resetBtn = makeMiniBtn("", () => {
           inp.value = defaultVal;
-          window.amlBridge?.setTweak(prefKey, defaultVal);
+          window.adamBridge?.setTweak(prefKey, defaultVal);
         });
         const w = document.createElement("div");
         w.style.cssText = "display:flex;align-items:center;gap:6px;";
@@ -10294,7 +10303,7 @@
         dlBody.appendChild(makeRow2(
           label,
           makeIOSToggle(on, (v) => {
-            window.amlBridge?.setTweak(prefKey, v);
+            window.adamBridge?.setTweak(prefKey, v);
             inpRow.style.display = v ? "" : "none";
           }),
           hint,
@@ -10307,7 +10316,7 @@
       makeMarkerRow("Apple Digital Masters", "adm-enabled", "[M]", "Add [M] to filenames of tracks mastered for Apple Music", false);
       dlBody.appendChild(makeRow2(
         "Playlist metadata",
-        makeIOSToggle(!!prefs["use-songinfo-for-playlist"], (v) => window.amlBridge?.setTweak("use-songinfo-for-playlist", v)),
+        makeIOSToggle(!!prefs["use-songinfo-for-playlist"], (v) => window.adamBridge?.setTweak("use-songinfo-for-playlist", v)),
         "Use original album track number and album name instead of playlist position when downloading a playlist",
         true
       ));
@@ -10315,10 +10324,10 @@
     function _buildDownloadsSection(prefs, tools, drmSignedIn) {
       const { wrap, body: dlBody } = makeSection("Downloads");
       function makeIOSToggle(on, onChange) {
-        return _amlIOSToggle(on, onChange);
+        return _adamIOSToggle(on, onChange);
       }
       function makeMiniBtn(_, onClick) {
-        return _amlMiniBtn(onClick);
+        return _adamMiniBtn(onClick);
       }
       function dlSubhead(text) {
         return _dlSubhead(text);
@@ -10335,7 +10344,7 @@
         { value: "high-quality", label: "High Quality (AAC 256 kbps)" }
       ];
       function makeQualityDropdown(prefKey) {
-        return _amlMakeQualityDropdown(prefKey, prefs, qualityOpts);
+        return _adamMakeQualityDropdown(prefKey, prefs, qualityOpts);
       }
       let previewEl = null;
       function updatePreview() {
@@ -10345,7 +10354,7 @@
         previewEl.textContent = _dlRenderTemplate(albumTmpl) + "/" + _dlRenderTemplate(trackTmpl) + ".m4a";
       }
       function makeTemplateRow(label, presets, savedValue, prefKey, suffix) {
-        return _amlMakeTemplateRow(label, presets, savedValue, prefKey, suffix, prefs, updatePreview);
+        return _adamMakeTemplateRow(label, presets, savedValue, prefKey, suffix, prefs, updatePreview);
       }
       dlBody.appendChild(_dlSubhead("Filename"));
       const TRACK_PRESETS = [
@@ -10381,12 +10390,12 @@
         { value: "lossless", label: "Lossless (ALAC up to 24-bit / 48 kHz)" },
         { value: "hi-res-lossless", label: "Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)" }
       ] : [{ value: "high-quality", label: "High Quality (AAC 256 kbps)" }];
-      const { wrap: dlQWrap, setValue: setDlQ } = _amlMakeQualityDropdown("dl-quality", prefs, fullQualityOpts);
+      const { wrap: dlQWrap, setValue: setDlQ } = _adamMakeQualityDropdown("dl-quality", prefs, fullQualityOpts);
       if (!losslessAllowed) setDlQ("high-quality");
       const dlQReset = makeMiniBtn("", () => {
         if (!_dlLosslessOn) return;
         setDlQ("lossless");
-        window.amlBridge?.setTweak("dl-quality", "lossless");
+        window.adamBridge?.setTweak("dl-quality", "lossless");
       });
       const dlQInner = document.createElement("div");
       dlQInner.style.cssText = "flex:1;display:flex;align-items:center;gap:8px;";
@@ -10429,7 +10438,7 @@
         ffmpegAvail ? "Available for re-encoding" : "Install FFmpeg or set a custom path below",
         false
       ));
-      const ffmpegToggle = makeIOSToggle(!!prefs["dl-ffmpeg-enabled"] && ffmpegAvail, (v) => window.amlBridge?.setTweak("dl-ffmpeg-enabled", v));
+      const ffmpegToggle = makeIOSToggle(!!prefs["dl-ffmpeg-enabled"] && ffmpegAvail, (v) => window.adamBridge?.setTweak("dl-ffmpeg-enabled", v));
       if (!ffmpegAvail) {
         ffmpegToggle.style.opacity = "0.4";
         ffmpegToggle.title = "FFmpeg not found";
@@ -10445,15 +10454,15 @@
       };
       ffmpegPathInp.onblur = () => {
         ffmpegPathInp.style.borderColor = "rgba(255,255,255,0.14)";
-        window.amlBridge?.setTweak("ffmpeg-path", ffmpegPathInp.value.trim());
+        window.adamBridge?.setTweak("ffmpeg-path", ffmpegPathInp.value.trim());
       };
       const ffmpegPathRow = document.createElement("div");
       ffmpegPathRow.style.cssText = "display:flex;align-items:center;gap:6px;flex:1;";
       ffmpegPathRow.appendChild(ffmpegPathInp);
       dlBody.appendChild(makeRow("FFmpeg path", ffmpegPathRow, "Leave blank to use system PATH", false));
-      const embedArtToggle = makeIOSToggle(prefs["dl-embed-art"] !== false, (v) => window.amlBridge?.setTweak("dl-embed-art", v));
+      const embedArtToggle = makeIOSToggle(prefs["dl-embed-art"] !== false, (v) => window.adamBridge?.setTweak("dl-embed-art", v));
       dlBody.appendChild(makeRow("Embed artwork", embedArtToggle, null, false));
-      const motionArtToggle = makeIOSToggle(!!prefs["dl-motion-art"], (v) => window.amlBridge?.setTweak("dl-motion-art", v));
+      const motionArtToggle = makeIOSToggle(!!prefs["dl-motion-art"], (v) => window.adamBridge?.setTweak("dl-motion-art", v));
       dlBody.appendChild(makeRow("Download animated artwork", motionArtToggle, "Save motion cover as a separate video file alongside the track", false));
       dlBody.appendChild(_dlSubhead("Music Video"));
       const MV_RES_OPTS = [
@@ -10465,7 +10474,7 @@
       ];
       const { wrap: mvResDd } = _dlDropdown(MV_RES_OPTS, prefs["dl-mv-quality"] || "best", (v) => {
         if (!drmSignedIn) return;
-        window.amlBridge?.setTweak("dl-mv-quality", v);
+        window.adamBridge?.setTweak("dl-mv-quality", v);
       });
       if (!drmSignedIn) {
         mvResDd.style.opacity = "0.38";
@@ -10482,18 +10491,18 @@
         { value: "1200", label: "1200 \xD7 1200" },
         { value: "3000", label: "3000 \xD7 3000" }
       ];
-      const { wrap: artDd } = _dlDropdown(ART_OPTS, prefs["dl-artwork-size"] || "1200", (v) => window.amlBridge?.setTweak("dl-artwork-size", v));
+      const { wrap: artDd } = _dlDropdown(ART_OPTS, prefs["dl-artwork-size"] || "1200", (v) => window.adamBridge?.setTweak("dl-artwork-size", v));
       dlBody.appendChild(makeRow("Artwork size", artDd, null, false));
       dlBody.appendChild(_dlSubhead("Lyrics"));
-      const lyricsToggle = makeIOSToggle(prefs["dl-lyrics"] !== false, (v) => window.amlBridge?.setTweak("dl-lyrics", v));
+      const lyricsToggle = makeIOSToggle(prefs["dl-lyrics"] !== false, (v) => window.adamBridge?.setTweak("dl-lyrics", v));
       dlBody.appendChild(makeRow("Embed lyrics", lyricsToggle, null, false));
-      const timedLyricsToggle = makeIOSToggle(prefs["dl-timed-lyrics"] !== false, (v) => window.amlBridge?.setTweak("dl-timed-lyrics", v));
+      const timedLyricsToggle = makeIOSToggle(prefs["dl-timed-lyrics"] !== false, (v) => window.adamBridge?.setTweak("dl-timed-lyrics", v));
       dlBody.appendChild(makeRow("Timed lyrics (SYLT)", timedLyricsToggle, null, false));
       _buildContentMarkersRows(dlBody, prefs, makeRow, makeIOSToggle, makeMiniBtn);
       dlBody.appendChild(_dlSubhead("Queue"));
       dlBody.appendChild(makeRow(
         "Retry on fail",
-        makeIOSToggle(prefs["retry-on-fail"] !== false, (v) => window.amlBridge?.setTweak("retry-on-fail", v)),
+        makeIOSToggle(prefs["retry-on-fail"] !== false, (v) => window.adamBridge?.setTweak("retry-on-fail", v)),
         "Automatically retry a failed download",
         false
       ));
@@ -10506,18 +10515,18 @@
       const { wrap: retryToDd } = _dlDropdown(
         RETRY_TIMEOUT_OPTS,
         parseInt(prefs["retry-timeout"] ?? "30", 10),
-        (v) => window.amlBridge?.setTweak("retry-timeout", parseInt(v, 10))
+        (v) => window.adamBridge?.setTweak("retry-timeout", parseInt(v, 10))
       );
       dlBody.appendChild(makeRow("Retry after", retryToDd, null, false));
       return { wrap, applyLossless: applyDlLossless };
     }
     async function _buildPlaybackSection(prefs, drmSignedIn) {
       const { wrap, body } = makeSection("Playback");
-      const resumeRaw = await window.amlBridge?.storeRead("resumeEnabled").catch(() => null);
+      const resumeRaw = await window.adamBridge?.storeRead("resumeEnabled").catch(() => null);
       const resumeOn = resumeRaw !== "false" && resumeRaw !== false;
-      const resumeToggle = _amlIOSToggle(resumeOn, async (v) => {
+      const resumeToggle = _adamIOSToggle(resumeOn, async (v) => {
         _resumeEnabled = v;
-        await window.amlBridge?.storeWrite("resumeEnabled", String(v)).catch(() => {
+        await window.adamBridge?.storeWrite("resumeEnabled", String(v)).catch(() => {
         });
         if (!v) _resumeClear();
       });
@@ -10527,10 +10536,10 @@
         "Offer to restore your last queue and position on launch",
         false
       ));
-      const scRaw = await window.amlBridge?.storeRead("soundCheckEnabled").catch(() => null);
+      const scRaw = await window.adamBridge?.storeRead("soundCheckEnabled").catch(() => null);
       const scOn = scRaw === "true" || scRaw === true;
-      const scToggle = _amlIOSToggle(scOn, async (v) => {
-        await window.amlBridge?.storeWrite("soundCheckEnabled", String(v)).catch(() => {
+      const scToggle = _adamIOSToggle(scOn, async (v) => {
+        await window.adamBridge?.storeWrite("soundCheckEnabled", String(v)).catch(() => {
         });
         _scSetEnabled(v);
       });
@@ -10564,9 +10573,9 @@
       const xfSecRow = makeRow("Duration", xfSecInner, null, false);
       xfSecRow.style.paddingLeft = "14px";
       const gaplessOn = prefs?.["xf-preserve-gapless"] !== false;
-      const gaplessToggle = _amlIOSToggle(gaplessOn, (v) => {
+      const gaplessToggle = _adamIOSToggle(gaplessOn, (v) => {
         _xfPreserveGapless = v;
-        window.amlBridge?.setTweak("xf-preserve-gapless", v);
+        window.adamBridge?.setTweak("xf-preserve-gapless", v);
       });
       const gaplessRow = makeRow(
         "Keep albums gapless",
@@ -10576,9 +10585,9 @@
       );
       gaplessRow.style.paddingLeft = "14px";
       const stationOn = prefs?.["xf-station"] !== false;
-      const stationToggle = _amlIOSToggle(stationOn, (v) => {
+      const stationToggle = _adamIOSToggle(stationOn, (v) => {
         _xfStationEnabled = v;
-        window.amlBridge?.setTweak("xf-station", v);
+        window.adamBridge?.setTweak("xf-station", v);
       });
       const stationRow = makeRow(
         "Crossfade autoplay & stations",
@@ -10593,7 +10602,7 @@
         gaplessRow.style.display = on ? "" : "none";
         stationRow.style.display = on ? "" : "none";
       };
-      const { wrap: xfModeWrap } = _amlMakeQualityDropdown("crossfade-mode", { "crossfade-mode": xfModeInit }, [
+      const { wrap: xfModeWrap } = _adamMakeQualityDropdown("crossfade-mode", { "crossfade-mode": xfModeInit }, [
         { value: "off", label: "Off" },
         { value: "auto", label: "Automatic (Smart)" },
         { value: "adaptive", label: "Automatic (Adaptive)" },
@@ -10612,14 +10621,14 @@
       body.appendChild(gaplessRow);
       body.appendChild(stationRow);
       xfApplyMode(xfModeInit);
-      const discordRaw = await window.amlBridge?.storeRead("discordEnabled").catch(() => null);
+      const discordRaw = await window.adamBridge?.storeRead("discordEnabled").catch(() => null);
       const discordOn = discordRaw === "true" || discordRaw === true;
-      const discordToggle = _amlIOSToggle(discordOn, async (v) => {
+      const discordToggle = _adamIOSToggle(discordOn, async (v) => {
         _discordEnabled = v;
-        await window.amlBridge?.storeWrite("discordEnabled", String(v)).catch(() => {
+        await window.adamBridge?.storeWrite("discordEnabled", String(v)).catch(() => {
         });
         if (v) _discordUpdateNow();
-        else window.amlBridge?.discordDisable?.();
+        else window.adamBridge?.discordDisable?.();
       });
       body.appendChild(makeRow(
         "Discord Rich Presence",
@@ -10631,9 +10640,9 @@
     }
     function _buildShortcutsSection() {
       const { wrap, body } = makeSection("Keyboard Shortcuts");
-      const enToggle = _amlIOSToggle(_hotkeysEnabled, async (v) => {
+      const enToggle = _adamIOSToggle(_hotkeysEnabled, async (v) => {
         _hotkeysEnabled = v;
-        await window.amlBridge?.storeWrite("hotkeysEnabled", String(v)).catch(() => {
+        await window.adamBridge?.storeWrite("hotkeysEnabled", String(v)).catch(() => {
         });
       });
       body.appendChild(makeRow(
@@ -10681,7 +10690,7 @@
         a.style.cssText = "color:#fc3c44;text-decoration:none;";
         a.onclick = (e) => {
           e.preventDefault();
-          window.amlBridge?.openExternal?.(a.getAttribute("href")) ?? window.open(a.getAttribute("href"));
+          window.adamBridge?.openExternal?.(a.getAttribute("href")) ?? window.open(a.getAttribute("href"));
         };
       });
       return n;
@@ -10689,9 +10698,9 @@
     async function _buildScrobbleSection() {
       const { wrap, body } = makeSection("Scrobbling");
       body.appendChild(_scrobbleSubhead("Last.fm"));
-      const lf = await window.amlBridge?.lastfmStatus().catch(() => null) ?? {};
+      const lf = await window.adamBridge?.lastfmStatus().catch(() => null) ?? {};
       if (LASTFM_API_KEY && (!lf.apiKey || !lf.secretSet)) {
-        await window.amlBridge?.lastfmSetCredentials({ apiKey: LASTFM_API_KEY, secret: LASTFM_API_SECRET }).catch(() => {
+        await window.adamBridge?.lastfmSetCredentials({ apiKey: LASTFM_API_KEY, secret: LASTFM_API_SECRET }).catch(() => {
         });
         Object.assign(lf, { apiKey: LASTFM_API_KEY, secretSet: true, configured: true });
       }
@@ -10702,7 +10711,7 @@
         lfVal.appendChild(statusVal(lf.username || "connected", true));
         const disc = makeBtn("Disconnect");
         disc.onclick = async () => {
-          await window.amlBridge?.lastfmDisconnect();
+          await window.adamBridge?.lastfmDisconnect();
           _lastfmConnected = false;
           openSettings();
         };
@@ -10712,14 +10721,14 @@
         lfVal.innerHTML = "";
         const connect = makeBtn("Connect");
         connect.onclick = async () => {
-          const r = await window.amlBridge?.lastfmAuth();
+          const r = await window.adamBridge?.lastfmAuth();
           if (r?.error) {
             connect.textContent = "Error \u2014 retry";
             return;
           }
           connect.textContent = "Finish connecting";
           connect.onclick = async () => {
-            const s = await window.amlBridge?.lastfmSession(r.token);
+            const s = await window.adamBridge?.lastfmSession(r.token);
             if (s?.username) {
               _lastfmConnected = true;
               lf.username = s.username;
@@ -10732,9 +10741,9 @@
         lfVal.appendChild(connect);
       };
       (lf.connected ? lfConnected : lfDisconnected)();
-      body.appendChild(makeRow("Account", lfVal, "Log in and authorize AML in the in-app Last.fm window", false));
+      body.appendChild(makeRow("Account", lfVal, "Log in and authorize Adam in the in-app Last.fm window", false));
       body.appendChild(_scrobbleSubhead("ListenBrainz"));
-      const lb = await window.amlBridge?.lbStatus().catch(() => null) ?? {};
+      const lb = await window.adamBridge?.lbStatus().catch(() => null) ?? {};
       const lbCard = document.createElement("div");
       lbCard.style.cssText = FF + "display:flex;flex-direction:column;margin:4px 0 8px;border-radius:8px;border:0.5px solid rgba(255,255,255,0.12);overflow:hidden;";
       const lbInner = document.createElement("div");
@@ -10755,7 +10764,7 @@
         lbRight.appendChild(statusVal(lb.username || "connected", true));
         const disc = makeBtn("Disconnect");
         disc.onclick = async () => {
-          await window.amlBridge?.lbDisconnect();
+          await window.adamBridge?.lbDisconnect();
           _lbConnected = false;
           openSettings();
         };
@@ -10772,8 +10781,8 @@
           if (!tok) return;
           lbConnBtn.textContent = "\u2026";
           lbConnBtn.disabled = true;
-          await window.amlBridge?.lbSetToken(tok);
-          const s = await window.amlBridge?.lbStatus();
+          await window.adamBridge?.lbSetToken(tok);
+          const s = await window.adamBridge?.lbStatus();
           if (s?.connected) {
             _lbConnected = true;
             lb.username = s.username;
@@ -10798,11 +10807,11 @@
     }
     async function _buildHistorySection() {
       const { wrap, body: histBody } = makeSection("History");
-      const histEnabledRaw = await window.amlBridge?.storeRead("historyEnabled").catch(() => null);
+      const histEnabledRaw = await window.adamBridge?.storeRead("historyEnabled").catch(() => null);
       const histIsEnabled = histEnabledRaw !== "false" && histEnabledRaw !== false;
-      const histToggle = _amlIOSToggle(histIsEnabled, async (v) => {
+      const histToggle = _adamIOSToggle(histIsEnabled, async (v) => {
         _histEnabled = v;
-        await window.amlBridge?.storeWrite("historyEnabled", String(v)).catch(() => {
+        await window.adamBridge?.storeWrite("historyEnabled", String(v)).catch(() => {
         });
         _histInject();
       });
@@ -10867,7 +10876,7 @@
       _settingsPreload = Promise.all([
         fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
         fetch(`${ENGINE}/api/v1/tools`).then((r) => r.json()).catch(() => ({})),
-        window.amlBridge.getPrefs().catch(() => ({}))
+        window.adamBridge.getPrefs().catch(() => ({}))
       ]);
       return _settingsPreload;
     }
@@ -10878,7 +10887,7 @@
       const dlg = getDialog();
       dlg.innerHTML = "";
       const closeBtn = document.createElement("button");
-      closeBtn.id = "aml-settings-close";
+      closeBtn.id = "adam-settings-close";
       closeBtn.textContent = "\u2715";
       closeBtn.style.cssText = FF + "background:rgba(30,30,32,0.85);border:0.5px solid rgba(255,255,255,0.13);border-radius:50%;width:26px;height:26px;cursor:pointer;color:rgba(255,255,255,0.6);font-size:12px;display:flex;align-items:center;justify-content:center;margin-top:16px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:background 0.15s,color 0.15s;";
       closeBtn.onmouseenter = () => {
@@ -10894,7 +10903,7 @@
       const titleBar = document.createElement("div");
       titleBar.style.cssText = "display:flex;align-items:center;gap:10px;padding:4px 0 4px;margin-top:-26px;";
       const title = document.createElement("h1");
-      title.textContent = "AML Settings";
+      title.textContent = "Adam Settings";
       title.style.cssText = FF + "font-size:17px;font-weight:700;letter-spacing:-0.3px;margin:0;color:rgba(255,255,255,0.95);";
       const savedBadge = document.createElement("span");
       savedBadge.style.cssText = FF + "font-size:10px;color:#30d158;opacity:0;transition:opacity 0.3s;flex-shrink:0;";
@@ -10902,7 +10911,7 @@
       let _savedTimer = null;
       titleBar.append(title, savedBadge);
       dlg.appendChild(titleBar);
-      const _bridge = window.amlBridge;
+      const _bridge = window.adamBridge;
       if (_bridge._settingsRestore) _bridge._settingsRestore();
       const _realSetTweak = _bridge.setTweak.bind(_bridge);
       const _restoreProxy = () => {
@@ -10923,10 +10932,10 @@
         _warmSettingsCache();
       }, { once: true });
       if (!dlg.open) {
-        dlg.classList.remove("aml-closing");
-        dlg.classList.add("aml-opening");
+        dlg.classList.remove("adam-closing");
+        dlg.classList.add("adam-opening");
         dlg.showModal();
-        dlg.addEventListener("animationend", () => dlg.classList.remove("aml-opening"), { once: true });
+        dlg.addEventListener("animationend", () => dlg.classList.remove("adam-opening"), { once: true });
       }
       const [drm, tools, prefs] = await (_settingsPreload ?? _warmSettingsCache());
       _warmSettingsCache();
@@ -10978,12 +10987,12 @@
       const accountRow = findAccountRow();
       const nav = document.querySelector("nav.navigation") || document.querySelector("nav");
       if (!accountRow || !nav) return;
-      let cog = document.getElementById("aml-settings-cog");
-      let dlBtn = document.getElementById("aml-downloads-btn");
+      let cog = document.getElementById("adam-settings-cog");
+      let dlBtn = document.getElementById("adam-downloads-btn");
       if (!cog) {
         cog = document.createElement("button");
-        cog.id = "aml-settings-cog";
-        cog.title = "AML Settings";
+        cog.id = "adam-settings-cog";
+        cog.title = "Adam Settings";
         cog.innerHTML = COG_SVG;
         _styleNavBtn(cog);
         cog.onclick = (e) => {
@@ -10994,13 +11003,13 @@
       }
       if (!dlBtn) {
         dlBtn = document.createElement("button");
-        dlBtn.id = "aml-downloads-btn";
+        dlBtn.id = "adam-downloads-btn";
         dlBtn.title = "Downloads";
         dlBtn.innerHTML = DOWNLOAD_SVG;
         _styleNavBtn(dlBtn);
         dlBtn.onclick = (e) => {
           e.stopPropagation();
-          window.__amlToggleDownloads?.();
+          window.__adamToggleDownloads?.();
         };
         nav.appendChild(dlBtn);
       }
@@ -11009,8 +11018,8 @@
         _cogResizeObs = new ResizeObserver(() => {
           const row = findAccountRow();
           const n = document.querySelector("nav.navigation") || document.querySelector("nav");
-          const c = document.getElementById("aml-settings-cog");
-          const d = document.getElementById("aml-downloads-btn");
+          const c = document.getElementById("adam-settings-cog");
+          const d = document.getElementById("adam-downloads-btn");
           if (row && n && c && d) _positionCogButtons(n, row, c, d);
         });
         _cogResizeObs.observe(nav);
@@ -11059,7 +11068,7 @@
     watchDomSettled(() => {
       if (findAccountRow()) mountSettingsCog();
     });
-    window.__amlOpenEngineSettings = openSettings;
+    window.__adamOpenEngineSettings = openSettings;
   })();
   (function initAMLDownloads() {
     const PIN_PATH = "M12.219,22.208C12.281,22.208 12.361,22.137 12.46,21.994C12.558,21.851 12.658,21.664 12.758,21.432C12.859,21.199 12.943,20.945 13.012,20.668C13.08,20.391 13.115,20.119 13.115,19.853L13.115,15.075L11.32,15.075L11.32,19.853C11.32,20.119 11.353,20.391 11.421,20.668C11.489,20.945 11.573,21.199 11.674,21.432C11.776,21.664 11.876,21.851 11.975,21.994C12.073,22.137 12.155,22.208 12.219,22.208ZM6.926,15.874L17.506,15.874C17.919,15.874 18.249,15.753 18.496,15.512C18.744,15.271 18.868,14.951 18.868,14.553C18.868,13.91 18.7,13.287 18.364,12.684C18.028,12.082 17.558,11.543 16.953,11.067C16.349,10.59 15.644,10.211 14.838,9.93C14.032,9.649 13.159,9.508 12.219,9.508C11.278,9.508 10.405,9.649 9.597,9.93C8.789,10.211 8.084,10.59 7.481,11.067C6.878,11.543 6.408,12.082 6.07,12.684C5.733,13.287 5.564,13.91 5.564,14.553C5.564,14.951 5.689,15.271 5.938,15.512C6.187,15.753 6.517,15.874 6.926,15.874ZM7.35,14.334C7.202,14.334 7.141,14.248 7.167,14.078C7.22,13.709 7.379,13.342 7.644,12.978C7.909,12.613 8.264,12.282 8.709,11.985C9.153,11.687 9.671,11.449 10.264,11.27C10.856,11.091 11.508,11.001 12.219,11.001C12.926,11.001 13.576,11.091 14.169,11.27C14.762,11.449 15.281,11.687 15.724,11.985C16.168,12.282 16.523,12.613 16.789,12.978C17.055,13.342 17.214,13.709 17.267,14.078C17.293,14.248 17.231,14.334 17.082,14.334L7.35,14.334ZM6.621,3.2C6.621,3.503 6.737,3.802 6.97,4.097C7.109,4.28 7.304,4.483 7.556,4.707C7.808,4.93 8.096,5.163 8.418,5.406C8.741,5.648 9.082,5.89 9.441,6.131L9.129,10.756L10.749,10.756L11.064,5.425C11.071,5.278 11.021,5.176 10.912,5.118C10.66,4.985 10.424,4.852 10.202,4.718C9.981,4.583 9.783,4.456 9.607,4.335C9.431,4.215 9.284,4.107 9.166,4.013C9.048,3.918 8.965,3.847 8.919,3.799C8.884,3.754 8.875,3.716 8.893,3.684C8.911,3.651 8.941,3.635 8.984,3.635L15.45,3.635C15.491,3.635 15.52,3.651 15.538,3.684C15.556,3.716 15.549,3.754 15.515,3.799C15.467,3.847 15.385,3.918 15.269,4.013C15.152,4.107 15.006,4.215 14.83,4.335C14.654,4.456 14.456,4.583 14.233,4.718C14.011,4.852 13.773,4.985 13.519,5.118C13.413,5.176 13.365,5.278 13.376,5.425L13.683,10.756L15.305,10.756L14.99,6.131C15.351,5.89 15.694,5.648 16.019,5.406C16.343,5.163 16.63,4.93 16.88,4.707C17.129,4.483 17.323,4.28 17.461,4.097C17.698,3.802 17.817,3.503 17.817,3.2C17.817,2.907 17.714,2.665 17.507,2.474C17.301,2.282 17.036,2.186 16.711,2.186L7.726,2.186C7.398,2.186 7.131,2.282 6.927,2.474C6.723,2.665 6.621,2.907 6.621,3.2Z";
@@ -11086,7 +11095,7 @@
     };
     ;
     (function injectContextMenuCSS() {
-      if (document.getElementById("aml-ctx-icons")) return;
+      if (document.getElementById("adam-ctx-icons")) return;
       const li = (t) => `li.contextual-menu-item:has(button[title='${t}'])`;
       const con = (t) => `${li(t)} .contextual-menu-item__icon-container`;
       const svg = (t) => `${con(t)} > svg`;
@@ -11098,7 +11107,7 @@
       const EMBED_LI = li(EMBED_TITLE);
       const EMBED_CON = con(EMBED_TITLE);
       const s = document.createElement("style");
-      s.id = "aml-ctx-icons";
+      s.id = "adam-ctx-icons";
       s.textContent = `
 /* position:relative so our absolute span is clipped to the container */
 ${ALL_CON} { position:relative !important; }
@@ -11112,12 +11121,12 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       document.head.appendChild(s);
     })();
     function _armContainer(container, svgHtml) {
-      if (container._amlArmed) return;
-      container._amlArmed = true;
+      if (container._adamArmed) return;
+      container._adamArmed = true;
       const inject = () => {
-        if (container.querySelector("[data-aml]")) return;
+        if (container.querySelector("[data-adam]")) return;
         const span = document.createElement("span");
-        span.setAttribute("data-aml", "1");
+        span.setAttribute("data-adam", "1");
         span.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;";
         span.innerHTML = svgHtml;
         container.appendChild(span);
@@ -11255,11 +11264,11 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     }
     async function startDownload(info) {
       if (!info) {
-        console.warn("[AML] startDownload: no track info");
+        console.warn("[Adam] startDownload: no track info");
         return;
       }
       const mk = window.MusicKit?.getInstance?.();
-      const prefs = await window.amlBridge?.getPrefs().catch(() => ({})) || {};
+      const prefs = await window.adamBridge?.getPrefs().catch(() => ({})) || {};
       const qual = prefs["downloads-quality"] || _downloadsQuality || "lossless";
       const isLossless = qual !== "high-quality";
       const hint = await prefetchHintMeta(info);
@@ -11297,7 +11306,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         openDownloadsPanel();
         return job;
       } catch (e) {
-        console.error("[AML] download error:", e);
+        console.error("[Adam] download error:", e);
       }
     }
     function clampSubmenus(root) {
@@ -11318,7 +11327,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       });
     }
     function setupSubmenuHover(menuRoot) {
-      if (!menuRoot || menuRoot._amlSubmenuWired) return;
+      if (!menuRoot || menuRoot._adamSubmenuWired) return;
       const li = menuRoot.querySelector("li.contextual-menu-item:has(button[title='Add to Playlist'])");
       if (!li) return;
       const subs = () => Array.from(menuRoot.querySelectorAll(
@@ -11335,7 +11344,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         s.style.removeProperty("visibility");
       });
       hide();
-      menuRoot._amlSubmenuWired = true;
+      menuRoot._adamSubmenuWired = true;
       li.addEventListener("mouseenter", show);
       li.addEventListener("mouseleave", (e) => {
         if (subs().some((s) => s.contains(e.relatedTarget) || s === e.relatedTarget)) return;
@@ -11391,22 +11400,22 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       }
     }).observe(document.body, { childList: true });
     let _panelEl = null;
-    if (!document.getElementById("aml-dl-kf")) {
+    if (!document.getElementById("adam-dl-kf")) {
       const _kfs = document.createElement("style");
-      _kfs.id = "aml-dl-kf";
+      _kfs.id = "adam-dl-kf";
       _kfs.textContent = `
-@keyframes aml-dl-pulse{0%,100%{opacity:0.55}50%{opacity:1}}
-@keyframes aml-dl-dot{0%,100%{opacity:.35}50%{opacity:1}}
-@keyframes aml-dl-skel{0%{opacity:.4}50%{opacity:.8}100%{opacity:.4}}
-.aml-dl-pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:500;letter-spacing:0.1px;flex-shrink:0}
-.aml-dl-pill-q{background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.38)}
-.aml-dl-pill-r{background:rgba(255,214,10,0.13);color:rgba(255,210,80,0.85)}
-.aml-dl-pill-dl{background:rgba(255,255,255,0.10);color:rgba(255,255,255,0.60)}
-.aml-dl-pill-ok{background:rgba(48,209,88,0.14);color:#30d158}
-.aml-dl-pill-err{background:rgba(255,69,58,0.15);color:#ff453a}
-.aml-dl-pill-x{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.25)}
-.aml-dl-skel-line{border-radius:3px;background:rgba(255,255,255,0.10);animation:aml-dl-skel 1.4s ease-in-out infinite}
-.aml-dl-art-skel{background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,rgba(255,255,255,0.04) 100%);animation:aml-dl-skel 1.4s ease-in-out infinite}`;
+@keyframes adam-dl-pulse{0%,100%{opacity:0.55}50%{opacity:1}}
+@keyframes adam-dl-dot{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes adam-dl-skel{0%{opacity:.4}50%{opacity:.8}100%{opacity:.4}}
+.adam-dl-pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:500;letter-spacing:0.1px;flex-shrink:0}
+.adam-dl-pill-q{background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.38)}
+.adam-dl-pill-r{background:rgba(255,214,10,0.13);color:rgba(255,210,80,0.85)}
+.adam-dl-pill-dl{background:rgba(255,255,255,0.10);color:rgba(255,255,255,0.60)}
+.adam-dl-pill-ok{background:rgba(48,209,88,0.14);color:#30d158}
+.adam-dl-pill-err{background:rgba(255,69,58,0.15);color:#ff453a}
+.adam-dl-pill-x{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.25)}
+.adam-dl-skel-line{border-radius:3px;background:rgba(255,255,255,0.10);animation:adam-dl-skel 1.4s ease-in-out infinite}
+.adam-dl-art-skel{background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,rgba(255,255,255,0.04) 100%);animation:adam-dl-skel 1.4s ease-in-out infinite}`;
       document.head.appendChild(_kfs);
     }
     let _pollTimer = null;
@@ -11422,7 +11431,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       if (_panelEl) _panelEl.style.display = "none";
       stopPolling();
     }
-    window.__amlToggleDownloads = () => {
+    window.__adamToggleDownloads = () => {
       if (!_panelEl || _panelEl.style.display === "none") openDownloadsPanel();
       else closeDownloadsPanel();
     };
@@ -11433,7 +11442,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     }
     function buildDownloadsPanel() {
       const panel = document.createElement("div");
-      panel.id = "aml-downloads-panel";
+      panel.id = "adam-downloads-panel";
       panel.style.cssText = [
         "position:fixed",
         "bottom:72px",
@@ -11460,13 +11469,13 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       title.textContent = "Downloads";
       title.style.cssText = "color:#fff;font-size:15px;font-weight:600;letter-spacing:-0.3px;";
       const countBadge = document.createElement("span");
-      countBadge.id = "aml-dl-count";
+      countBadge.id = "adam-dl-count";
       countBadge.style.cssText = "font-size:11px;color:rgba(255,255,255,0.30);font-weight:400;display:none;";
       titleGroup.append(title, countBadge);
       const btnGroup = document.createElement("div");
       btnGroup.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0;";
       const clearBtn = document.createElement("button");
-      clearBtn.id = "aml-dl-cleardone";
+      clearBtn.id = "adam-dl-cleardone";
       clearBtn.textContent = "Clear done";
       clearBtn.style.cssText = "background:none;border:none;color:rgba(255,255,255,0.32);cursor:pointer;font-size:12px;padding:3px 7px;border-radius:5px;transition:color 0.15s,background 0.15s;display:none;";
       clearBtn.onmouseenter = () => {
@@ -11494,7 +11503,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       hdr.append(titleGroup, btnGroup);
       panel.appendChild(hdr);
       const list = document.createElement("div");
-      list.id = "aml-downloads-list";
+      list.id = "adam-downloads-list";
       list.style.cssText = "flex:1;overflow-y:auto;padding:6px 0;";
       panel.appendChild(list);
       return panel;
@@ -11519,10 +11528,10 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     }
     let _dlPrefs = {};
     function renderJobs(jobs) {
-      const list = document.getElementById("aml-downloads-list");
+      const list = document.getElementById("adam-downloads-list");
       if (!list) return;
-      const countEl = document.getElementById("aml-dl-count");
-      const clearEl = document.getElementById("aml-dl-cleardone");
+      const countEl = document.getElementById("adam-dl-count");
+      const clearEl = document.getElementById("adam-dl-cleardone");
       if (!jobs?.length) {
         list.innerHTML = "";
         const empty = document.createElement("div");
@@ -11589,39 +11598,39 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       return url.replace("{w}", size).replace("{h}", size);
     }
     const PILL_CLASS = {
-      queued: "aml-dl-pill aml-dl-pill-q",
-      resolving: "aml-dl-pill aml-dl-pill-r",
-      downloading: "aml-dl-pill aml-dl-pill-dl",
-      tagging: "aml-dl-pill aml-dl-pill-dl",
-      moving: "aml-dl-pill aml-dl-pill-dl",
-      done: "aml-dl-pill aml-dl-pill-ok",
-      failed: "aml-dl-pill aml-dl-pill-err",
-      cancelled: "aml-dl-pill aml-dl-pill-x"
+      queued: "adam-dl-pill adam-dl-pill-q",
+      resolving: "adam-dl-pill adam-dl-pill-r",
+      downloading: "adam-dl-pill adam-dl-pill-dl",
+      tagging: "adam-dl-pill adam-dl-pill-dl",
+      moving: "adam-dl-pill adam-dl-pill-dl",
+      done: "adam-dl-pill adam-dl-pill-ok",
+      failed: "adam-dl-pill adam-dl-pill-err",
+      cancelled: "adam-dl-pill adam-dl-pill-x"
     };
     function buildJobRow(job) {
       const row = document.createElement("div");
       row.dataset.jobId = job.jobId;
       row.style.cssText = "padding:12px 16px;border-bottom:0.5px solid rgba(255,255,255,0.06);display:flex;gap:13px;align-items:flex-start;";
       const art = document.createElement("div");
-      art.className = "aml-dl-art";
+      art.className = "adam-dl-art";
       art.style.cssText = "width:48px;height:48px;border-radius:9px;flex-shrink:0;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.5);margin-top:1px;";
       const artImg = document.createElement("img");
       artImg.style.cssText = "width:100%;height:100%;object-fit:cover;display:none;";
       art.appendChild(artImg);
       const artSkel = document.createElement("div");
-      artSkel.className = "aml-dl-art-skel";
+      artSkel.className = "adam-dl-art-skel";
       artSkel.style.cssText = "width:100%;height:100%;";
       art.appendChild(artSkel);
       const col = document.createElement("div");
-      col.className = "aml-dl-col";
+      col.className = "adam-dl-col";
       col.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;";
       const titleRow = document.createElement("div");
       titleRow.style.cssText = "display:flex;align-items:center;gap:6px;";
       const name = document.createElement("span");
-      name.className = "aml-dl-name";
+      name.className = "adam-dl-name";
       name.style.cssText = "flex:1;color:rgba(255,255,255,0.92);font-size:13px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.2px;";
       const cancelBtn = document.createElement("button");
-      cancelBtn.className = "aml-dl-cancel";
+      cancelBtn.className = "adam-dl-cancel";
       cancelBtn.innerHTML = `<svg viewBox="0 0 10 10" width="9" height="9"><line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`;
       cancelBtn.style.cssText = "background:none;border:none;color:rgba(255,255,255,0.20);cursor:pointer;padding:3px;display:flex;align-items:center;flex-shrink:0;border-radius:4px;transition:color 0.15s;";
       cancelBtn.onmouseenter = () => {
@@ -11635,22 +11644,22 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       const metaRow = document.createElement("div");
       metaRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;";
       const artist = document.createElement("span");
-      artist.className = "aml-dl-artist";
+      artist.className = "adam-dl-artist";
       artist.style.cssText = "color:rgba(255,255,255,0.40);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;";
       const pill = document.createElement("span");
-      pill.className = "aml-dl-pill aml-dl-pill-q";
+      pill.className = "adam-dl-pill adam-dl-pill-q";
       metaRow.append(artist, pill);
       const progRow = document.createElement("div");
-      progRow.className = "aml-dl-prog-row";
+      progRow.className = "adam-dl-prog-row";
       progRow.style.cssText = "display:flex;align-items:center;gap:8px;";
       const bar = document.createElement("div");
       bar.style.cssText = "flex:1;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;";
       const fill = document.createElement("div");
-      fill.className = "aml-dl-fill";
+      fill.className = "adam-dl-fill";
       fill.style.cssText = "height:100%;border-radius:2px;width:0%;transition:width 0.4s ease;background:rgba(255,255,255,0.85);";
       bar.appendChild(fill);
       const sizeLabel = document.createElement("span");
-      sizeLabel.className = "aml-dl-size";
+      sizeLabel.className = "adam-dl-size";
       sizeLabel.style.cssText = "font-size:10.5px;color:rgba(255,255,255,0.28);flex-shrink:0;font-variant-numeric:tabular-nums;min-width:52px;text-align:right;";
       progRow.append(bar, sizeLabel);
       col.append(titleRow, metaRow, progRow);
@@ -11665,7 +11674,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
           name.style.cssText = "flex:1;color:rgba(255,255,255,0.92);font-size:13px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.2px;";
         } else {
           name.textContent = "";
-          name.style.cssText = "flex:1;height:11px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.10);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:70%;";
+          name.style.cssText = "flex:1;height:11px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.10);animation:adam-dl-skel 1.4s ease-in-out infinite;max-width:70%;";
         }
       }
       if (artist) {
@@ -11674,7 +11683,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
           artist.style.cssText = "color:rgba(255,255,255,0.40);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;";
         } else {
           artist.textContent = "";
-          artist.style.cssText = "flex:1;height:9px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.07);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:45%;";
+          artist.style.cssText = "flex:1;height:9px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.07);animation:adam-dl-skel 1.4s ease-in-out infinite;max-width:45%;";
         }
       }
     }
@@ -11686,19 +11695,19 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       if (phase === "downloading") {
         fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.6s ease;background:${bg};animation:none;`;
       } else if (isActive) {
-        fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.4s ease;background:${bg};animation:aml-dl-pulse 1.2s ease-in-out infinite;`;
+        fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.4s ease;background:${bg};animation:adam-dl-pulse 1.2s ease-in-out infinite;`;
       } else {
         fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.4s ease;background:${bg};animation:none;`;
       }
     }
     function _applyJobRetry(row, job, phase) {
-      const col = row.querySelector(".aml-dl-col");
-      let retryBtn = row.querySelector(".aml-dl-retry");
-      let countdownEl = row.querySelector(".aml-dl-countdown");
+      const col = row.querySelector(".adam-dl-col");
+      let retryBtn = row.querySelector(".adam-dl-retry");
+      let countdownEl = row.querySelector(".adam-dl-countdown");
       if (phase === "failed" || phase === "cancelled") {
         if (!retryBtn && col) {
           retryBtn = document.createElement("button");
-          retryBtn.className = "aml-dl-retry";
+          retryBtn.className = "adam-dl-retry";
           retryBtn.style.cssText = "margin-top:2px;padding:3px 10px;background:rgba(252,60,68,0.13);border:0.5px solid rgba(252,60,68,0.30);border-radius:5px;color:#fc3c44;font-size:10px;cursor:pointer;font-weight:500;transition:background 0.15s;align-self:flex-start;";
           retryBtn.onmouseenter = () => {
             retryBtn.style.background = "rgba(252,60,68,0.28)";
@@ -11724,7 +11733,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         if (entry && phase === "failed") {
           if (!countdownEl && col) {
             countdownEl = document.createElement("span");
-            countdownEl.className = "aml-dl-countdown";
+            countdownEl.className = "adam-dl-countdown";
             countdownEl.style.cssText = "font-size:10px;color:rgba(255,255,255,0.28);margin-top:1px;align-self:flex-start;";
             col.appendChild(countdownEl);
           }
@@ -11759,23 +11768,23 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       if (cancelBtn) cancelBtn.style.display = isTerminal ? "none" : "flex";
     }
     function updateJobRow(row, job) {
-      const name = row.querySelector(".aml-dl-name");
-      const artist = row.querySelector(".aml-dl-artist");
-      const pill = row.querySelector(".aml-dl-pill");
-      const fill = row.querySelector(".aml-dl-fill");
-      const size = row.querySelector(".aml-dl-size");
-      const artEl = row.querySelector(".aml-dl-art");
+      const name = row.querySelector(".adam-dl-name");
+      const artist = row.querySelector(".adam-dl-artist");
+      const pill = row.querySelector(".adam-dl-pill");
+      const fill = row.querySelector(".adam-dl-fill");
+      const size = row.querySelector(".adam-dl-size");
+      const artEl = row.querySelector(".adam-dl-art");
       const artImg = artEl?.querySelector("img");
-      const artSkel = artEl?.querySelector(".aml-dl-art-skel");
-      const cancelBtn = row.querySelector(".aml-dl-cancel");
-      const progRow = row.querySelector(".aml-dl-prog-row");
+      const artSkel = artEl?.querySelector(".adam-dl-art-skel");
+      const cancelBtn = row.querySelector(".adam-dl-cancel");
+      const progRow = row.querySelector(".adam-dl-prog-row");
       const phase = job.phase || "";
       const hasTitle = !!(job.title || job.output);
       const isTerminal = phase === "done" || phase === "failed" || phase === "cancelled";
       const isActive = phase === "downloading" || phase === "tagging" || phase === "moving" || phase === "resolving";
       _applyJobNameArtist(name, artist, hasTitle, job);
       if (pill) {
-        pill.className = PILL_CLASS[phase] || "aml-dl-pill aml-dl-pill-q";
+        pill.className = PILL_CLASS[phase] || "adam-dl-pill adam-dl-pill-q";
         pill.textContent = PHASE_LABEL[phase] || phase;
       }
       _applyJobFill(fill, phase, isActive, isTerminal, job);
@@ -11804,13 +11813,13 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       const seq = ++_pollSeq;
       try {
         const jobs = await fetch(`${ENGINE}/api/v1/export`).then((r) => r.json());
-        _dlPrefs = await window.amlBridge?.getPrefs().catch(() => ({})) || {};
+        _dlPrefs = await window.adamBridge?.getPrefs().catch(() => ({})) || {};
         if (seq === _pollSeq) renderJobs(Array.isArray(jobs) ? jobs : []);
       } catch (_) {
       }
     }
     function _tickCountdowns() {
-      document.querySelectorAll(".aml-dl-countdown").forEach((el) => {
+      document.querySelectorAll(".adam-dl-countdown").forEach((el) => {
         const jobId = el.closest("[data-job-id]")?.dataset.jobId;
         if (!jobId) return;
         const entry = _failedAt.get(jobId);

@@ -1,7 +1,7 @@
 (() => {
   // src/smart-cache.js
-  var ENGINE = window._amlEngineURL || "https://127.0.0.1:20025";
-  var PLAY_COUNTS_KEY = "aml_play_counts";
+  var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
+  var PLAY_COUNTS_KEY = "adam_play_counts";
   var MAX_STORED_TRACKS = 200;
   function parseContentUrl(url) {
     const path = new URL(url, "https://music.apple.com").pathname;
@@ -40,7 +40,7 @@
     try {
       localStorage.setItem(PLAY_COUNTS_KEY, JSON.stringify(counts));
     } catch (e) {
-      if (window._AML_DEBUG) console.warn("[AML] savePlayCounts failed:", e);
+      if (window._ADAM_DEBUG) console.warn("[Adam] savePlayCounts failed:", e);
     }
   }
   var SmartCache = class {
@@ -57,8 +57,8 @@
           }
         }
       };
-      window._amlEngine?.on("prefetch.done", clearSlot);
-      window._amlEngine?.on("prefetch.cancelled", clearSlot);
+      window._adamEngine?.on("prefetch.done", clearSlot);
+      window._adamEngine?.on("prefetch.cancelled", clearSlot);
     }
     // ── Context emission ───────────────────────────────────────────────────────
     async sendContext({ type, id, reason, slot, tracks, currentIndex, mk }) {
@@ -73,7 +73,7 @@
       const payload = {
         context: { type, id: id ?? null, reason },
         currentIndex: currentIndex ?? -1,
-        lossless: window._amlLossless ?? false,
+        lossless: window._adamLossless ?? false,
         tracks: tracks.map((t, i) => {
           const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
           if (!assetId) return null;
@@ -103,10 +103,10 @@
         if (resp.ok) {
           const { jobId } = await resp.json();
           this._jobs[slot] = jobId;
-          console.log(`[AML Cache] ${reason} \u2192 jobId=${jobId} slot=${slot} tracks=${payload.tracks.length}`);
+          console.log(`[Adam Cache] ${reason} \u2192 jobId=${jobId} slot=${slot} tracks=${payload.tracks.length}`);
         }
       } catch (e) {
-        if (e.name !== "AbortError") console.warn("[AML Cache] sendContext:", e.message);
+        if (e.name !== "AbortError") console.warn("[Adam Cache] sendContext:", e.message);
       }
     }
     // ── Playlist / album browse ────────────────────────────────────────────────
@@ -130,7 +130,7 @@
           mk
         });
       } catch (e) {
-        console.warn("[AML Cache] onAlbumOpen:", e.message);
+        console.warn("[Adam Cache] onAlbumOpen:", e.message);
       }
     }
     async onPlaylistOpen(id, mk) {
@@ -151,7 +151,7 @@
           mk
         });
       } catch (e) {
-        console.warn("[AML Cache] onPlaylistOpen:", e.message);
+        console.warn("[Adam Cache] onPlaylistOpen:", e.message);
       }
     }
     // ── Queue lookahead ────────────────────────────────────────────────────────
@@ -228,5 +228,5 @@
       onNavigate(location.href);
     }
   };
-  window._amlSmartCache = new SmartCache();
+  window._adamSmartCache = new SmartCache();
 })();

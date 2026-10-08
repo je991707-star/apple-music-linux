@@ -5,7 +5,7 @@
  * Date: 2026-10-07
  * 
  * Clean-room implementation of FairPlay DRM for Linux.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  *
  * This header defines the public API for the FairPlay DRM core module.
  * It provides functions for PSSH parsing, key management, and AES-128 CBC decryption.

@@ -8,7 +8,7 @@ import (
 
 func TestInitConstantsPrefersConfiguredIdentity(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("AML_WIDEVINE_DIR", dir)
+	t.Setenv("ADAM_WIDEVINE_DIR", dir)
 	InitConstants()
 	if len(DefaultPrivateKey) < 100 {
 		t.Fatal("expected built-in fallback when dir is empty")

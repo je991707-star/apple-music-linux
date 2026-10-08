@@ -16,7 +16,7 @@ import os from 'os';
 import { isatty } from 'tty';
 import net from 'net';
 import crypto from 'crypto';
-import { IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, listeningPid, yamlStr, isPortFree as _portFree } from './platform.mjs';
+import { IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, listeningPid, yamlStr, migrateLegacyConfig, migrateStoreKeys, isPortFree as _portFree } from './platform.mjs';
 import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 
 const require = createRequire(import.meta.url);
@@ -24,7 +24,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 // %APPDATA% on Windows; ~/.config elsewhere (or the Flatpak's own XDG_CONFIG_HOME). See platform.mjs.
-const CONFIG_DIR = path.join(configRoot(), 'apple-music-linux');
+const CONFIG_DIR = migrateLegacyConfig(configRoot(), 'adam');
 const PREF_FILE  = path.join(CONFIG_DIR, 'electron-prefs.json');
 
 function loadPrefs() {
@@ -38,7 +38,7 @@ function savePrefs(p) {
 // ── Encrypted store ───────────────────────────────────────────────────────────
 // Per-key AES-256-GCM encryption via Electron safeStorage (OS keyring / DPAPI).
 // Falls back to plaintext in the same file if safeStorage is unavailable.
-const STORE_FILE = path.join(CONFIG_DIR, 'aml-store.enc');
+const STORE_FILE = path.join(CONFIG_DIR, 'adam-store.enc');
 let _storeCache = null;    // in-memory cache to avoid race on rapid writes
 let _storeDirty = false;
 let _storeFlushTimer = null;
@@ -51,6 +51,7 @@ async function _storeLoad() {
         _storeCache = enc
             ? JSON.parse(safeStorage.decryptString(raw))
             : JSON.parse(raw.toString('utf8'));
+        if (migrateStoreKeys(_storeCache)) { _storeDirty = true; _storeFlush(); }
     } catch { _storeCache = {}; }
     return _storeCache;
 }
@@ -90,7 +91,7 @@ app.commandLine.appendSwitch('ignore-gpu-blocklist');
 // matches the desktop name we set.
 app.commandLine.appendSwitch('disable-features',
     'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess');
-app.setDesktopName('apple-music-linux.desktop');
+app.setDesktopName('adam.desktop');
 }
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 // Music player: allow audio.play() without a live user gesture. Without this,
@@ -127,8 +128,8 @@ let _engineRestartDelay = 1000; // ms; doubles on each crash, resets on clean up
 //   https://music.apple.com/{sf}/artist/{slug}/{id}
 //   https://music.apple.com/{sf}/playlist/{id}         (id = pl.xxx)
 //   https://music.apple.com/{sf}/music-video/{slug}/{id}
-//   aml://song/{id}
-//   aml://album/{id}  etc.
+//   adam://song/{id}
+//   adam://album/{id}  etc.
 const APPLE_MUSIC_TYPES = new Set(['song','album','artist','playlist','music-video']);
 
 function _parseDeepLink(raw) {
@@ -136,8 +137,8 @@ function _parseDeepLink(raw) {
     try {
         const u = new URL(raw);
         let parts, sf;
-        if (u.protocol === 'aml:') {
-            // aml://{type}/{id}  — hostname is the type
+        if (u.protocol === 'adam:') {
+            // adam://{type}/{id}  — hostname is the type
             const type = u.hostname;
             const id   = u.pathname.replace(/^\//, '');
             if (!APPLE_MUSIC_TYPES.has(type) || !id) return null;
@@ -160,20 +161,20 @@ function _parseDeepLink(raw) {
 function _dispatchDeepLink(url) {
     const intent = _parseDeepLink(url);
     if (!intent) return;
-    console.log('[AML] deep link:', intent);
+    console.log('[Adam] deep link:', intent);
     if (win) {
         if (win.isMinimized()) win.restore();
         win.focus();
-        win.webContents.send('aml:open', intent);
+        win.webContents.send('adam:open', intent);
     }
 }
 
-// Register custom aml:// URI scheme so `xdg-open aml://song/123` opens AML.
-if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient('aml', process.execPath, [path.resolve(process.argv[1])]);
-else app.setAsDefaultProtocolClient('aml');
+// Register custom adam:// URI scheme so `xdg-open adam://song/123` opens Adam.
+if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient('adam', process.execPath, [path.resolve(process.argv[1])]);
+else app.setAsDefaultProtocolClient('adam');
 
 // Single-instance lock: if a second instance opens (e.g. user clicked a link
-// while AML is already running), forward the URL to the existing instance.
+// while Adam is already running), forward the URL to the existing instance.
 const _gotLock = app.requestSingleInstanceLock();
 if (!_gotLock) {
     // This is the second instance — it will exit immediately. The first instance
@@ -183,7 +184,7 @@ if (!_gotLock) {
 app.on('second-instance', (_e, argv) => {
     if (winIntegration?.handleArgv(argv)) return; // jump-list transport command
     // argv[argv.length - 1] is the URL on Linux (passed by xdg-open / the OS)
-    const url = argv.find(a => a.startsWith('aml://') || a.startsWith('https://music.apple.com'));
+    const url = argv.find(a => a.startsWith('adam://') || a.startsWith('https://music.apple.com'));
     if (url) _dispatchDeepLink(url);
     else if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
 });
@@ -193,12 +194,12 @@ app.on('second-instance', (_e, argv) => {
 // AAC/H.264 fMP4 over HTTP so the renderer can pipe them into a MediaSource.
 //
 // Binary resolution order:
-//  1. AML_ENGINE_BIN environment variable (manual override / CI)
+//  1. ADAM_ENGINE_BIN environment variable (manual override / CI)
 //  2. <resources>/engine  (packaged Electron — app.isPackaged)
 //  3. dist/resources/engine  (dev: electron . from electron/ dir)
 const _resPkgBin  = path.join(process.resourcesPath, engineFileName());
 const _resDevBin  = path.join(__dirname, 'dist', 'resources', engineFileName());
-const ENGINE_BIN  = process.env.AML_ENGINE_BIN ||
+const ENGINE_BIN  = process.env.ADAM_ENGINE_BIN ||
     (app.isPackaged ? _resPkgBin : (existsSync(_resDevBin) ? _resDevBin : _resPkgBin));
 
 // Bundled VLC libs shipped alongside the engine binary so a system VLC
@@ -217,9 +218,9 @@ const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
 
 // Debug output (verbose renderer logging and a log file) is on whenever the app was started
-// from a terminal, where someone can read it, or with AML_DEBUG=1. A launcher-started app has
+// from a terminal, where someone can read it, or with ADAM_DEBUG=1. A launcher-started app has
 // no terminal and stays quiet. There is no setting for it.
-const DEBUG_OUTPUT = process.env.AML_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
+const DEBUG_OUTPUT = process.env.ADAM_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
 // DRM runs in-process (WidevineBackend + libdrm_client.so).
@@ -250,7 +251,7 @@ function ensureEngineConfig() {
         const legacyBase = path.join(__dirname, '..', 'drm', 'files');
         if (!existsSync(drmBase) && existsSync(legacyBase)) {
             try { cpSync(legacyBase, drmBase, { recursive: true }); }
-            catch (e) { console.error('[AML] could not migrate the DRM session:', e.message); }
+            catch (e) { console.error('[Adam] could not migrate the DRM session:', e.message); }
         }
         mkdirSync(drmBase, { recursive: true });
     } else {
@@ -303,7 +304,7 @@ async function killStaleEngine(port) {
     // SIGKILL anything on the port — no graceful shutdown needed for a stale engine.
     const pid = await listeningPid(port);
     if (pid) {
-        console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
+        console.log(`[Adam] Killing stale engine on port ${port} (pid ${pid})`);
         try { process.kill(pid, 'SIGKILL'); } catch (_) {}
     }
 
@@ -318,7 +319,7 @@ async function killStaleEngine(port) {
         if (lockPid > 0) {
             try { process.kill(lockPid, 'SIGKILL'); } catch (_) {}
             unlinkSync(lockPath);
-            console.log(`[AML] Removed stale session lock (was held by pid ${lockPid})`);
+            console.log(`[Adam] Removed stale session lock (was held by pid ${lockPid})`);
         }
     } catch (_) {}
 }
@@ -328,7 +329,7 @@ async function isPortFree(port) { return _portFree(port); }
 async function startEngine() {
     if (engineProc) return;
     if (!existsSync(ENGINE_BIN)) {
-        console.log('[AML] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
+        console.log('[Adam] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
         return;
     }
     await killStaleEngine(ENGINE_PORT);
@@ -375,7 +376,7 @@ async function startEngine() {
     engineProc.stderr.on('data', onErr);
     const startTime = Date.now();
     engineProc.on('exit', (code) => {
-        console.log('[AML] Engine exited (code', code ?? 0, ')');
+        console.log('[Adam] Engine exited (code', code ?? 0, ')');
         engineProc = null;
         if (isQuitting) return;
         // Reset backoff if engine ran for >30s (healthy uptime), otherwise double it.
@@ -384,10 +385,10 @@ async function startEngine() {
         } else {
             _engineRestartDelay = Math.min(_engineRestartDelay * 2, 30_000);
         }
-        console.log('[AML] Restarting engine in', _engineRestartDelay, 'ms…');
+        console.log('[Adam] Restarting engine in', _engineRestartDelay, 'ms…');
         setTimeout(() => startEngine(), _engineRestartDelay);
     });
-    console.log('[AML] Engine started on port', ENGINE_PORT, '(pid', engineProc.pid, ')');
+    console.log('[Adam] Engine started on port', ENGINE_PORT, '(pid', engineProc.pid, ')');
 }
 
 function stopEngine() {
@@ -406,7 +407,7 @@ const _isWayland = !!process.env.WAYLAND_DISPLAY;
 const _desktop   = (process.env.XDG_CURRENT_DESKTOP || '').toLowerCase();
 const _isKde      = ['kde', 'plasma'].some(d => _desktop.includes(d));
 const _isHyprland = _desktop.includes('hyprland') || !!process.env.HYPRLAND_INSTANCE_SIGNATURE;
-console.log(`[AML] Compositor: desktop=${_desktop || '(unset)'} wayland=${_isWayland} kde=${_isKde} hyprland=${_isHyprland}`);
+console.log(`[Adam] Compositor: desktop=${_desktop || '(unset)'} wayland=${_isWayland} kde=${_isKde} hyprland=${_isHyprland}`);
 // KDE X11 gets native compositor blur via _KDE_NET_WM_BLUR_BEHIND_REGION atom.
 // KDE Wayland: forcing ozone-platform=x11 crashes the GPU process (Mesa Wayland
 // drivers don't support GLX over XWayland). Use CSS dark-tint fallback instead.
@@ -422,14 +423,14 @@ let _useSoftBlur = IS_LINUX && !_isKde && (!_isWayland ||
 // doesn't show a black void.
 app.on('gpu-process-crashed', (_event, killed) => {
     if (killed || !IS_LINUX) return;
-    console.warn('[AML] GPU process crashed — activating software blur fallback');
+    console.warn('[Adam] GPU process crashed — activating software blur fallback');
     _useSoftBlur = true;
     refreshBlurBg();
 });
 
 // ── KDE Wayland: wallpaper-based software blur ───────────────────────────────
 // Reads the current wallpaper path from ~/.config/plasma-org.kde.plasma.desktop-appletsrc
-// and injects it as --aml-fallback-bg so the CSS blur ::before renders it blurred.
+// and injects it as --adam-fallback-bg so the CSS blur ::before renders it blurred.
 // No desktopCapturer / xdg-portal dialog needed.
 function _kdeWallpaperPath() {
     const cfgPath = path.join(os.homedir(), '.config', 'plasma-org.kde.plasma.desktop-appletsrc');
@@ -451,15 +452,15 @@ function _injectBlurLayer(bwin, dataUrl) {
     // Position tracking runs inside the renderer via requestAnimationFrame —
     // window.screenX/screenY are standard browser APIs Chromium exposes, updated
     // every frame. This avoids IPC overhead and works on both X11 and Wayland.
-    // Math: #_amlBlurBg has inset:-80px, so its origin is (winX-80, winY-80) on
+    // Math: #_adamBlurBg has inset:-80px, so its origin is (winX-80, winY-80) on
     // screen. background-position = (80-winX, 80-y) + 'px ' + (80 - y) + 'px' keeps wallpaper aligned.
     bwin.webContents.executeJavaScript(`(function(){
-        let bg = document.getElementById('_amlBlurBg');
+        let bg = document.getElementById('_adamBlurBg');
         if (!bg) {
             bg = document.createElement('div');
-            bg.id = '_amlBlurBg';
+            bg.id = '_adamBlurBg';
             const tint = document.createElement('div');
-            tint.id = '_amlBlurTint';
+            tint.id = '_adamBlurTint';
             // Set styles for the blur layer and the tint
             bg.style.position = 'fixed';
             bg.style.top = '0';
@@ -499,14 +500,14 @@ function _injectBlurLayer(bwin, dataUrl) {
 
 function _applyKdeWallpaperBlur(bwin) {
     const wp = _kdeWallpaperPath();
-    if (!wp) { console.warn('[AML] KDE wallpaper blur: no Image= found in plasma config'); return; }
-    if (!existsSync(wp)) { console.warn('[AML] KDE wallpaper blur: file not found:', wp); return; }
+    if (!wp) { console.warn('[Adam] KDE wallpaper blur: no Image= found in plasma config'); return; }
+    if (!existsSync(wp)) { console.warn('[Adam] KDE wallpaper blur: file not found:', wp); return; }
     try {
         const data = readFileSync(wp);
         const ext  = path.extname(wp).slice(1).replace('jpg', 'jpeg') || 'png';
         _injectBlurLayer(bwin, `data:image/${ext};base64,${data.toString('base64')}`);
-        console.log('[AML] KDE wallpaper blur applied:', wp);
-    } catch (e) { console.warn('[AML] KDE wallpaper blur read failed:', e.message); }
+        console.log('[Adam] KDE wallpaper blur applied:', wp);
+    } catch (e) { console.warn('[Adam] KDE wallpaper blur read failed:', e.message); }
 }
 
 function _hyprlandWallpaperPath() {
@@ -534,14 +535,14 @@ function _hyprlandWallpaperPath() {
 
 function _applyHyprlandWallpaperBlur(bwin) {
     const wp = _hyprlandWallpaperPath();
-    if (!wp) { console.warn('[AML] Hyprland wallpaper blur: no wallpaper found'); return; }
-    if (!existsSync(wp)) { console.warn('[AML] Hyprland wallpaper blur: file not found:', wp); return; }
+    if (!wp) { console.warn('[Adam] Hyprland wallpaper blur: no wallpaper found'); return; }
+    if (!existsSync(wp)) { console.warn('[Adam] Hyprland wallpaper blur: file not found:', wp); return; }
     try {
         const data = readFileSync(wp);
         const ext  = path.extname(wp).slice(1).replace('jpg', 'jpeg') || 'png';
         _injectBlurLayer(bwin, `data:image/${ext};base64,${data.toString('base64')}`);
-        console.log('[AML] Hyprland wallpaper blur applied:', wp);
-    } catch (e) { console.warn('[AML] Hyprland wallpaper blur failed:', e.message); }
+        console.log('[Adam] Hyprland wallpaper blur applied:', wp);
+    } catch (e) { console.warn('[Adam] Hyprland wallpaper blur failed:', e.message); }
 }
 
 // Default theme accent. Windows' stock accent is blue, so there the default stays Apple Music pink
@@ -656,17 +657,17 @@ function _applyThemeVars(palette) {
             if (val === null || val === undefined || String(val).trim() === '') r.style.removeProperty(name);
             else r.style.setProperty(name, val);
         };
-        setVar('--aml-nav-bg', ${navBg});
-        setVar('--aml-nav-border', ${JSON.stringify(p.navBorder || '')});
-        setVar('--aml-accent', ${JSON.stringify(p.accent || '')});
-        setVar('--aml-accent-active', ${JSON.stringify(p.accentActive || '')});
-        setVar('--aml-nav-text', ${navText});
-        setVar('--aml-nav-text-sec', ${navTextSec});
-        setVar('--aml-bg-color', ${bg});
-        let bd = document.getElementById('_amlAccentBg');
+        setVar('--adam-nav-bg', ${navBg});
+        setVar('--adam-nav-border', ${JSON.stringify(p.navBorder || '')});
+        setVar('--adam-accent', ${JSON.stringify(p.accent || '')});
+        setVar('--adam-accent-active', ${JSON.stringify(p.accentActive || '')});
+        setVar('--adam-nav-text', ${navText});
+        setVar('--adam-nav-text-sec', ${navTextSec});
+        setVar('--adam-bg-color', ${bg});
+        let bd = document.getElementById('_adamAccentBg');
         if (!bd) {
             bd = document.createElement('div');
-            bd.id = '_amlAccentBg';
+            bd.id = '_adamAccentBg';
             bd.style.cssText = 'position:fixed;inset:0;z-index:0;pointer-events:none;transition:background 0.6s ease;';
             document.body.prepend(bd);
         }
@@ -679,19 +680,19 @@ function _clearThemeVars() {
     nativeTheme.themeSource = 'system';
     win.webContents.executeJavaScript(`(function(){
         const r = document.documentElement;
-        ['--aml-nav-bg','--aml-nav-border','--aml-accent','--aml-accent-active','--aml-nav-text','--aml-nav-text-sec','--aml-bg-color']
+        ['--adam-nav-bg','--adam-nav-border','--adam-accent','--adam-accent-active','--adam-nav-text','--adam-nav-text-sec','--adam-bg-color']
             .forEach(v => r.style.removeProperty(v));
-        document.getElementById('_amlAccentBg')?.remove();
-        document.getElementById('_amlCustomBg')?.remove();
+        document.getElementById('_adamAccentBg')?.remove();
+        document.getElementById('_adamCustomBg')?.remove();
     })()`).catch(() => {});
 }
 
 function _injectCustomFallbackBg() {
     if (!win) return;
     win.webContents.executeJavaScript(`(function(){
-        if (document.getElementById('_amlCustomBg')) return;
+        if (document.getElementById('_adamCustomBg')) return;
         const d = document.createElement('div');
-        d.id = '_amlCustomBg';
+        d.id = '_adamCustomBg';
         d.style.cssText = 'position:fixed;inset:0;z-index:0;pointer-events:none;background:#1c1c1e;';
         document.body.prepend(d);
     })()`).catch(() => {});
@@ -704,7 +705,7 @@ async function _injectCustomCss(filePath) {
     try {
         const css = readFileSync(filePath, 'utf8');
         _customCssKey = await win.webContents.insertCSS(css);
-    } catch (e) { console.warn('[AML] Custom CSS inject failed:', e.message); }
+    } catch (e) { console.warn('[Adam] Custom CSS inject failed:', e.message); }
 }
 async function _clearCustomCss() {
     if (!_customCssKey || !win) return;
@@ -724,7 +725,7 @@ function applyKdeBlurBehind(bwin) {
         const xid = bwin.getNativeWindowHandle().readUInt32LE(0);
         if (xid <= 1) {
             if (attempt < 10) { setTimeout(() => _trySet(attempt + 1), 300); return; }
-            console.warn('[AML] KDE blur: no valid XID after 10 attempts — falling back to software blur');
+            console.warn('[Adam] KDE blur: no valid XID after 10 attempts — falling back to software blur');
             _useSoftBlur = true;
             refreshBlurBg();
             return;
@@ -733,21 +734,21 @@ function applyKdeBlurBehind(bwin) {
             const _x11 = require('x11');
             _x11.createClient((err, display) => {
                 if (err) {
-                    console.warn('[AML] KDE blur: X11 connect failed:', err.message, '— using software blur');
+                    console.warn('[Adam] KDE blur: X11 connect failed:', err.message, '— using software blur');
                     _useSoftBlur = true; refreshBlurBg();
                     return;
                 }
                 const X = display.client;
-                X.on('error', (e) => console.warn('[AML] KDE blur X11 error:', e.message ?? e));
+                X.on('error', (e) => console.warn('[Adam] KDE blur X11 error:', e.message ?? e));
                 X.InternAtom(false, '_KDE_NET_WM_BLUR_BEHIND_REGION', (atomErr, atom) => {
-                    if (atomErr) { console.warn('[AML] KDE blur: InternAtom failed:', atomErr); return; }
+                    if (atomErr) { console.warn('[Adam] KDE blur: InternAtom failed:', atomErr); return; }
                     // Empty data = blur entire window shape.
                     X.ChangeProperty(0 /* PropModeReplace */, xid, atom, 6 /* XA_CARDINAL */, 32, []);
-                    console.log('[AML] KDE blur-behind atom set (xid=0x%s)', xid.toString(16));
+                    console.log('[Adam] KDE blur-behind atom set (xid=0x%s)', xid.toString(16));
                 });
             });
         } catch (e) {
-            console.warn('[AML] KDE blur-behind failed:', e.message);
+            console.warn('[Adam] KDE blur-behind failed:', e.message);
         }
     };
     _trySet(0);
@@ -766,9 +767,9 @@ async function refreshBlurBg() {
         // Screen capture unavailable (GPU disabled/power-saver) — inject a solid
         // dark background so the transparent window isn't an invisible black void.
         win.webContents.executeJavaScript(`(function(){
-            if (document.getElementById('_amlBlurBg')) return;
+            if (document.getElementById('_adamBlurBg')) return;
             const bg = document.createElement('div');
-            bg.id = '_amlBlurBg';
+            bg.id = '_adamBlurBg';
             bg.style.cssText = 'position:fixed;inset:0;background:rgba(10,10,12,0.97);z-index:0;pointer-events:none';
             document.body.prepend(bg);
         })()`).catch(() => {});
@@ -778,7 +779,7 @@ async function refreshBlurBg() {
 }
 
 function setupDebugLogging(win) {
-    if (!DEBUG_OUTPUT && !process.env.AML_DEVTOOLS) return;
+    if (!DEBUG_OUTPUT && !process.env.ADAM_DEVTOOLS) return;
     const logsDir = path.join(CONFIG_DIR, 'logs');
     mkdirSync(logsDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -788,9 +789,9 @@ function setupDebugLogging(win) {
     console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
     console.error = (...a) => { origError(...a); _write('ERROR', a); };
     console.warn  = (...a) => { origWarn(...a);  _write('WARN ', a); };
-    // A DevTools window is only opened on request (AML_DEVTOOLS); debug output alone must not
+    // A DevTools window is only opened on request (ADAM_DEVTOOLS); debug output alone must not
     // pop up a window every time the app is started from a terminal.
-    if (process.env.AML_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
+    if (process.env.ADAM_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
     win.webContents.on('console-message', (event) => {
         const msg = event.message ?? event;
         if (typeof msg === 'string') console.log('[renderer]', msg);
@@ -810,7 +811,7 @@ function createWindow() {
         transparent: !IS_WIN,
         ...(IS_WIN ? { backgroundMaterial: 'mica' } : {}),
         show: false,
-        title: IS_LINUX ? 'Apple Music Linux' : 'Apple Music',
+        title: 'Adam',
         webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
@@ -818,7 +819,7 @@ function createWindow() {
             sandbox: _hasSandbox,
             partition: 'persist:apple-music',
             devTools: !app.isPackaged,
-            additionalArguments: DEBUG_OUTPUT ? ['--aml-debug=1'] : [],
+            additionalArguments: DEBUG_OUTPUT ? ['--adam-debug=1'] : [],
         },
     });
 
@@ -833,9 +834,9 @@ function createWindow() {
         execFile('kreadconfig5', ['--group', 'Plugins', '--key', 'blurEnabled', '--file', 'kwinrc'], {},
             (_, stdout) => {
                 if (stdout.trim() === 'false')
-                    console.warn('[AML] KDE blur: kwinrc shows blurEnabled=false — enable KWin Blur desktop effect in System Settings → Desktop Effects');
+                    console.warn('[Adam] KDE blur: kwinrc shows blurEnabled=false — enable KWin Blur desktop effect in System Settings → Desktop Effects');
                 else
-                    console.log('[AML] KDE blur: kwinrc blurEnabled =', stdout.trim() || '(default=true)');
+                    console.log('[Adam] KDE blur: kwinrc blurEnabled =', stdout.trim() || '(default=true)');
             });
         win.once('ready-to-show', () => applyKdeBlurBehind(win));
     }
@@ -880,8 +881,8 @@ function createWindow() {
         clearTimeout(showFallback);
         showWindow();
     });
-    // Debug logging: on when started from a terminal or with AML_DEBUG=1; DevTools only with
-    // AML_DEVTOOLS (see DEBUG_OUTPUT).
+    // Debug logging: on when started from a terminal or with ADAM_DEBUG=1; DevTools only with
+    // ADAM_DEVTOOLS (see DEBUG_OUTPUT).
     setupDebugLogging(win);
 
     // Prefer bundles from resourcesPath (outside ASAR) so they can be updated
@@ -893,7 +894,7 @@ function createWindow() {
     };
     const visionPath  = _resBundle('vision-bundle.js');
     const visionCode  = existsSync(visionPath) ? readFileSync(visionPath, 'utf8') : '';
-    // engine-sse-bundle must load first — it creates window._amlEngine which
+    // engine-sse-bundle must load first — it creates window._adamEngine which
     // smart-cache and engine-playback subscribe to in their own constructors.
     const ssePath     = _resBundle('engine-sse-bundle.js');
     const sseCode     = existsSync(ssePath)    ? readFileSync(ssePath,    'utf8') : '';
@@ -911,7 +912,7 @@ function createWindow() {
     // before the page renders, unlike executeJavaScript which needs dom-ready.
     const { glassBlur = 20, glassOpacity = 0.07, bgBlur = 18 } = loadPrefs();
     const earlyCss = `
-        :root { --aml-glass-blur: ${glassBlur}px; --aml-glass-opacity: ${glassOpacity}; --aml-art-tint: rgba(255,255,255,0); --aml-fallback-bg: none; --aml-bg-blur: ${bgBlur}px; }
+        :root { --adam-glass-blur: ${glassBlur}px; --adam-glass-opacity: ${glassOpacity}; --adam-art-tint: rgba(255,255,255,0); --adam-fallback-bg: none; --adam-bg-blur: ${bgBlur}px; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
         .section--alternate, [class*="section--alternate"] { background: transparent !important; }
@@ -923,25 +924,25 @@ function createWindow() {
         [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]),
         [class*="native-cta-wrapper"]:has(button[aria-label*="iTunes"]) { display: none !important; }
         nav.navigation {
-            background: rgba(255,255,255,var(--aml-glass-opacity)) !important;
-            backdrop-filter: blur(var(--aml-glass-blur)) !important;
-            -webkit-backdrop-filter: blur(var(--aml-glass-blur)) !important;
+            background: rgba(255,255,255,var(--adam-glass-opacity)) !important;
+            backdrop-filter: blur(var(--adam-glass-blur)) !important;
+            -webkit-backdrop-filter: blur(var(--adam-glass-blur)) !important;
             border-right: 1px solid rgba(255,255,255,0.12) !important;
         }
         /* Software blur layer: two real DOM divs injected by _injectBlurLayer().
-           #_amlBlurBg  — wallpaper image + filter:blur, prepended to body so it
+           #_adamBlurBg  — wallpaper image + filter:blur, prepended to body so it
                           renders behind all app content in DOM stacking order.
-           #_amlBlurTint — dark overlay on top of the blur.
+           #_adamBlurTint — dark overlay on top of the blur.
            position:fixed + inset:-80px overflows the viewport to hide blur edge fringing. */
-        #_amlBlurBg {
+        #_adamBlurBg {
             position: fixed !important;
             inset: -80px !important;
             pointer-events: none !important;
             background-repeat: no-repeat !important;
-            filter: blur(var(--aml-bg-blur, 18px)) brightness(0.92) !important;
+            filter: blur(var(--adam-bg-blur, 18px)) brightness(0.92) !important;
             z-index: -1 !important;
         }
-        #_amlBlurTint {
+        #_adamBlurTint {
             position: fixed !important;
             inset: 0 !important;
             pointer-events: none !important;
@@ -1277,23 +1278,23 @@ function createWindow() {
     async function injectBundles() {
         if (_httpsHost(win.webContents.getURL()) !== 'music.apple.com' || bundleInjected) return;
         bundleInjected = true;
-        console.log('[AML] Injecting bundles into world 0');
+        console.log('[Adam] Injecting bundles into world 0');
 
-        // SSE must run first (creates window._amlEngine); cache+engine subscribe to it.
+        // SSE must run first (creates window._adamEngine); cache+engine subscribe to it.
         // Vision is independent. Combine into one executeJavaScript call to avoid
         // 4 separate round-trips adding ~2-3s of sequential injection delay.
         const combined = [
-            `window._amlEngineURL='https://127.0.0.1:${ENGINE_PORT}';`,
-            sseCode    ? `try{${sseCode}}catch(e){console.error('[AML sse]',e.message)}`    : '',
-            visionCode ? `try{${visionCode}}catch(e){console.error('[AML vision]',e.message)}` : '',
-            cacheCode  ? `try{${cacheCode}}catch(e){console.error('[AML cache]',e.name,e.message,e.stack)}`  : '',
+            `window._adamEngineURL='https://127.0.0.1:${ENGINE_PORT}';`,
+            sseCode    ? `try{${sseCode}}catch(e){console.error('[Adam sse]',e.message)}`    : '',
+            visionCode ? `try{${visionCode}}catch(e){console.error('[Adam vision]',e.message)}` : '',
+            cacheCode  ? `try{${cacheCode}}catch(e){console.error('[Adam cache]',e.name,e.message,e.stack)}`  : '',
             // mp4box before engine so window.MP4Box is set when _setupMP4BoxVideo runs.
-            mp4boxCode ? `try{${mp4boxCode};window.MP4Box=_amlMP4BoxMod;}catch(e){console.error('[AML mp4box]',e.message)}` : '',
-            engineCode ? `try{${engineCode}}catch(e){console.error('[AML engine]',e.name,e.message,e.stack)}` : '',
+            mp4boxCode ? `try{${mp4boxCode};window.MP4Box=_adamMP4BoxMod;}catch(e){console.error('[Adam mp4box]',e.message)}` : '',
+            engineCode ? `try{${engineCode}}catch(e){console.error('[Adam engine]',e.name,e.message,e.stack)}` : '',
         ].filter(Boolean).join(';');
 
         await win.webContents.executeJavaScript(combined)
-            .catch(e => console.error('[AML] bundle injection error:', e));
+            .catch(e => console.error('[Adam] bundle injection error:', e));
 
         applyPersistedViewSettings();
     }
@@ -1365,8 +1366,8 @@ function applyTweak(key, value) {
     const css = buildTweakCSS(loadPrefs());
     win?.webContents.executeJavaScript(`
         (function() {
-            let s = document.getElementById('aml-tweaks');
-            if (!s) { s = document.createElement('style'); s.id = 'aml-tweaks'; document.head.appendChild(s); }
+            let s = document.getElementById('adam-tweaks');
+            if (!s) { s = document.createElement('style'); s.id = 'adam-tweaks'; document.head.appendChild(s); }
             s.textContent = ${JSON.stringify(css)};
         })();
     `).catch(() => {});
@@ -1400,8 +1401,8 @@ function applyGlassEffect(blur, opacity) {
     p.glassOpacity = opacity;
     savePrefs(p);
     win.webContents.executeJavaScript(`
-        document.documentElement.style.setProperty('--aml-glass-blur', '${blur}px');
-        document.documentElement.style.setProperty('--aml-glass-opacity', '${opacity}');
+        document.documentElement.style.setProperty('--adam-glass-blur', '${blur}px');
+        document.documentElement.style.setProperty('--adam-glass-opacity', '${opacity}');
     `).catch(() => {});
 }
 
@@ -1412,7 +1413,7 @@ function applyPersistedViewSettings() {
     applyGlassEffect(p.glassBlur ?? 20, p.glassOpacity ?? 0.07);
     if (p.bgBlur != null)
         win?.webContents.executeJavaScript(
-            `document.documentElement.style.setProperty('--aml-bg-blur','${parseFloat(p.bgBlur) || 18}px')`
+            `document.documentElement.style.setProperty('--adam-bg-blur','${parseFloat(p.bgBlur) || 18}px')`
         ).catch(() => {});
     applyTweak('__noop', null);
     // Resolve effective mode: non-Hyprland can't use blur, fall back to accent.
@@ -1438,7 +1439,7 @@ function applyPersistedViewSettings() {
 
 // ── IPC sender check ─────────────────────────────────────────────────────────
 // Every channel below is meant for the main Apple Music window — and only for the page
-// itself on the Apple origin (the preload exposes amlBridge nowhere else). The mini player
+// itself on the Apple origin (the preload exposes adamBridge nowhere else). The mini player
 // sends just the three transport channels. Registering through these wrappers makes that a
 // rule instead of a convention: a stray frame, a window opened later, or any other renderer
 // that obtained an ipcRenderer cannot reach the privileged handlers.
@@ -1454,14 +1455,14 @@ const _ipcHandle = ipcMain.handle.bind(ipcMain);
 const _ipcOn = ipcMain.on.bind(ipcMain);
 ipcMain.handle = (channel, fn) => _ipcHandle(channel, (event, ...args) => {
     if (!_senderAllowed(event, channel)) {
-        console.warn(`[AML] refused IPC invoke ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+        console.warn(`[Adam] refused IPC invoke ${channel} from ${event.senderFrame?.url || 'unknown'}`);
         throw new Error('forbidden');
     }
     return fn(event, ...args);
 });
 ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
     if (!_senderAllowed(event, channel)) {
-        console.warn(`[AML] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+        console.warn(`[Adam] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
         return;
     }
     fn(event, ...args);
@@ -1545,7 +1546,7 @@ ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffec
 ipcMain.on('view:bg-blur',   (_, b) => {
     const p = loadPrefs(); p.bgBlur = parseInt(b); savePrefs(p);
     win?.webContents.executeJavaScript(
-        `document.documentElement.style.setProperty('--aml-bg-blur','${parseInt(b)}px')`
+        `document.documentElement.style.setProperty('--adam-bg-blur','${parseInt(b)}px')`
     ).catch(() => {});
 });
 // view:tweak is the settings panel's generic pref writer, reachable from the
@@ -1570,7 +1571,7 @@ ipcMain.on('view:nav-opacity', (_, v) => {
     if (effectiveMode === 'blur') {
         // In blur mode, opacity controls the glass opacity CSS var directly
         win?.webContents.executeJavaScript(
-            `document.documentElement.style.setProperty('--aml-glass-opacity','${parseFloat(v)}')`
+            `document.documentElement.style.setProperty('--adam-glass-opacity','${parseFloat(v)}')`
         ).catch(() => {});
     } else if (p.themePalette) {
         _applyThemeVars(p.themePalette);
@@ -1699,7 +1700,7 @@ ipcMain.handle('theme:export-preset', async (_, name) => {
     const p = loadPrefs();
     const preset = (p.themePresets || []).find(x => x.name === name) || { name: 'current', palette: p.themePalette };
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
-        defaultPath: `aml-theme-${_safeName(preset.name)}.json`,
+        defaultPath: `adam-theme-${_safeName(preset.name)}.json`,
         filters: [{ name: 'JSON', extensions: ['json'] }],
     });
     if (canceled || !filePath) return false;
@@ -1768,7 +1769,7 @@ if (IS_LINUX) {
         const _require = createRequire(import.meta.url);
         _MprisService = _require('mpris-service');
     } catch (e) {
-        console.warn('[AML] mpris-service not available:', e.message);
+        console.warn('[Adam] mpris-service not available:', e.message);
     }
 }
 
@@ -1777,14 +1778,14 @@ if (IS_LINUX) {
 // so it doesn't crash the app, and null mprisPlayer so the next update reconnects.
 process.on('uncaughtException', (err) => {
     if (err?.message?.includes('stream is closed') || err?.code === 'EPIPE') {
-        console.warn('[AML] MPRIS D-Bus uncaught (suppressed):', err.message);
+        console.warn('[Adam] MPRIS D-Bus uncaught (suppressed):', err.message);
         _destroyMprisPlayer();
         return;
     }
     // x11 package throws X11 protocol errors (BadWindow etc.) from socket
     // data handlers — outside any try/catch. Suppress them so they don't exit.
     if (err?.error != null && err?.badParam != null) {
-        console.warn('[AML] X11 protocol error (suppressed):', err.message ?? err);
+        console.warn('[Adam] X11 protocol error (suppressed):', err.message ?? err);
         return;
     }
     // Re-throw anything unrelated to D-Bus / X11.
@@ -1811,12 +1812,12 @@ function createMprisPlayer() {
     if (!_MprisService || !_mprisReady()) return null;
     try {
         const player = _MprisService({
-            name: 'apple-music-linux',
-            identity: 'Apple Music',
+            name: 'adam',
+            identity: 'Adam',
             supportedUriSchemes: [],
             supportedMimeTypes: ['audio/mpeg', 'audio/flac'],
             supportedInterfaces: ['player'],
-            desktopEntry: 'apple-music-linux',
+            desktopEntry: 'adam',
         });
         // Don't set any properties here. Every setter emits PropertiesChanged
         // over D-Bus. sessionBus() connects synchronously but the D-Bus auth
@@ -1849,8 +1850,8 @@ function createMprisPlayer() {
         // MPRIS2 § OpenUri: forward to the deep-link dispatcher (https:// only).
         player.on('open-uri', (uri) => {
             const s = String(uri ?? '');
-            if (s.startsWith('https://music.apple.com/') || s.startsWith('aml://'))
-                win?.webContents.send('aml:open', { url: s });
+            if (s.startsWith('https://music.apple.com/') || s.startsWith('adam://'))
+                win?.webContents.send('adam:open', { url: s });
         });
 
         // MPRIS → app: Seek (delta µs) and SetPosition (absolute µs).
@@ -1866,10 +1867,10 @@ function createMprisPlayer() {
         // When D-Bus signals an error, null the player and schedule a reconnect
         // so the next mpris:update (or the retry timer) re-registers the service.
         player.on('error', (err) => {
-            console.warn('[AML] MPRIS D-Bus error:', err?.message ?? err);
+            console.warn('[Adam] MPRIS D-Bus error:', err?.message ?? err);
             // Disconnect the old bus before nulling so D-Bus releases the name.
             // Without this, retries are rejected (EPIPE) because the zombie
-            // player still holds org.mpris.MediaPlayer2.apple-music-linux.
+            // player still holds org.mpris.MediaPlayer2.adam.
             if (mprisPlayer === player) _destroyMprisPlayer();
             if (!_mprisRetryTimer) {
                 _mprisRetryTimer = setTimeout(() => {
@@ -1882,10 +1883,10 @@ function createMprisPlayer() {
             }
         });
 
-        console.log('[AML] MPRIS2 service registered');
+        console.log('[Adam] MPRIS2 service registered');
         return player;
     } catch (e) {
-        console.warn('[AML] MPRIS2 init failed:', e.message);
+        console.warn('[Adam] MPRIS2 init failed:', e.message);
         return null;
     }
 }
@@ -1909,8 +1910,8 @@ function applyMprisData(data) {
         const meta = { ...data.metadata };
         // mprisTrackId() already returns a valid D-Bus object path
         // (/com/apple/music/track/…). Do NOT pass through p.objectPath() —
-        // that prepends /org/node/mediaplayer/apple-music-linux/ whose
-        // "apple-music-linux" segment contains hyphens, which are illegal
+        // that prepends /org/node/mediaplayer/adam/ whose
+        // "adam" segment contains hyphens, which are illegal
         // in D-Bus object path elements ([A-Za-z0-9_] only). The daemon
         // rejects the malformed message and closes the socket, causing every
         // subsequent write to EPIPE.
@@ -1990,7 +1991,7 @@ ipcMain.on('mpris:update', (_, data) => {
             try { mprisPlayer.seeked(_lastMprisPosition); } catch (_) {}
         }
     } catch (e) {
-        console.warn('[AML] MPRIS update failed, will reconnect:', e.message);
+        console.warn('[Adam] MPRIS update failed, will reconnect:', e.message);
         _destroyMprisPlayer();
     }
 });
@@ -2010,7 +2011,7 @@ ipcMain.on('media:cmd', (_e, c) => {
 // REQUIRES a Discord application client ID: register an app at
 // https://discord.com/developers/applications and paste its Application ID
 // below. Presence stays inert until a real ID is set.
-const DISCORD_CLIENT_ID = '1545304879441121320'; // Discord application (client) ID for apple-music-linux
+const DISCORD_CLIENT_ID = '1545304879441121320'; // Discord application (client) ID for adam
 
 let _discordSocket = null;
 let _discordReady = false;
@@ -2143,7 +2144,7 @@ ipcMain.on('discord:disable', () => {
 });
 
 // ── Last.fm scrobbling ────────────────────────────────────────────────────────
-// The API key + shared secret are configured from AML Settings (create an API
+// The API key + shared secret are configured from Adam Settings (create an API
 // account at https://www.last.fm/api/account/create). Both, and the user's
 // session key, live ONLY in the main process (encrypted store) — the secret is
 // never returned to the renderer.
@@ -2206,7 +2207,7 @@ function openLastfmAuthWindow(url) {
     _lastfmAuthWin = new BrowserWindow({
         width: 480, height: 760, show: false,
         backgroundColor: '#1c1c1e',           // dark ground painted before first frame
-        title: 'Last.fm — Authorize AML',
+        title: 'Last.fm — Authorize Adam',
         parent: win, autoHideMenuBar: true,
         webPreferences: {
             contextIsolation: true, nodeIntegration: false, sandbox: _hasSandbox,
@@ -2371,7 +2372,7 @@ function createMiniPlayer() {
         fullscreenable: false,
         skipTaskbar: true,
         alwaysOnTop: true,
-        title: 'Apple Music — Mini Player',
+        title: 'Adam — Mini Player',
         webPreferences: {
             preload: path.join(__dirname, 'miniplayer-preload.cjs'),
             contextIsolation: true,
@@ -2432,7 +2433,7 @@ function createTray() {
     if (IS_WIN) icon = icon.resize({ width: 16, height: 16 });
 
     tray = new Tray(icon);
-    tray.setToolTip('Apple Music');
+    tray.setToolTip('Adam');
 
     const sendPlayback = (cmd) => win?.webContents.send('mpris:cmd', cmd);
 
@@ -2482,7 +2483,7 @@ function createTray() {
                 // not with a "resume from X" chip confusingly appearing on boot.
                 try {
                     const store = await _storeLoad();
-                    delete store['aml_resume_state'];
+                    delete store['adam_resume_state'];
                     _storeDirty = true;
                     _storeFlushSync();
                 } catch (_) {}
@@ -2514,11 +2515,11 @@ function createTray() {
 }
 
 // Register before app.ready — required by Electron's privileged scheme API.
-// aml-video:// proxies to the local engine over https://127.0.0.1:ENGINE_PORT,
+// adam-video:// proxies to the local engine over https://127.0.0.1:ENGINE_PORT,
 // bypassing Chrome's mixed-content auto-upgrade which blocks <video src="http://...">
 // on HTTPS pages even for loopback addresses.
 protocol.registerSchemesAsPrivileged([{
-    scheme: 'aml-video',
+    scheme: 'adam-video',
     privileges: { secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true },
 }]);
 
@@ -2536,7 +2537,7 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
     try {
         size = statSync(filePath).size;
     } catch (e) {
-        console.error(`[aml-video] serveLocal 404 path=${filePath} err=${e.message}`);
+        console.error(`[adam-video] serveLocal 404 path=${filePath} err=${e.message}`);
         return new Response('media not found', { status: 404 });
     }
     const base = { 'Accept-Ranges': 'bytes', 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store' };
@@ -2547,7 +2548,7 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
     const m = rangeHeader && !rangeHeader.includes(',') && /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i.exec(rangeHeader);
     if (m && !(m[1] === '' && m[2] === '')) {
         if (size <= 0) {
-            console.warn(`[aml-video] serveLocal 416 (empty file) range=${rangeHeader} size=${size}`);
+            console.warn(`[adam-video] serveLocal 416 (empty file) range=${rangeHeader} size=${size}`);
             return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
         }
         if (m[1] === '') {
@@ -2559,7 +2560,7 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
             end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
         }
         if (start < 0 || start >= size || start > end) {
-            console.warn(`[aml-video] serveLocal 416 unsatisfiable range=${rangeHeader} start=${start} end=${end} size=${size}`);
+            console.warn(`[adam-video] serveLocal 416 unsatisfiable range=${rangeHeader} start=${start} end=${end} size=${size}`);
             return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
         }
     }
@@ -2578,7 +2579,7 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
         const ns = createReadStream(filePath, { highWaterMark: 1 << 20, ...opts });
         let ended = false, errored = null;
         ns.on('end', () => { ended = true; });
-        ns.on('error', (err) => { errored = err; console.warn(`[aml-video] ${tag} read error: ${err.message}`); });
+        ns.on('error', (err) => { errored = err; console.warn(`[adam-video] ${tag} read error: ${err.message}`); });
         return new ReadableStream({
             async pull(controller) {
                 for (;;) {
@@ -2595,7 +2596,7 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
                 }
             },
             cancel(reason) {
-                console.log(`[aml-video] ${tag} cancelled (client abort/seek): ${reason ?? ''}`);
+                console.log(`[adam-video] ${tag} cancelled (client abort/seek): ${reason ?? ''}`);
                 ns.destroy();
             },
         });
@@ -2604,14 +2605,14 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
     if (start === undefined) {
         // No usable Range → full file (200).
         const headers = { ...base, 'Content-Length': String(size) };
-        console.log(`[aml-video] serveLocal 200 full method=${method} size=${size} rangeHdr=${rangeHeader || '(none)'}`);
+        console.log(`[adam-video] serveLocal 200 full method=${method} size=${size} rangeHdr=${rangeHeader || '(none)'}`);
         if (isHead || size === 0) return new Response(null, { status: 200, headers });
         return new Response(fileWebStream({}, '200'), { status: 200, headers });
     }
 
     const length = end - start + 1;
     const headers = { ...base, 'Content-Length': String(length), 'Content-Range': `bytes ${start}-${end}/${size}` };
-    console.log(`[aml-video] serveLocal 206 method=${method} bytes ${start}-${end}/${size} len=${length}`);
+    console.log(`[adam-video] serveLocal 206 method=${method} bytes ${start}-${end}/${size} len=${length}`);
     if (isHead) return new Response(null, { status: 206, headers });
     return new Response(fileWebStream({ start, end }, `206 ${start}-${end}`), { status: 206, headers });
 }
@@ -2622,7 +2623,7 @@ app.whenReady().then(() => {
     // that fires when the auth handshake races the first property write.
     setTimeout(() => { if (!mprisPlayer) mprisPlayer = createMprisPlayer(); }, 1500);
 
-    console.log('[AML] Electron ready, process.type:', process.type);
+    console.log('[Adam] Electron ready, process.type:', process.type);
     // Keep Chromium session data in its own subfolder so it doesn't
     // pollute the same directory as our app prefs/drm data.
     app.setPath('userData', path.join(CONFIG_DIR, 'electron-session'));
@@ -2638,14 +2639,14 @@ app.whenReady().then(() => {
     ]);
     s.setPermissionRequestHandler((wc, perm, cb) => {
         const deny = DENIED_PERMISSIONS.has(perm);
-        if (deny) console.warn(`[AML] denied permission request: ${perm}`);
+        if (deny) console.warn(`[Adam] denied permission request: ${perm}`);
         cb(!deny);
     });
     s.setPermissionCheckHandler((wc, perm) => !DENIED_PERMISSIONS.has(perm));
 
     // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">
     // loads. This lets MV video use a real HTTPS origin → Chrome's native, reliable
-    // byte-range seeking (the custom aml-video:// protocol has a Chromium seek bug on
+    // byte-range seeking (the custom adam-video:// protocol has a Chromium seek bug on
     // Linux, electron#38749). Scoped strictly to 127.0.0.1: every other host falls
     // through to Chromium's default verification (return -3).
     s.setCertificateVerifyProc((request, callback) => {
@@ -2653,11 +2654,11 @@ app.whenReady().then(() => {
         callback(-3); // use Chromium's default verification for everything else
     });
 
-    // Proxy aml-video://localhost/<path> → http://127.0.0.1:ENGINE_PORT/<path>.
+    // Proxy adam-video://localhost/<path> → http://127.0.0.1:ENGINE_PORT/<path>.
     // Must be registered on the Apple Music session (not defaultSession) since the
     // BrowserWindow uses persist:apple-music. Range headers pass through so the
     // browser's native byte-range seeking works on cached video replays.
-    s.protocol.handle('aml-video', async (request) => {
+    s.protocol.handle('adam-video', async (request) => {
         try {
             const u = new URL(request.url);
             const engineUrl = `https://127.0.0.1:${ENGINE_PORT}${u.pathname}${u.search}`;
@@ -2677,13 +2678,13 @@ app.whenReady().then(() => {
                 let cachedPath = _mvPathCache.get(u.pathname);
                 if (!cachedPath) {
                     const info = await electronNet.fetch(engineUrl + '-info')
-                        .then(r => r.ok ? r.json() : null).catch(e => { console.error(`[aml-video] info fetch err=${e.message}`); return null; });
+                        .then(r => r.ok ? r.json() : null).catch(e => { console.error(`[adam-video] info fetch err=${e.message}`); return null; });
                     if (info && info.cached && info.path) {
                         cachedPath = info.path;
                         _mvPathCache.set(u.pathname, cachedPath);
-                        console.log(`[aml-video] resolved path for ${u.pathname} → ${cachedPath}`);
+                        console.log(`[adam-video] resolved path for ${u.pathname} → ${cachedPath}`);
                     } else {
-                        console.log(`[aml-video] not cached yet (preparing) → 503`);
+                        console.log(`[adam-video] not cached yet (preparing) → 503`);
                     }
                 }
                 if (cachedPath) {
@@ -2695,7 +2696,7 @@ app.whenReady().then(() => {
             const headers = {};
             for (const [k, v] of request.headers) headers[k] = v;
             const upstream = await electronNet.fetch(engineUrl, { method: request.method, headers });
-            console.log(`[aml-video] proxy upstream status=${upstream.status} ct=${upstream.headers.get('content-type')} cl=${upstream.headers.get('content-length')} cr=${upstream.headers.get('content-range')}`);
+            console.log(`[adam-video] proxy upstream status=${upstream.status} ct=${upstream.headers.get('content-type')} cl=${upstream.headers.get('content-length')} cr=${upstream.headers.get('content-range')}`);
             return upstream;
         } catch (e) {
             return new Response(`engine proxy error: ${e.message}`, { status: 502 });
@@ -2709,7 +2710,7 @@ app.whenReady().then(() => {
     // flag must be set before the session allocates its cache, so we set it on
     // app.commandLine (takes effect on next launch).
     s.getCacheSize().then(size =>
-        console.log('[AML] Cache size:', Math.round(size / 1024 / 1024) + ' MB'));
+        console.log('[Adam] Cache size:', Math.round(size / 1024 / 1024) + ' MB'));
     app.commandLine.appendSwitch('disk-cache-size', String(256 * 1024 * 1024));
 
     // ── Response header overrides ─────────────────────────────────────────────
@@ -2802,7 +2803,7 @@ app.whenReady().then(() => {
     // shortcut on top would deliver every key press twice and cancel itself out.
     if (!IS_WIN) for (const [key, fn] of _mkShortcuts) {
         if (!globalShortcut.register(key, fn))
-            console.warn('[AML] media key shortcut already taken by another app:', key);
+            console.warn('[Adam] media key shortcut already taken by another app:', key);
     }
 
     // Always attempt to start the engine API server.  engine-playback.js checks
@@ -2810,11 +2811,11 @@ app.whenReady().then(() => {
     // engine isn't running, so a missing binary is not a hard failure.
     startEngine();
 
-    // Cold-start deep link: if AML was launched with a URL argument (e.g. from
-    // xdg-open or a browser "Open in AML" prompt), dispatch it after the window
-    // is ready. The renderer registers its aml:open listener inside waitForMusicKit,
+    // Cold-start deep link: if Adam was launched with a URL argument (e.g. from
+    // xdg-open or a browser "Open in Adam" prompt), dispatch it after the window
+    // is ready. The renderer registers its adam:open listener inside waitForMusicKit,
     // so we defer until ui-ready has fired (listener installed in main.mjs).
-    const coldUrl = process.argv.find(a => a.startsWith('aml://') || a.startsWith('https://music.apple.com'));
+    const coldUrl = process.argv.find(a => a.startsWith('adam://') || a.startsWith('https://music.apple.com'));
     if (coldUrl) {
         ipcMain.once('app:ui-ready', () => {
             // Give MusicKit ~2 s to fully initialise after ui-ready before

@@ -10,8 +10,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$REPO/electron/dist/resources/vlc"
-LIBDIR="${AML_VLC_LIBDIR:-/usr/lib}"
-SRC="${AML_VLC_PLUGINS:-$LIBDIR/vlc/plugins}"
+LIBDIR="${ADAM_VLC_LIBDIR:-/usr/lib}"
+SRC="${ADAM_VLC_PLUGINS:-$LIBDIR/vlc/plugins}"
 
 if [ "${1:-}" = "--force" ]; then
     rm -rf "$DEST"
@@ -23,7 +23,7 @@ fi
 
 if ! ls "$LIBDIR"/libvlc.so.5.* >/dev/null 2>&1 || [ ! -d "$SRC" ]; then
     echo "error: system VLC not found (looked for $LIBDIR/libvlc.so.5.* and $SRC)." >&2
-    echo "  Install it (e.g. 'sudo pacman -S vlc' / 'sudo apt install vlc') or set AML_VLC_LIBDIR / AML_VLC_PLUGINS." >&2
+    echo "  Install it (e.g. 'sudo pacman -S vlc' / 'sudo apt install vlc') or set ADAM_VLC_LIBDIR / ADAM_VLC_PLUGINS." >&2
     exit 1
 fi
 

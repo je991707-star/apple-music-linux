@@ -5,7 +5,7 @@
  * Date: 2026-10-07
  * 
  * Clean-room implementation of FairPlay device certificate and ID generation.
- * Independently authored by AML DRM Team.
+ * Independently authored by Adam DRM Team.
  *
  * Based on specification: drm/FAIRPLAY_DEVICE_CERT_SPEC.md v1.0
  *

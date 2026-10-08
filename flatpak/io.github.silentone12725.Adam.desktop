@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Adam
+GenericName=Music Player
+Comment=Apple Music desktop client for Linux and Windows
+Exec=adam %u
+Icon=io.github.silentone12725.Adam
+Type=Application
+Categories=AudioVideo;Music;Network;
+StartupWMClass=Adam
+MimeType=x-scheme-handler/adam;x-scheme-handler/ame;
+Keywords=music;apple;streaming;

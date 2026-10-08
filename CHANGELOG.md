@@ -1,15 +1,20 @@
 # Changelog
 
-All notable changes to Apple Music Linux, from the first release. The format follows Keep a
+All notable changes to Adam (formerly Apple Music Linux), from the first release. The format follows Keep a
 Changelog, and releases are numbered MAJOR.MINOR.PATCH (the early ones were published as
 pre-releases). Narrative release notes for 1.4.0 are in releases/v1.4.0.md; earlier ones are on
 the project's Releases page.
 
 ## Unreleased
 
+### Renamed to Adam
+- **The app is now Adam.** Window and tray names, installer and shortcut names, executable (`adam`), AppImage/`.run`/Flatpak/NSIS artifact names, the app ID (`io.github.silentone12725.Adam`, also the Windows AppUserModelID), the link scheme (`adam://`), environment variables (`ADAM_*`, was `AML_*`), the `adamBridge` page bridge, log prefixes and the default export folder (`~/Music/Adam-Downloads`).
+- **Existing data is migrated on first launch.** `~/.config/apple-music-linux` and `~/.config/aml` merge into `~/.config/adam` (`%APPDATA%\adam` on Windows); `~/.cache/apple-music-linux` and `~/.cache/aml` merge into `~/.cache/adam`. This covers the Apple session, Widevine identity, EQ, HRTF, the MV cache key, the encrypted store (`aml_*` keys become `adam_*`) and page settings. Nothing existing is overwritten.
+- **Breaking:** custom CSS written against `.aml-*` classes or `--aml-*` variables must be updated to `adam-` (see `adam-custom.example.css`); old `aml://` links no longer open the app; scripts that set `AML_*` variables need `ADAM_*`. The old install location (`~/.local/share/apple-music-linux`) is not removed by the new installer.
+
 ### Windows
 - **Windows 10/11 x64 support.** NSIS installer built by `scripts/build-windows.ps1`; the DRM library is a MinGW DLL (`drm_linux.c` + libcrypto) and the engine builds with cgo and libvlc.
-- **System integration.** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `aml://` links, Discord Rich Presence over the named pipe, Mica backdrop and a Windows-native config location.
+- **System integration.** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `adam://` links, Discord Rich Presence over the named pipe, Mica backdrop and a Windows-native config location.
 - **DRM backend renamed `widevine`** (`WidevineBackend`, build tag `widevine_backend`, was `native_backend`); the hybris/Android runtime was removed.
 
 ## 1.4.0 - 2026-10-06

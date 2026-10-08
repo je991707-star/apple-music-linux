@@ -14,6 +14,7 @@ package aacstream
 import (
 	"container/list"
 	"crypto/sha256"
+	"engine/internal/appdir"
 	"errors"
 	"fmt"
 	"os"
@@ -77,9 +78,11 @@ func ensureCacheDirs() {
 		base := cacheBase
 		cacheBaseMu.Unlock()
 		if base == "" {
-			var err error
-			if base, err = os.UserCacheDir(); err != nil {
-				base = os.TempDir()
+			base = appdir.Cache()
+			// Earlier versions kept these caches directly under the OS cache root.
+			if old, err := os.UserCacheDir(); err == nil {
+				appdir.MoveInto(filepath.Join(old, cacheDirName), filepath.Join(base, cacheDirName))
+				appdir.MoveInto(filepath.Join(old, mvCacheDirName), filepath.Join(base, mvCacheDirName))
 			}
 		}
 		if segmentCache.dir == "" {

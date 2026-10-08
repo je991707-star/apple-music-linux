@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds the Windows installer: dist\apple-music-linux-setup-<version>.exe
+  Builds the Windows installer: dist\adam-setup-<version>.exe
 
 .DESCRIPTION
   1. libdrm_client.dll      mingw32-make -C drm            (drm_linux.c + libcrypto)
@@ -33,13 +33,13 @@ foreach ($t in 'go', 'node', 'npm', 'gcc', 'mingw32-make') { Need $t }
 if (-not (Test-Path "$VlcDir\libvlc.dll")) { throw "libvlc.dll not found in $VlcDir (install 64-bit VLC 3.x or pass -VlcDir)" }
 if (-not (Test-Path "$Msys\libcrypto-3-x64.dll")) { throw "libcrypto-3-x64.dll not found in $Msys (pacman -S mingw-w64-ucrt-x86_64-openssl)" }
 $Version = (Get-Content "$Electron\package.json" -Raw | ConvertFrom-Json).version
-Write-Host "Building Apple Music $Version for Windows..."
+Write-Host "Building Adam $Version for Windows..."
 
 if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
 New-Item -ItemType Directory -Force $Out | Out-Null
 
 # cgo cannot take -I/-L paths containing spaces, so reach everything through spaceless junctions.
-$Link = Join-Path $env:TEMP 'aml-build'
+$Link = Join-Path $env:TEMP 'adam-build'
 if (Test-Path $Link) { Remove-Item -Recurse -Force $Link }
 New-Item -ItemType Directory $Link | Out-Null
 cmd /c mklink /J "$Link\vlc" "$VlcDir" | Out-Null
@@ -53,10 +53,10 @@ if ($LASTEXITCODE -ne 0) { throw 'DRM client build failed' }
 # ── 2. Engine ────────────────────────────────────────────────────────────────
 Write-Host '[2/6] engine.exe'
 if (-not $VlcInclude) {
-    $VlcInclude = Join-Path $env:TEMP 'aml-vlc-headers'
+    $VlcInclude = Join-Path $env:TEMP 'adam-vlc-headers'
     if (-not (Test-Path "$VlcInclude\vlc\vlc.h")) {
         Need git
-        $tmp = Join-Path $env:TEMP 'aml-vlc-src'
+        $tmp = Join-Path $env:TEMP 'adam-vlc-src'
         if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
         git clone --depth 1 --branch 3.0.21 https://code.videolan.org/videolan/vlc.git $tmp
         if ($LASTEXITCODE -ne 0) { throw 'could not fetch the libvlc headers' }
@@ -126,4 +126,4 @@ try {
     npx electron-builder --win nsis
     if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 } finally { Pop-Location }
-Write-Host "Done: $Electron\dist\apple-music-linux-setup-$Version.exe"
+Write-Host "Done: $Electron\dist\adam-setup-$Version.exe"

@@ -38,7 +38,7 @@ import (
 //	PLAY_SF        storefront (default "in")
 //	PLAY_MAXMB     stop after this many MiB of the stream (default: the whole stream)
 //
-// Set AML_VSEG_DRM to a directory whose rootfs/system/lib64 should be used instead of the
+// Set ADAM_VSEG_DRM to a directory whose rootfs/system/lib64 should be used instead of the
 // default, to compare Android runtimes: the decrypted bytes must be identical.
 func TestPlaybackLive(t *testing.T) {
 	adam, drmDir := os.Getenv("PLAY_ADAM"), os.Getenv("PLAY_DRM_DIR")

@@ -6,10 +6,10 @@ package vlc
 #include <sys/types.h>
 #include <vlc/vlc.h>
 
-extern int     amlVlcOpen(void *opaque, void **datap, uint64_t *sizep);
-extern ssize_t amlVlcRead(void *opaque, unsigned char *buf, size_t len);
-extern int     amlVlcSeek(void *opaque, uint64_t offset);
-extern void    amlVlcClose(void *opaque);
+extern int     adamVlcOpen(void *opaque, void **datap, uint64_t *sizep);
+extern ssize_t adamVlcRead(void *opaque, unsigned char *buf, size_t len);
+extern int     adamVlcSeek(void *opaque, uint64_t offset);
+extern void    adamVlcClose(void *opaque);
 */
 import "C"
 
@@ -48,10 +48,10 @@ func newCallbackMedia(src Source) *callbackMedia {
 
 func (cm *callbackMedia) newMedia(inst *C.libvlc_instance_t) *C.libvlc_media_t {
 	return C.libvlc_media_new_callbacks(inst,
-		C.libvlc_media_open_cb(C.amlVlcOpen),
-		C.libvlc_media_read_cb(C.amlVlcRead),
-		C.libvlc_media_seek_cb(C.amlVlcSeek),
-		C.libvlc_media_close_cb(C.amlVlcClose),
+		C.libvlc_media_open_cb(C.adamVlcOpen),
+		C.libvlc_media_read_cb(C.adamVlcRead),
+		C.libvlc_media_seek_cb(C.adamVlcSeek),
+		C.libvlc_media_close_cb(C.adamVlcClose),
 		cm.opaque)
 }
 
@@ -66,8 +66,8 @@ func mediaFromOpaque(opaque unsafe.Pointer) *callbackMedia {
 	return cgo.Handle(*(*C.uintptr_t)(opaque)).Value().(*callbackMedia)
 }
 
-//export amlVlcOpen
-func amlVlcOpen(opaque unsafe.Pointer, datap *unsafe.Pointer, sizep *C.uint64_t) C.int {
+//export adamVlcOpen
+func adamVlcOpen(opaque unsafe.Pointer, datap *unsafe.Pointer, sizep *C.uint64_t) C.int {
 	cm := mediaFromOpaque(opaque)
 	*datap = opaque
 	if _, err := cm.src.Seek(0, io.SeekStart); err != nil {
@@ -81,8 +81,8 @@ func amlVlcOpen(opaque unsafe.Pointer, datap *unsafe.Pointer, sizep *C.uint64_t)
 	return 0
 }
 
-//export amlVlcRead
-func amlVlcRead(opaque unsafe.Pointer, buf *C.uchar, n C.size_t) C.ssize_t {
+//export adamVlcRead
+func adamVlcRead(opaque unsafe.Pointer, buf *C.uchar, n C.size_t) C.ssize_t {
 	if n == 0 {
 		return 0
 	}
@@ -102,13 +102,13 @@ func amlVlcRead(opaque unsafe.Pointer, buf *C.uchar, n C.size_t) C.ssize_t {
 	}
 }
 
-//export amlVlcSeek
-func amlVlcSeek(opaque unsafe.Pointer, offset C.uint64_t) C.int {
+//export adamVlcSeek
+func adamVlcSeek(opaque unsafe.Pointer, offset C.uint64_t) C.int {
 	if _, err := mediaFromOpaque(opaque).src.Seek(int64(offset), io.SeekStart); err != nil {
 		return -1
 	}
 	return 0
 }
 
-//export amlVlcClose
-func amlVlcClose(unsafe.Pointer) {}
+//export adamVlcClose
+func adamVlcClose(unsafe.Pointer) {}

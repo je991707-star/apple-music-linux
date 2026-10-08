@@ -36,7 +36,7 @@ func loopbackTLSConfig() (*tls.Config, error) {
 	}
 	tmpl := x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "apple-music-linux engine (loopback)"},
+		Subject:               pkix.Name{CommonName: "adam engine (loopback)"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(1, 0, 0), // regenerated on every start; no reason for it to outlive a year
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

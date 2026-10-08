@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import {
     configRoot, engineFileName, engineLibEnv, discordIpcPaths,
-    parseNetstatListeningPid, parseSsListeningPid, isPortFree, yamlStr,
+    parseNetstatListeningPid, parseSsListeningPid, isPortFree, yamlStr, migrateLegacyConfig, migrateStoreKeys,
 } from '../platform.mjs';
 import { makeIconPng, parseCmdArg, mediaSessionScript } from '../win-integration.mjs';
 
@@ -91,10 +91,10 @@ test('makeIconPng produces a decodable RGBA PNG with the glyph drawn', () => {
 });
 
 test('parseCmdArg accepts only known transport commands', () => {
-    assert.equal(parseCmdArg(['app.exe', '--aml-cmd=playpause']), 'playpause');
-    assert.equal(parseCmdArg(['--hidden', '--aml-cmd=next']), 'next');
-    assert.equal(parseCmdArg(['--aml-cmd=rm -rf']), null);
-    assert.equal(parseCmdArg(['--aml-cmd=evil']), null);
+    assert.equal(parseCmdArg(['app.exe', '--adam-cmd=playpause']), 'playpause');
+    assert.equal(parseCmdArg(['--hidden', '--adam-cmd=next']), 'next');
+    assert.equal(parseCmdArg(['--adam-cmd=rm -rf']), null);
+    assert.equal(parseCmdArg(['--adam-cmd=evil']), null);
     assert.equal(parseCmdArg(undefined), null);
 });
 
@@ -109,4 +109,54 @@ test('yamlStr escapes Windows paths so the engine config stays valid YAML', () =
     assert.equal(yamlStr('C:\\Users\\a\\AppData'), '"C:\\\\Users\\\\a\\\\AppData"');
     assert.equal(yamlStr('/home/a/.config/x'), '"/home/a/.config/x"');
     assert.equal(yamlStr('a"b'), '"a\\"b"');
+});
+
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync as rf, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+function tmp() { return mkdtempSync(path.join(tmpdir(), 'adam-mig-')); }
+function put(p, c) { mkdirSync(path.dirname(p), { recursive: true }); writeFileSync(p, c); }
+
+test('migrateLegacyConfig moves the old config folder and renames aml- files', () => {
+    const root = tmp();
+    put(path.join(root, 'apple-music-linux', 'electron-prefs.json'), '{"a":1}');
+    put(path.join(root, 'apple-music-linux', 'aml-store.enc'), 'enc');
+    put(path.join(root, 'apple-music-linux', 'drm', 'files', 'MUSIC_TOKEN'), 'tok');
+    put(path.join(root, 'aml', 'eq.json'), 'eq');
+    const dir = migrateLegacyConfig(root, 'adam');
+    assert.equal(dir, path.join(root, 'adam'));
+    assert.equal(rf(path.join(dir, 'electron-prefs.json'), 'utf8'), '{"a":1}');
+    assert.equal(rf(path.join(dir, 'adam-store.enc'), 'utf8'), 'enc');
+    assert.equal(rf(path.join(dir, 'drm', 'files', 'MUSIC_TOKEN'), 'utf8'), 'tok');
+    assert.equal(rf(path.join(dir, 'eq.json'), 'utf8'), 'eq');
+    assert.ok(!existsSync(path.join(root, 'apple-music-linux')));
+    assert.ok(!existsSync(path.join(root, 'aml')));
+});
+
+test('migrateLegacyConfig never overwrites existing new-name data and is idempotent', () => {
+    const root = tmp();
+    put(path.join(root, 'adam', 'electron-prefs.json'), 'new');
+    put(path.join(root, 'adam', 'adam-store.enc'), 'newstore');
+    put(path.join(root, 'apple-music-linux', 'electron-prefs.json'), 'old');
+    put(path.join(root, 'apple-music-linux', 'extra.txt'), 'x');
+    put(path.join(root, 'adam', 'aml-store.enc'), 'stale');
+    migrateLegacyConfig(root, 'adam');
+    migrateLegacyConfig(root, 'adam');
+    assert.equal(rf(path.join(root, 'adam', 'electron-prefs.json'), 'utf8'), 'new');
+    assert.equal(rf(path.join(root, 'adam', 'adam-store.enc'), 'utf8'), 'newstore');
+    assert.equal(rf(path.join(root, 'adam', 'extra.txt'), 'utf8'), 'x');
+    assert.equal(rf(path.join(root, 'apple-music-linux', 'electron-prefs.json'), 'utf8'), 'old');
+});
+
+test('migrateLegacyConfig on a fresh machine just returns the new path', () => {
+    const root = tmp();
+    assert.equal(migrateLegacyConfig(root, 'adam'), path.join(root, 'adam'));
+});
+
+test('migrateStoreKeys renames aml_ keys without clobbering', () => {
+    const st = { aml_resume_state: { t: 1 }, aml_play_counts: { a: 1 }, adam_play_counts: { b: 2 }, other: 3 };
+    assert.equal(migrateStoreKeys(st), true);
+    assert.deepEqual(st, { adam_resume_state: { t: 1 }, adam_play_counts: { b: 2 }, other: 3 });
+    assert.equal(migrateStoreKeys(st), false);
 });

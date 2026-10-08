@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"engine/internal/appdir"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,11 +23,7 @@ type mvCachePrefs struct {
 }
 
 func mvPrefsPath() string {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "apple-music-linux", "engine", "mv-prefs.json")
+	return filepath.Join(appdir.Cache(), "engine", "mv-prefs.json")
 }
 
 func loadMVPrefs() {

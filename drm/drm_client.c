@@ -471,7 +471,7 @@ fp_error_t drm_client_create_default(
     drm_config_t config;
     drm_config_init(&config);
     config.license_server_url = license_server_url;
-    config.user_agent = "AppleMusicLinux/2.0 (Linux; x86_64)";
+    config.user_agent = "Adam/2.0 (Linux; x86_64)";
     
     return drm_client_create(&config, out_client);
 }

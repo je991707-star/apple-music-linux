@@ -24,7 +24,7 @@ import (
 // the uid column of the socket's entry in /proc/net/tcp{,6}. peerUIDListener refuses
 // connections from any uid other than the server's own (or root, who could do anything
 // anyway). Where /proc can't be read the check is switched off with a warning rather than
-// bricking the app; AML_ALLOW_OTHER_USERS=1 switches it off deliberately.
+// bricking the app; ADAM_ALLOW_OTHER_USERS=1 switches it off deliberately.
 
 // procNetPaths is where the socket table lives; a variable so tests can point it elsewhere.
 var procNetPaths = []string{"/proc/net/tcp", "/proc/net/tcp6"}
@@ -57,8 +57,8 @@ func (l *peerUIDListener) Accept() (net.Conn, error) {
 
 // guardListener applies the per-user check when it can be enforced.
 func guardListener(l net.Listener) net.Listener {
-	if os.Getenv("AML_ALLOW_OTHER_USERS") == "1" {
-		slog.Warn("AML_ALLOW_OTHER_USERS=1: any local user can use the engine API")
+	if os.Getenv("ADAM_ALLOW_OTHER_USERS") == "1" {
+		slog.Warn("ADAM_ALLOW_OTHER_USERS=1: any local user can use the engine API")
 		return l
 	}
 	if runtime.GOOS == "windows" {

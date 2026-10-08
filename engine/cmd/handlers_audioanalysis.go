@@ -76,7 +76,7 @@ func (s *APIServer) handleAudioAnalysis(w http.ResponseWriter, r *http.Request) 
 }
 
 // appleAnalysisResponse mirrors the Apple Music API JSON shape for
-// audio-analysis relationship data. Only the fields AML cares about are decoded.
+// audio-analysis relationship data. Only the fields Adam cares about are decoded.
 type appleAnalysisResponse struct {
 	Data []struct {
 		ID         string `json:"id"`

@@ -59,7 +59,7 @@ static void test_device_id_generation(void) {
 static void test_device_id_persistence(void) {
     TEST("Device ID Persistence");
     
-    const char *test_dir = "/tmp/aml_device_test";
+    const char *test_dir = "/tmp/adam_device_test";
     fp_device_id_t id1, id2;
     
     /* Clean up from previous runs */
@@ -246,7 +246,7 @@ static void test_key_wrapping(void) {
 static void test_credentials_workflow(void) {
     TEST("Full Credentials Workflow");
     
-    const char *test_dir = "/tmp/aml_credentials_test";
+    const char *test_dir = "/tmp/adam_credentials_test";
     fp_device_context_t *ctx = NULL;
     fp_credentials_t *creds = NULL;
     bool generated_new = false;
@@ -341,7 +341,7 @@ static void test_device_id_format(void) {
 static void test_keypair_persistence(void) {
     TEST("Key Pair Persistence");
     
-    const char *test_dir = "/tmp/aml_keypair_test";
+    const char *test_dir = "/tmp/adam_keypair_test";
     fp_device_context_t *ctx = NULL;
     fp_key_pair_t *keypair1 = NULL;
     fp_key_pair_t *keypair2 = NULL;
@@ -377,7 +377,7 @@ static void test_keypair_persistence(void) {
 static void test_cert_persistence(void) {
     TEST("Certificate Persistence");
     
-    const char *test_dir = "/tmp/aml_cert_test";
+    const char *test_dir = "/tmp/adam_cert_test";
     fp_device_context_t *ctx = NULL;
     fp_device_id_t id;
     fp_key_pair_t *keypair = NULL;
@@ -497,7 +497,7 @@ static void test_ec_key_wrapping(void) {
 static void test_credential_reset(void) {
     TEST("Credential Reset");
     
-    const char *test_dir = "/tmp/aml_reset_test";
+    const char *test_dir = "/tmp/adam_reset_test";
     fp_device_context_t *ctx = NULL;
     fp_credentials_t *creds = NULL;
     

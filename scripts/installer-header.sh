@@ -1,15 +1,15 @@
 #!/bin/sh
-# Apple Music Linux — self-extracting installer
-# Usage: ./apple-music-linux.run [--force] [--system] [--uninstall]
+# Adam — self-extracting installer
+# Usage: ./adam.run [--force] [--system] [--uninstall]
 #
 # --force      reinstall even if already at this version
-# --system     install to /opt/apple-music-linux + /usr/local/bin (needs sudo)
+# --system     install to /opt/adam + /usr/local/bin (needs sudo)
 # --uninstall  remove a previous installation
 
 VERSION="__VERSION__"
 
 # ── defaults (user install) ───────────────────────────────────────────────────
-INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/lib}/apple-music-linux"
+INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/lib}/adam"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
@@ -19,7 +19,7 @@ SYSTEM=0
 UNINSTALL=0
 
 # ── launcher directory ───────────────────────────────────────────────────────
-# The command is installed as `apple-music-linux`. The standard home for user executables is
+# The command is installed as `adam`. The standard home for user executables is
 # $HOME/.local/bin (XDG Base Directory spec 0.8, systemd file-hierarchy(7)); putting it on PATH
 # is the distribution's job, so this installer does not edit shell startup files: the shell and
 # how it is configured are the user's business, and the installer cannot know them. The one
@@ -40,7 +40,7 @@ for arg in "$@"; do
 done
 
 if [ "$SYSTEM" = "1" ]; then
-    INSTALL_DIR="/opt/apple-music-linux"
+    INSTALL_DIR="/opt/adam"
     BIN_DIR="/usr/local/bin"
     DESKTOP_DIR="/usr/share/applications"
     ICON_DIR="/usr/share/icons/hicolor/256x256/apps"
@@ -55,14 +55,14 @@ if [ "$UNINSTALL" = "1" ]; then
     rm -rf "$INSTALL_DIR"
     for d in "$BIN_DIR" "$HOME/.local/bin" "$HOME/bin"; do
         # only a launcher this installer wrote (it execs the installed binary)
-        if [ -f "$d/apple-music-linux" ] && grep -qF "$INSTALL_DIR/apple-music-linux" "$d/apple-music-linux" 2>/dev/null; then
-            rm -f "$d/apple-music-linux"
+        if [ -f "$d/adam" ] && grep -qF "$INSTALL_DIR/adam" "$d/adam" 2>/dev/null; then
+            rm -f "$d/adam"
         fi
     done
-    rm -f  "$DESKTOP_DIR/apple-music-linux.desktop"
-    rm -f  "$ICON_DIR/apple-music-linux.png"
+    rm -f  "$DESKTOP_DIR/adam.desktop"
+    rm -f  "$ICON_DIR/adam.png"
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-    echo "Uninstalled Apple Music Linux."
+    echo "Uninstalled Adam."
     exit 0
 fi
 
@@ -70,8 +70,8 @@ fi
 if [ "$FORCE" = "0" ] && [ -f "$INSTALL_DIR/.version" ]; then
     installed=$(cat "$INSTALL_DIR/.version")
     if [ "$installed" = "$VERSION" ]; then
-        echo "Apple Music Linux $VERSION is already installed."
-        echo "Run: apple-music-linux   or pass --force to reinstall."
+        echo "Adam $VERSION is already installed."
+        echo "Run: adam   or pass --force to reinstall."
         exit 0
     fi
 fi
@@ -93,7 +93,7 @@ SENTINEL_LINE=$(grep -an '^__PAYLOAD_BELOW__$' "$0" | tail -1 | cut -d: -f1)
 HEADER_BYTES=$(head -n "$SENTINEL_LINE" "$0" | wc -c)
 PAYLOAD_START=$((HEADER_BYTES + 1))
 
-echo "Installing Apple Music Linux $VERSION..."
+echo "Installing Adam $VERSION..."
 mkdir -p "$INSTALL_DIR"
 
 tail -c +"$PAYLOAD_START" "$0" \
@@ -102,7 +102,7 @@ tail -c +"$PAYLOAD_START" "$0" \
 
 # ── permissions ───────────────────────────────────────────────────────────────
 chmod +x \
-    "$INSTALL_DIR/apple-music-linux" \
+    "$INSTALL_DIR/adam" \
     "$INSTALL_DIR/chrome_crashpad_handler" \
     "$INSTALL_DIR/resources/engine"
 
@@ -115,11 +115,11 @@ fi
 
 # ── launcher ──────────────────────────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
-cat > "$BIN_DIR/apple-music-linux" <<EOF
+cat > "$BIN_DIR/adam" <<EOF
 #!/bin/sh
-exec "$INSTALL_DIR/apple-music-linux" --no-sandbox "\$@"
+exec "$INSTALL_DIR/adam" --no-sandbox "\$@"
 EOF
-chmod +x "$BIN_DIR/apple-music-linux"
+chmod +x "$BIN_DIR/adam"
 
 # ── desktop entry + icon ──────────────────────────────────────────────────────
 mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
@@ -131,43 +131,43 @@ if [ ! -f "$APP_ICON" ]; then
 fi
 
 # Copy to hicolor theme dir (for DEs that resolve icon names)
-cp "$APP_ICON" "$ICON_DIR/apple-music-linux.png" 2>/dev/null || true
+cp "$APP_ICON" "$ICON_DIR/adam.png" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 # Use absolute path for Icon= — bypasses icon theme cache entirely,
 # guaranteed to show the correct icon regardless of DE cache state.
 # (Freedesktop spec: absolute paths are used directly, no theme lookup.)
-cat > "$DESKTOP_DIR/apple-music-linux.desktop" <<EOF
+cat > "$DESKTOP_DIR/adam.desktop" <<EOF
 [Desktop Entry]
-Name=Apple Music
+Name=Adam
 GenericName=Music Player
-Comment=Apple Music desktop client for Linux
-Exec=$INSTALL_DIR/apple-music-linux --no-sandbox %u
+Comment=Apple Music desktop client for Linux and Windows
+Exec=$INSTALL_DIR/adam --no-sandbox %u
 Icon=$APP_ICON
 Type=Application
 Categories=AudioVideo;Music;Network;
-StartupWMClass=Apple Music
-MimeType=x-scheme-handler/aml;x-scheme-handler/ame;
+StartupWMClass=Adam
+MimeType=x-scheme-handler/adam;x-scheme-handler/ame;
 Keywords=music;apple;streaming;
 EOF
 
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-xdg-mime default apple-music-linux.desktop x-scheme-handler/aml 2>/dev/null || true
+xdg-mime default adam.desktop x-scheme-handler/adam 2>/dev/null || true
 
 # ── version stamp ─────────────────────────────────────────────────────────────
 echo "$VERSION" > "$INSTALL_DIR/.version"
 
 echo ""
-echo "Apple Music Linux $VERSION installed to $INSTALL_DIR"
-echo "Launcher: $BIN_DIR/apple-music-linux"
+echo "Adam $VERSION installed to $INSTALL_DIR"
+echo "Launcher: $BIN_DIR/adam"
 
 if ! on_path "$BIN_DIR"; then
     echo ""
-    echo "Note: $BIN_DIR is not on your PATH in this session, so 'apple-music-linux' will not be"
+    echo "Note: $BIN_DIR is not on your PATH in this session, so 'adam' will not be"
     echo "found by name yet. It is the standard per-user location for commands, and most systems"
     echo "add it automatically at your next login once the directory exists. If the command is"
     echo "still not found after logging in again, add $BIN_DIR to PATH in your shell's startup file."
-    echo "Until then:  $BIN_DIR/apple-music-linux"
+    echo "Until then:  $BIN_DIR/adam"
 fi
 
 exit 0

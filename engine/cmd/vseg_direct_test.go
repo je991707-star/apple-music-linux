@@ -212,9 +212,9 @@ func TestDirectSeekDisabledByRequestOrEnv(t *testing.T) {
 	if directSeekEnabled(httptest.NewRequest("GET", "/seek?t=1&direct=0", nil)) {
 		t.Fatal("?direct=0 must disable it for the request")
 	}
-	t.Setenv("AML_MV_DIRECT_SEEK", "0")
+	t.Setenv("ADAM_MV_DIRECT_SEEK", "0")
 	if directSeekEnabled(r) {
-		t.Fatal("AML_MV_DIRECT_SEEK=0 must disable it")
+		t.Fatal("ADAM_MV_DIRECT_SEEK=0 must disable it")
 	}
 }
 

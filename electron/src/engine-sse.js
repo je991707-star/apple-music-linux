@@ -8,14 +8,14 @@
  *   • Add jitter to backoff so thundering-herd on engine restart is avoided
  *
  * Usage:
- *   window._amlEngine.on('engine.hello',      data => ...)
- *   window._amlEngine.on('drm',               snap => ...)
- *   window._amlEngine.on('prefetch.cached',   ev   => ...)
- *   window._amlEngine.on('prefetch.done',     ev   => ...)
- *   window._amlEngine.waitFor('engine.hello', 8000).then(data => ...)
+ *   window._adamEngine.on('engine.hello',      data => ...)
+ *   window._adamEngine.on('drm',               snap => ...)
+ *   window._adamEngine.on('prefetch.cached',   ev   => ...)
+ *   window._adamEngine.on('prefetch.done',     ev   => ...)
+ *   window._adamEngine.waitFor('engine.hello', 8000).then(data => ...)
  */
 
-const ENGINE = window._amlEngineURL || 'https://127.0.0.1:20025';
+const ENGINE = window._adamEngineURL || 'https://127.0.0.1:20025';
 
 class EngineSSE {
     constructor(base) {
@@ -76,7 +76,7 @@ class EngineSSE {
             this._generation = gen;
         }
         this._listeners.get(type)?.forEach(fn => {
-            try { fn(data); } catch (e) { console.error('[AML SSE] handler error:', e); }
+            try { fn(data); } catch (e) { console.error('[Adam SSE] handler error:', e); }
         });
     }
 
@@ -97,13 +97,13 @@ class EngineSSE {
 
             this._connected = true;
             this._retryDelay = 1000; // reset on successful connect
-            console.log('[AML SSE] Connected');
+            console.log('[Adam SSE] Connected');
             this._dispatch('sse.open', {}); // local event: lets clients re-send state a restarted engine lost
 
             await this._parseStream(resp.body);
         } catch (e) {
             if (e.name === 'AbortError') return;
-            console.warn('[AML SSE] Disconnected:', e.message);
+            console.warn('[Adam SSE] Disconnected:', e.message);
         }
 
         this._connected = false;
@@ -184,8 +184,8 @@ class EngineSSE {
             this._retryTimer = null;
             this._connect();
         }, delay);
-        if (delay > 1500) console.log(`[AML SSE] Reconnecting in ${Math.round(delay)}ms`);
+        if (delay > 1500) console.log(`[Adam SSE] Reconnecting in ${Math.round(delay)}ms`);
     }
 }
 
-window._amlEngine = new EngineSSE(ENGINE);
+window._adamEngine = new EngineSSE(ENGINE);

@@ -23,7 +23,7 @@ cd "$REPO/electron"
 ESB=(npx esbuild --bundle --format=iife --log-level=warning)
 
 "${ESB[@]}" src/engine-playback.js --outfile=engine-bundle.js
-"${ESB[@]}" src/engine-sse.js --global-name=_amlSSEMod --outfile=engine-sse-bundle.js
+"${ESB[@]}" src/engine-sse.js --global-name=_adamSSEMod --outfile=engine-sse-bundle.js
 "${ESB[@]}" src/smart-cache.js --outfile=smart-cache-bundle.js
 cp src/vision-glass.js vision-bundle.js
 

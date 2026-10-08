@@ -1,7 +1,7 @@
 {
-  "name": "apple-music-linux",
+  "name": "adam",
   "version": "1.4.0",
-  "description": "Apple Music desktop client for Linux",
+  "description": "Adam, an Apple Music desktop client for Linux and Windows",
   "license": "MIT",
   "main": "main.mjs",
   "type": "module",
@@ -21,7 +21,7 @@
     "build:vlc": "bash ../scripts/bundle-vlc.sh",
     "dist:win": "powershell -ExecutionPolicy Bypass -File ../scripts/build-windows.ps1"
   },
-  "desktopName": "apple-music-linux.desktop",
+  "desktopName": "adam.desktop",
   "devDependencies": {
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
@@ -29,9 +29,9 @@
     "mp4box": "^2.4.1"
   },
   "build": {
-    "appId": "com.apple.android.music",
-    "productName": "Apple Music",
-    "copyright": "Apple Inc.",
+    "appId": "io.github.silentone12725.Adam",
+    "productName": "Adam",
+    "copyright": "Copyright (c) Adam contributors",
     "files": [
       "**/*",
       "!node_modules/.bin",
@@ -53,12 +53,12 @@
       "target": "AppImage",
       "icon": "icon.png",
       "category": "AudioVideo",
-      "description": "Apple Music desktop client for Linux",
-      "executableName": "apple-music-linux",
-      "artifactName": "apple-music-linux.AppImage",
+      "description": "Adam, an Apple Music desktop client for Linux and Windows",
+      "executableName": "adam",
+      "artifactName": "adam.AppImage",
       "syncDesktopName": true,
       "mimeTypes": [
-        "x-scheme-handler/aml"
+        "x-scheme-handler/adam"
       ],
       "extraResources": [
         {
@@ -89,7 +89,7 @@
         }
       ],
       "icon": "icon.png",
-      "artifactName": "apple-music-linux-setup-${version}.${ext}",
+      "artifactName": "adam-setup-${version}.${ext}",
       "extraResources": [
         {
           "from": "dist/resources-win",
@@ -103,14 +103,14 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Apple Music",
+      "shortcutName": "Adam",
       "deleteAppDataOnUninstall": false
     },
     "protocols": [
       {
-        "name": "Apple Music",
+        "name": "Adam",
         "schemes": [
-          "aml"
+          "adam"
         ]
       }
     ]

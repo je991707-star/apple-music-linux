@@ -185,14 +185,14 @@ func sanitizePathComponent(s string) string {
 	return s
 }
 
-// defaultOutputDir returns ~/Music/AML-Downloads, falling back through
-// $XDG_MUSIC_DIR/AML-Downloads and $HOME/Music/AML-Downloads.
+// defaultOutputDir returns ~/Music/Adam-Downloads, falling back through
+// $XDG_MUSIC_DIR/Adam-Downloads and $HOME/Music/Adam-Downloads.
 func defaultOutputDir() string {
 	base := xdgMusicDir()
 	if base == "" {
 		base = filepath.Join(homeDir(), "Music")
 	}
-	return filepath.Join(base, "AML-Downloads")
+	return filepath.Join(base, "Adam-Downloads")
 }
 
 func xdgMusicDir() string {

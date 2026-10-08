@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-flatpak.sh — builds dist/apple-music-linux.flatpak, a single-file bundle.
+# build-flatpak.sh — builds dist/adam.flatpak, a single-file bundle.
 #
 # It wraps the unpacked Electron app that scripts/build-installer.sh and `npm run dist`
 # produce (electron/dist/linux-unpacked), so the engine, DRM libraries and VLC are the same
@@ -15,12 +15,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-ID=io.github.silentone12725.AppleMusicLinux
-OUT="$REPO/dist/apple-music-linux.flatpak"
+ID=io.github.silentone12725.Adam
+OUT="$REPO/dist/adam.flatpak"
 
 die() { echo "Error: $*" >&2; exit 1; }
 
-[ -x "$REPO/electron/dist/linux-unpacked/apple-music-linux" ] \
+[ -x "$REPO/electron/dist/linux-unpacked/adam" ] \
     || die "electron/dist/linux-unpacked not found — run scripts/build-installer.sh or 'npm run dist' first"
 command -v flatpak >/dev/null 2>&1 || die "flatpak is required"
 

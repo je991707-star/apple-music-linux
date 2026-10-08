@@ -3,13 +3,13 @@ package aacstream
 // mvcache_dec.go — per-track decrypted MP4 cache with per-user encryption.
 //
 // On first play the full transcoded (decrypted + FFmpeg-remuxed) video is
-// written to ~/.cache/aml/engine/mv-dec/<assetID>.enc while simultaneously
+// written to ~/.cache/adam/engine/mv-dec/<assetID>.enc while simultaneously
 // streaming to the HTTP response.  On subsequent plays the cached file is
 // decrypted on-the-fly via AES-256-CTR and served directly, skipping the
 // entire download → Apple-DRM-decrypt → FFmpeg pipeline.
 //
 // Encryption key: a random 256-bit value generated once and stored at
-// ~/.config/aml/mv-dec.key (mode 0600).  Only the owning Linux user can read
+// ~/.config/adam/mv-dec.key (mode 0600).  Only the owning Linux user can read
 // it; other users on the same machine cannot decrypt the cache.  Reading the
 // 32-byte file costs a single syscall (~microseconds); no KDF iterations.
 // If the key file cannot be persisted, dec-caching is disabled for that run
@@ -21,6 +21,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"engine/internal/appdir"
 	"errors"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ import (
 
 const (
 	mvDecDirName = "engine/mv-dec"
-	mvDecKeyFile = "aml/mv-dec.key" // relative to os.UserConfigDir(); mode 0600
+	mvDecKeyFile = "mv-dec.key" // inside appdir.Config(); mode 0600
 	mvDecIVSize  = 16
 )
 
@@ -57,11 +58,11 @@ var mvDecOnce sync.Once
 func mvDecDirPath() string {
 	mvDecOnce.Do(func() {
 		if mvDecDir == "" {
-			base, err := os.UserCacheDir()
-			if err != nil {
-				base = os.TempDir()
+			mvDecDir = filepath.Join(appdir.Cache(), mvDecDirName)
+			// Earlier versions kept this cache directly under the OS cache root.
+			if old, err := os.UserCacheDir(); err == nil {
+				appdir.MoveInto(filepath.Join(old, mvDecDirName), mvDecDir)
 			}
-			mvDecDir = filepath.Join(base, mvDecDirName)
 		}
 		os.MkdirAll(mvDecDir, 0700)
 
@@ -81,17 +82,13 @@ func mvDecDirPath() string {
 
 // initMVDecKey loads (or generates) the per-user AES-256 key.
 //
-// The key lives at ~/.config/aml/mv-dec.key (mode 0600).  On first call it is
+// The key lives at ~/.config/adam/mv-dec.key (mode 0600).  On first call it is
 // generated from crypto/rand and written; on subsequent calls it is read back.
 // Reading 32 bytes from a local file takes microseconds — no KDF iterations needed.
 // File permissions prevent other Linux users from reading the key.
 func initMVDecKey() {
 	mvDecKeyOnce.Do(func() {
-		cfgDir, err := os.UserConfigDir()
-		if err != nil {
-			cfgDir = filepath.Join(os.Getenv("HOME"), ".config")
-		}
-		keyPath := filepath.Join(cfgDir, mvDecKeyFile)
+		keyPath := filepath.Join(appdir.Config(), mvDecKeyFile)
 
 		raw, rerr := os.ReadFile(keyPath)
 		if rerr == nil && len(raw) == 32 {

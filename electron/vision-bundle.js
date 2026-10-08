@@ -10,13 +10,13 @@
 
 // ── Show-when-ready signal ────────────────────────────────────────────────────
 (function detectUIReady() {
-    if (typeof window.amlReady !== 'function') return;
-    if (window._amlReadyFired) return;
+    if (typeof window.adamReady !== 'function') return;
+    if (window._adamReadyFired) return;
 
     // Poll the engine's DRM status until FairPlay (or Widevine) reports ready.
     // Returns true as soon as either is ready, false after exhausting retries.
     const waitForDRM = async (maxMs = 10000) => {
-        const engine = window._amlEngineURL || 'https://127.0.0.1:20025';
+        const engine = window._adamEngineURL || 'https://127.0.0.1:20025';
         const deadline = Date.now() + maxMs;
         while (Date.now() < deadline) {
             try {
@@ -30,11 +30,11 @@
     };
 
     const fire = async () => {
-        if (window._amlReadyFired) return;
+        if (window._adamReadyFired) return;
         await waitForDRM(10000);
-        if (window._amlReadyFired) return;
-        window._amlReadyFired = true;
-        window.amlReady();
+        if (window._adamReadyFired) return;
+        window._adamReadyFired = true;
+        window.adamReady();
     };
 
     const checkPage = () => {
@@ -56,13 +56,13 @@
 const sheet = new CSSStyleSheet();
 sheet.replaceSync(`
   :root {
-    --aml-glass-blur:    20px;
-    --aml-glass-opacity: 0.07;
+    --adam-glass-blur:    20px;
+    --adam-glass-opacity: 0.07;
     /* Art tint — updated by MutationObserver when album art changes */
-    --aml-art-r: 255;
-    --aml-art-g: 255;
-    --aml-art-b: 255;
-    --aml-art-tint: rgba(var(--aml-art-r), var(--aml-art-g), var(--aml-art-b), 0.4);
+    --adam-art-r: 255;
+    --adam-art-g: 255;
+    --adam-art-b: 255;
+    --adam-art-tint: rgba(var(--adam-art-r), var(--adam-art-g), var(--adam-art-b), 0.4);
   }
 
   html, body { background: transparent !important; }
@@ -71,17 +71,17 @@ sheet.replaceSync(`
      Confirmed stable selector. Svelte hash classes change on every deploy;
      nav.navigation (tag + base class) is stable across versions. */
   nav.navigation {
-    background: var(--aml-nav-bg, color-mix(
+    background: var(--adam-nav-bg, color-mix(
       in srgb,
-      rgba(255, 255, 255, var(--aml-glass-opacity)) 80%,
-      var(--aml-art-tint) 20%
+      rgba(255, 255, 255, var(--adam-glass-opacity)) 80%,
+      var(--adam-art-tint) 20%
     )) !important;
-    backdrop-filter: blur(var(--aml-glass-blur)) saturate(2.2) brightness(1.08) !important;
-    -webkit-backdrop-filter: blur(var(--aml-glass-blur)) saturate(2.2) brightness(1.08) !important;
-    border-right: 1px solid var(--aml-nav-border, rgba(255,255,255,0.12)) !important;
+    backdrop-filter: blur(var(--adam-glass-blur)) saturate(2.2) brightness(1.08) !important;
+    -webkit-backdrop-filter: blur(var(--adam-glass-blur)) saturate(2.2) brightness(1.08) !important;
+    border-right: 1px solid var(--adam-nav-border, rgba(255,255,255,0.12)) !important;
     box-shadow: 1px 0 32px rgba(0,0,0,0.18) !important;
     transition: background 1.4s ease !important;
-    color: var(--aml-nav-text, inherit) !important;
+    color: var(--adam-nav-text, inherit) !important;
   }
 
   /* Strip backgrounds only from layout shells while hovered — :not(:hover)
@@ -94,7 +94,7 @@ sheet.replaceSync(`
   }
   nav.navigation [class*="active"],
   nav.navigation [class*="selected"] {
-    background: var(--aml-accent-active, rgba(255,255,255,0.12)) !important;
+    background: var(--adam-accent-active, rgba(255,255,255,0.12)) !important;
     border-radius: 8px !important;
   }
 
@@ -136,7 +136,7 @@ sheet.replaceSync(`
   /* Stats injected into headings element by JS (initTracklistStatsInHeader).
      No grid-template-areas override — Apple's native two-column desktop layout
      is preserved; stats flows as a block after the subtitle inside headings. */
-  #aml-tracklist-stats {
+  #adam-tracklist-stats {
     display: block;
     font-size: 13px;
     color: rgba(255,255,255,0.52);
@@ -270,7 +270,7 @@ sheet.replaceSync(`
      Apple highlights the active row in Apple Music pink. Use the theme's "active"
      tint instead so search, the nav selection and the MV quality menu all
      highlight with the same colour. The fallback applies because applyTheme in
-     main.mjs REMOVES --aml-accent-active when no palette is set (an empty custom
+     main.mjs REMOVES --adam-accent-active when no palette is set (an empty custom
      property would otherwise defeat the var() fallback). */
   [class*="search-suggestions"] li:hover,
   [class*="search-suggestions"] a:hover,
@@ -280,7 +280,7 @@ sheet.replaceSync(`
   [class*="search-suggestions"] [class*="list-item"]:hover,
   [class*="search-suggestions"] [class*="selected"],
   [class*="search-suggestions"] [class*="highlighted"] {
-    background: var(--aml-accent-active, rgba(255,255,255,0.14)) !important;
+    background: var(--adam-accent-active, rgba(255,255,255,0.14)) !important;
     border-radius: 8px !important;
   }
   /* Keep ONE highlight — the big row hover above. Each row nests title/subtitle
@@ -318,7 +318,7 @@ sheet.replaceSync(`
   }
 
   /* ── iOS/iPadOS-style back + forward navigation buttons (sidebar header row) ── */
-  #aml-nav-buttons {
+  #adam-nav-buttons {
     position: absolute;
     /* top / height set by JS after measuring the header row */
     right: 8%;
@@ -330,7 +330,7 @@ sheet.replaceSync(`
     min-height: 44px;
   }
   nav.navigation { position: relative !important; overflow: visible !important; }
-  .aml-nav-btn {
+  .adam-nav-btn {
     /* explicit box model — hit area == visual circle */
     box-sizing: border-box !important;
     width: 30px !important;
@@ -353,23 +353,23 @@ sheet.replaceSync(`
     position: relative !important;
   }
   /* extend hit area to fill the full visual circle via pseudo-element */
-  .aml-nav-btn::before {
+  .adam-nav-btn::before {
     content: '';
     position: absolute;
     inset: 0;
     border-radius: 50%;
   }
-  .aml-nav-btn:hover:not(:disabled) {
+  .adam-nav-btn:hover:not(:disabled) {
     background: rgba(255,255,255,0.22) !important;
   }
-  .aml-nav-btn:active:not(:disabled) {
+  .adam-nav-btn:active:not(:disabled) {
     transform: scale(0.88);
   }
-  .aml-nav-btn:disabled {
+  .adam-nav-btn:disabled {
     opacity: 0.25;
     cursor: default;
   }
-  .aml-nav-btn svg {
+  .adam-nav-btn svg {
     width: 14px;
     height: 14px;
     fill: none;
@@ -444,9 +444,9 @@ async function sampleArtwork(img) {
         }
         if (n === 0) return;
         const root = document.documentElement;
-        root.style.setProperty('--aml-art-r', Math.round(r / n));
-        root.style.setProperty('--aml-art-g', Math.round(g / n));
-        root.style.setProperty('--aml-art-b', Math.round(b / n));
+        root.style.setProperty('--adam-art-r', Math.round(r / n));
+        root.style.setProperty('--adam-art-g', Math.round(g / n));
+        root.style.setProperty('--adam-art-b', Math.round(b / n));
     } catch (_) {}
 }
 
@@ -506,7 +506,7 @@ function _findInNavStack(stack, cursor, href) {
 
 // ── iOS/iPadOS-style back + forward buttons ───────────────────────────────────
 (function mountNavButtons() {
-    if (document.getElementById('aml-nav-buttons')) return;
+    if (document.getElementById('adam-nav-buttons')) return;
 
     // ── Browser-style history stack ───────────────────────────────────────────
     // Home is the initial entry. pushState appends and truncates forward entries
@@ -550,7 +550,7 @@ function _findInNavStack(stack, cursor, href) {
 
     // ── DOM ───────────────────────────────────────────────────────────────────
     const wrap = document.createElement('div');
-    wrap.id = 'aml-nav-buttons';
+    wrap.id = 'adam-nav-buttons';
 
     const chevronLeft  = `<svg viewBox="0 0 14 14"><polyline points="9,2 4,7 9,12"/></svg>`;
     const chevronRight = `<svg viewBox="0 0 14 14"><polyline points="5,2 10,7 5,12"/></svg>`;
@@ -559,22 +559,22 @@ function _findInNavStack(stack, cursor, href) {
 
     // Mini-player toggle sits left of the arrows (first in the row).
     const mini = document.createElement('button');
-    mini.id = 'aml-miniplayer-btn';
-    mini.className = 'aml-nav-btn';
+    mini.id = 'adam-miniplayer-btn';
+    mini.className = 'adam-nav-btn';
     mini.innerHTML = miniIcon;
     mini.title = 'Mini Player';
     mini.setAttribute('aria-label', 'Mini Player');
-    mini.addEventListener('click', () => { window.amlBridge?.toggleMiniPlayer?.(); });
+    mini.addEventListener('click', () => { window.adamBridge?.toggleMiniPlayer?.(); });
 
     const back = document.createElement('button');
-    back.className = 'aml-nav-btn';
+    back.className = 'adam-nav-btn';
     back.innerHTML = chevronLeft;
     back.title = 'Back';
     back.setAttribute('aria-label', 'Go back');
     back.disabled = true;
 
     const fwd = document.createElement('button');
-    fwd.className = 'aml-nav-btn';
+    fwd.className = 'adam-nav-btn';
     fwd.innerHTML = chevronRight;
     fwd.title = 'Forward';
     fwd.setAttribute('aria-label', 'Go forward');
@@ -594,7 +594,7 @@ function _findInNavStack(stack, cursor, href) {
     wrap.appendChild(fwd);
 
     const attach = () => {
-        if (document.getElementById('aml-nav-buttons')) return;
+        if (document.getElementById('adam-nav-buttons')) return;
         const nav = document.querySelector('nav.navigation');
         const header = _findNavHeader();
         if (!nav || !header) return;
@@ -628,6 +628,6 @@ function _findInNavStack(stack, cursor, href) {
 
     // Re-attach if SPA navigation removes and recreates the nav element
     new MutationObserver(() => {
-        if (!document.getElementById('aml-nav-buttons') && _findNavHeader()) attach();
+        if (!document.getElementById('adam-nav-buttons') && _findNavHeader()) attach();
     }).observe(document.documentElement, { childList: true, subtree: true });
 })();

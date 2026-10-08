@@ -38,6 +38,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"engine/internal/appdir"
 	"fmt"
 	"log/slog"
 	"net"
@@ -532,7 +533,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	// For native backend, use a default path if not set
 	if drmBaseDir == "" {
-		drmBaseDir = filepath.Join(os.TempDir(), "aml-drm", "files")
+		drmBaseDir = filepath.Join(os.TempDir(), "adam-drm", "files")
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
@@ -544,7 +545,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		drmDir = drmBinaryPath
 	}
 	if drmDir == "" {
-		drmDir = filepath.Join(os.TempDir(), "aml-drm")
+		drmDir = filepath.Join(os.TempDir(), "adam-drm")
 	}
 	drmBackend = drm.WidevineBackend(drmDir)
 	if drmBackend != nil {
@@ -569,7 +570,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 				}
 				s.events.emit("drm", snap)
 			},
-			drm.BackendConfig{BaseDir: drmBaseDir, DisableHiRes: os.Getenv("AML_DISABLE_HIRES") == "1"},
+			drm.BackendConfig{BaseDir: drmBaseDir, DisableHiRes: os.Getenv("ADAM_DISABLE_HIRES") == "1"},
 			drm.DefaultRestartPolicy,
 		)
 	} else {
@@ -626,8 +627,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// Disk cache — decrypted per-track audio; falls back gracefully on error.
 	// Limits (persistLimitMB, persistTTLDays) are pushed by the frontend on
 	// startup via PUT /api/v1/cache/config; zero means unlimited / no TTL.
-	if cacheBase, err := os.UserCacheDir(); err == nil {
-		if dc, err := diskcache.New(filepath.Join(cacheBase, "apple-music-linux", "playback")); err == nil {
+	if cacheBase := appdir.Cache(); cacheBase != "" {
+		if dc, err := diskcache.New(filepath.Join(cacheBase, "playback")); err == nil {
 			s.diskCache = dc
 			s.alac = newALACGate()
 			go func() {
@@ -645,7 +646,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		}
 
 		// Library metadata cache — songs + playlist membership for instant queue ops.
-		libCacheDir := filepath.Join(cacheBase, "apple-music-linux")
+		libCacheDir := cacheBase
 		if err := os.MkdirAll(libCacheDir, 0o700); err == nil { // holds library.key
 			s.libStore = library.New(libCacheDir)
 			// Auto-sync removed: the Go-side API client cannot authenticate with
@@ -767,8 +768,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// (goroutines, heap, GC) — things only the engine process itself can report.
 	// /debug/pprof/* serves standard profiles for flamegraphs.
 	mux.HandleFunc("GET /api/v1/debug/runtime", cors(s.handleRuntimeStats))
-	// pprof heap dumps expose in-memory key material; only register when AML_DEBUG=1.
-	if os.Getenv("AML_DEBUG") == "1" {
+	// pprof heap dumps expose in-memory key material; only register when ADAM_DEBUG=1.
+	if os.Getenv("ADAM_DEBUG") == "1" {
 		mux.HandleFunc("GET /debug/pprof/", httppprof.Index)
 		mux.HandleFunc("GET /debug/pprof/cmdline", httppprof.Cmdline)
 		mux.HandleFunc("GET /debug/pprof/profile", httppprof.Profile)
@@ -782,7 +783,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// to include Access-Control-Allow-Private-Network: true when fetching
 	// across localhost ports (CORS-RFC1918 / Private Network Access).
 	s.srv = &http.Server{
-		Handler:           corsPreflightHandler(requireToken(os.Getenv("AML_API_TOKEN"), mux)),
+		Handler:           corsPreflightHandler(requireToken(os.Getenv("ADAM_API_TOKEN"), mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
@@ -1071,9 +1072,9 @@ func randID() string {
 
 // exportRoots returns the directories exports may write into. The request body that names
 // the output directory comes from a web page, so by default it is confined to the user's
-// home; AML_EXPORT_ROOTS (a colon-separated list) replaces that.
+// home; ADAM_EXPORT_ROOTS (a colon-separated list) replaces that.
 func exportRoots() []string {
-	if v := os.Getenv("AML_EXPORT_ROOTS"); v != "" {
+	if v := os.Getenv("ADAM_EXPORT_ROOTS"); v != "" {
 		return filepath.SplitList(v)
 	}
 	if home, err := os.UserHomeDir(); err == nil {

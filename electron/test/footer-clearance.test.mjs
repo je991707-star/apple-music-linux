@@ -12,7 +12,7 @@ test('footer keeps its box (player-bar clearance) and only its content is hidden
 });
 
 test('no background strip or forced scroll padding remains', () => {
-  assert.ok(!src.includes('aml-bg-strip'));
+  assert.ok(!src.includes('adam-bg-strip'));
   assert.ok(!/scrollable-page"\]\s*\{\s*padding-bottom/.test(src));
 });
 

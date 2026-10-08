@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-installer.sh — builds dist/apple-music-linux.run (the version is inside, not in the name)
+# build-installer.sh — builds dist/adam.run (the version is inside, not in the name)
 #
 # Every component is rebuilt from source on each run, then the packaged result is checked
 # against the fresh build, so the installer cannot silently carry a stale engine, DRM
@@ -51,7 +51,7 @@ UNPACKED="$STAGE/linux-unpacked"
 # The staging copy is several hundred MB: remove it whether the build succeeds or fails.
 trap 'rm -rf "$STAGE" "$STAGE.manifest"' EXIT
 
-echo "Building Apple Music Linux $VERSION ($COMMIT) installer..."
+echo "Building Adam $VERSION ($COMMIT) installer..."
 
 # ── 0. pre-flight ─────────────────────────────────────────────────────────────
 echo "[0/7] Checking prerequisites..."
@@ -157,9 +157,9 @@ done
 
 mkdir -p "$OUT"
 HEADER="$REPO/scripts/installer-header.sh"
-OUTFILE="$OUT/apple-music-linux.run"
+OUTFILE="$OUT/adam.run"
 # an older build named after its version would sit beside the new file and be mistaken for it
-rm -f "$OUT"/apple-music-linux-*.run
+rm -f "$OUT"/adam-*.run
 
 # Write header with version substituted
 sed "s/__VERSION__/$VERSION/g" "$HEADER" > "$OUTFILE"

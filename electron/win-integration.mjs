@@ -4,7 +4,7 @@
 import path from 'path';
 import zlib from 'zlib';
 
-export const APP_USER_MODEL_ID = 'com.apple.android.music';
+export const APP_USER_MODEL_ID = 'io.github.silentone12725.Adam';
 
 // ── Pure helpers (unit-tested) ───────────────────────────────────────────────
 
@@ -66,10 +66,10 @@ export function makeIconPng(shape, size = 32) {
 
 const TRANSPORT_CMDS = new Set(['play', 'pause', 'playpause', 'next', 'previous']);
 
-// `--aml-cmd=playpause` from a jump-list task or a second launch.
+// `--adam-cmd=playpause` from a jump-list task or a second launch.
 export function parseCmdArg(argv) {
     for (const a of argv || []) {
-        const m = /^--aml-cmd=(\w+)$/.exec(a);
+        const m = /^--adam-cmd=(\w+)$/.exec(a);
         if (m && TRANSPORT_CMDS.has(m[1])) return m[1];
     }
     return null;
@@ -86,8 +86,8 @@ export function mediaSessionScript(state) {
   const ms = navigator.mediaSession;
   if (!ms) return 'no-mediasession';
   const w = window;
-  if (!w.__amlSmtc) {
-    const send = (c) => w.amlBridge && w.amlBridge.mediaCmd && w.amlBridge.mediaCmd(c);
+  if (!w.__adamSmtc) {
+    const send = (c) => w.adamBridge && w.adamBridge.mediaCmd && w.adamBridge.mediaCmd(c);
     const map = { play: 'play', pause: 'pause', stop: 'pause', nexttrack: 'next', previoustrack: 'previous' };
     for (const [a, c] of Object.entries(map)) { try { ms.setActionHandler(a, () => send(c)); } catch (e) {} }
     try { ms.setActionHandler('seekto', (d) => send({ type: 'setPosition', ms: Math.round((d.seekTime || 0) * 1000) })); } catch (e) {}
@@ -103,9 +103,9 @@ export function mediaSessionScript(state) {
     new Uint8Array(buf, 44).fill(128);
     a.src = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
     a.loop = true;
-    w.__amlSmtc = { audio: a };
+    w.__adamSmtc = { audio: a };
   }
-  const k = w.__amlSmtc.audio;
+  const k = w.__adamSmtc.audio;
   if (s.metadata) {
     const m = s.metadata;
     ms.metadata = new MediaMetadata({
@@ -154,7 +154,7 @@ export function createWinIntegration({ app, getWin, sendCmd, nativeImage }) {
 
     function setJumpList() {
         const task = (cmd, title, description) => ({
-            program: process.execPath, arguments: `${appArg}--aml-cmd=${cmd}`,
+            program: process.execPath, arguments: `${appArg}--adam-cmd=${cmd}`,
             iconPath: process.execPath, iconIndex: 0, title, description,
         });
         app.setUserTasks([
