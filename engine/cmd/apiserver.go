@@ -532,21 +532,21 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	// For native backend, use a default path if not set
 	if drmBaseDir == "" {
-		drmBaseDir = "/tmp/aml-drm/files"
+		drmBaseDir = filepath.Join(os.TempDir(), "aml-drm", "files")
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
 	// WidevineBackend (in-process CGO, libdrm_client.so) is the DRM backend.
-	// NewWidevineBackend returns nil when the widevine_backend build tag is absent.
+	// WidevineBackend returns nil when the widevine_backend build tag is absent.
 	var drmBackend drm.DRMBackend
 	var drmDir string // directory containing libdrm_client.so and files/
 	if drmBinaryPath != "" {
 		drmDir = drmBinaryPath
 	}
 	if drmDir == "" {
-		drmDir = "/tmp/aml-drm"
+		drmDir = filepath.Join(os.TempDir(), "aml-drm")
 	}
-	drmBackend = drm.NewWidevineBackend(drmDir)
+	drmBackend = drm.WidevineBackend(drmDir)
 	if drmBackend != nil {
 		s.backendName = "widevine"
 		slog.Info("DRM backend", "name", "widevine")

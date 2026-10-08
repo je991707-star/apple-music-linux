@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,6 +172,9 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 // libVLC is embedded in the Go engine, so PipeWire names the stream after the
 // engine process rather than after a standalone "vlc" application.
 func resetPipeWireVolume(vol int) {
+	if runtime.GOOS != "linux" {
+		return
+	}
 	out, err := exec.Command("pactl", "list", "sink-inputs").Output()
 	if err != nil {
 		return

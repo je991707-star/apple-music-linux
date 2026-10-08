@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -51,6 +52,9 @@ func IsAvailable() bool { return cavernBinary() != "" }
 
 // cavernBinary returns the path to the CavernPipeServer binary.
 func cavernBinary() string {
+	if runtime.GOOS == "windows" {
+		return "" // the Cavern bridge is a Unix socket; Windows binaural uses the FFmpeg path
+	}
 	if env := os.Getenv("AML_CAVERN"); env != "" {
 		return env
 	}

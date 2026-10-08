@@ -5,6 +5,13 @@ Changelog, and releases are numbered MAJOR.MINOR.PATCH (the early ones were publ
 pre-releases). Narrative release notes for 1.4.0 are in releases/v1.4.0.md; earlier ones are on
 the project's Releases page.
 
+## Unreleased
+
+### Windows
+- **Windows 10/11 x64 support.** NSIS installer built by `scripts/build-windows.ps1`; the DRM library is a MinGW DLL (`drm_linux.c` + libcrypto) and the engine builds with cgo and libvlc.
+- **System integration.** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `aml://` links, Discord Rich Presence over the named pipe, Mica backdrop and a Windows-native config location.
+- **DRM backend renamed `widevine`** (`WidevineBackend`, build tag `widevine_backend`, was `native_backend`); the hybris/Android runtime was removed.
+
 ## 1.4.0 - 2026-10-06
 
 A major release: 304 commits across 689 files since 1.3.0. Grouped by area because of its

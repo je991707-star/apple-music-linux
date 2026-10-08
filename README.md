@@ -4,9 +4,9 @@
 
 [![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-linux%20x86__64-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 
-An Apple Music desktop client for Linux — lossless audio, music videos, downloads, and a native-feeling UI.
+An Apple Music desktop client for Linux and Windows — lossless audio, music videos, downloads, and a native-feeling UI.
 
 <div align="center">
   <img src="assets/screenshots/Blur-preview.png" alt="Blur theme" width="49%"/>
@@ -179,6 +179,19 @@ Things to know:
 - Wallpaper detection for the blur theme is limited by the sandbox; the software blur is used instead.
 - This is a self-hosted bundle, not a Flathub listing.
 
+### Option D — Windows installer (experimental)
+
+`apple-music-linux-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine, the DRM library and an audio-only VLC. The app follows Windows conventions: settings in `%APPDATA%\apple-music-linux`, Mica window backdrop on Windows 11, and the same Apple Music pink default theme.
+
+Windows integration:
+
+- **Media controls** — the Windows media overlay, lock screen and hardware media keys show the current track and drive play/pause/next/previous/seek (SMTC).
+- **Taskbar** — thumbnail buttons (previous, play/pause, next), playback progress on the taskbar icon, and jump-list tasks.
+- **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `aml://` link handler.
+- **Discord Rich Presence** over the Windows named pipe.
+
+Not available on Windows yet: Cavern (Atmos JOC) rendering and the bundled FFmpeg (music-video remux and export use an `ffmpeg.exe` on `PATH` if present).
+
 ### GNOME
 
 The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass UI uses a software blur fallback on GNOME — Mutter does not support compositor blur-behind.
@@ -252,6 +265,15 @@ bash build.sh                         # bundle the audio-only VLC subset → dis
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
 cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linux.run
 scripts/build-flatpak.sh                # Flatpak bundle → dist/apple-music-linux.flatpak (after one of the above)
+```
+
+### Windows
+
+Needs [MSYS2](https://www.msys2.org) UCRT64 (`pacman -S mingw-w64-ucrt-x86_64-{gcc,make,openssl}`) on `PATH`, Go, Node, git and a 64-bit VLC 3.x install:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1      # installer in electron\dist
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -SkipInstaller
 ```
 
 ### Cleaning

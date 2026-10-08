@@ -1,4 +1,4 @@
-//go:build linux && widevine_backend
+//go:build (linux || windows) && widevine_backend
 
 package drm
 

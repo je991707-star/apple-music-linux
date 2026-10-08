@@ -1,10 +1,11 @@
-//go:build linux && widevine_backend
+//go:build (linux || windows) && widevine_backend
 
 package drm
 
 /*
-#cgo CFLAGS: -D_GNU_SOURCE
-#cgo LDFLAGS: -ldrm_client -lcrypto -lssl -ldl
+#cgo linux CFLAGS: -D_GNU_SOURCE
+#cgo linux LDFLAGS: -ldrm_client -lcrypto -lssl -ldl
+#cgo windows LDFLAGS: -ldrm_client
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -119,9 +120,9 @@ func (b *widevineBackend) currentGen() uint64 {
 	return b.gen
 }
 
-// NewWidevineBackend creates a new native DRM backend
+// WidevineBackend creates the in-process Widevine DRM backend
 // drmDir is the directory containing libdrm_client.so and files/ folder with credentials
-func NewWidevineBackend(drmDir string) DRMBackend {
+func WidevineBackend(drmDir string) DRMBackend {
 	b := &widevineBackend{
 		drmDir:  drmDir,
 		eventCh: make(chan DRMEvent, 16),

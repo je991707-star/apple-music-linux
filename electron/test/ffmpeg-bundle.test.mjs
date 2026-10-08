@@ -4,6 +4,7 @@
 //
 //   node --test electron/test/ffmpeg-bundle.test.mjs
 import { test } from 'node:test';
+import { engineLibEnv } from '../platform.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -21,13 +22,14 @@ const REAL = isReal(path.join(FF, 'bin', 'ffmpeg'));
 const PKG = JSON.parse(readFileSync(path.join(ELECTRON, 'package.json'), 'utf8'));
 
 test('the engine is started with the bundled ffmpeg first on PATH and its libraries visible to VLC', () => {
-    assert.match(MAIN, /PATH:\s*\[path\.join\(_ffDir,\s*'bin'\)/);
-    assert.match(MAIN, /LD_LIBRARY_PATH:\s*\[_vlcDir,\s*path\.join\(_ffDir,\s*'lib'\)/);
-    assert.match(MAIN, /\.\.\.vlcEnv,\s*\.\.\.ffEnv/);
+    const e = engineLibEnv({ plat: 'linux', env: { PATH: '/usr/bin' }, vlcDir: '/v', ffDir: '/f', resDir: '/r', hasVlc: true, hasFfmpeg: true });
+    assert.ok(e.PATH.startsWith('/f/bin:'), 'bundled ffmpeg must come first on PATH');
+    assert.match(e.LD_LIBRARY_PATH, /^\/v:\/f\/lib/);
+    assert.match(MAIN, /\.\.\.libEnv/, 'main.mjs must pass the library environment to the engine');
 });
 
 test('electron-builder ships third_party/ffmpeg as resources/ffmpeg', () => {
-    const r = PKG.build.extraResources.find((e) => e.from === '../third_party/ffmpeg');
+    const r = [...(PKG.build.extraResources || []), ...(PKG.build.linux?.extraResources || [])].find((e) => e.from === '../third_party/ffmpeg');
     assert.ok(r, 'extraResources entry missing');
     assert.equal(r.to, 'ffmpeg');
 });

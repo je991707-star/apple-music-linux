@@ -3,18 +3,24 @@
 # Builds libdrm_client.so shared library and test executable.
 
 CC = gcc
+
+ifeq ($(OS),Windows_NT)
+# Windows (MinGW/UCRT64): the engine only needs the key-context shim, which depends on
+# libcrypto alone. The import library lets cgo link with -ldrm_client.
+CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -O2 -g -Wno-format-truncation
+LDFLAGS_LIB = -shared -lcrypto -Wl,--out-implib,libdrm_client.dll.a
+SRCS = drm_linux.c
+TARGET = libdrm_client.dll
+else
 CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -Wno-format-truncation
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lcurl -Wl,-z,relro,-z,now
-LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
-
-# Core source files
 SRCS = drm_client.c drm_linux.c fairplay.c fairplay_device.c \
        fp_spc_builder.c fp_ckc_parser.c fp_key_unwrapper.c \
        fp_http_client.c fp_license_exchange.c
-OBJS = $(SRCS:.c=.o)
-
-# Target library
 TARGET = libdrm_client.so
+endif
+LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
+OBJS = $(SRCS:.c=.o)
 
 # Headers
 HEADERS = drm_client.h drm_types.h fairplay.h fairplay_device.h \
@@ -22,7 +28,7 @@ HEADERS = drm_client.h drm_types.h fairplay.h fairplay_device.h \
           fp_http_client.h fp_license_exchange.h
 
 # Linux shim compilation rule
-drm_linux.o: drm_linux.c drm_types.h fairplay.h
+drm_linux.o: drm_linux.c drm_types.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Test files

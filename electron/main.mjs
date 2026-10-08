@@ -1,5 +1,5 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, systemPreferences, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
@@ -16,15 +16,15 @@ import os from 'os';
 import { isatty } from 'tty';
 import net from 'net';
 import crypto from 'crypto';
+import { IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, listeningPid, yamlStr, isPortFree as _portFree } from './platform.mjs';
+import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Persistence ──────────────────────────────────────────────────────────────
-// Inside a Flatpak the real ~/.config is not visible; XDG_CONFIG_HOME points at the app's own
-// persistent directory. Everywhere else keep the long-standing ~/.config location.
-const CONFIG_DIR = path.join(process.env.FLATPAK_ID && process.env.XDG_CONFIG_HOME
-    ? process.env.XDG_CONFIG_HOME : path.join(os.homedir(), '.config'), 'apple-music-linux');
+// %APPDATA% on Windows; ~/.config elsewhere (or the Flatpak's own XDG_CONFIG_HOME). See platform.mjs.
+const CONFIG_DIR = path.join(configRoot(), 'apple-music-linux');
 const PREF_FILE  = path.join(CONFIG_DIR, 'electron-prefs.json');
 
 function loadPrefs() {
@@ -69,6 +69,8 @@ function _storeFlush() {
 }
 
 // ── Chromium flags ──────────────────────────────────────────────────────────
+if (IS_WIN) app.setAppUserModelId(APP_USER_MODEL_ID); // taskbar grouping, toasts and SMTC identity
+if (IS_LINUX) {
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 app.commandLine.appendSwitch('enable-features',
     'UseOzonePlatform,WaylandWindowDecorations,' +
@@ -89,6 +91,7 @@ app.commandLine.appendSwitch('ignore-gpu-blocklist');
 app.commandLine.appendSwitch('disable-features',
     'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess');
 app.setDesktopName('apple-music-linux.desktop');
+}
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 // Music player: allow audio.play() without a live user gesture. Without this,
 // _nativePlay() called from the async canplay handler is blocked by Chromium's
@@ -99,16 +102,20 @@ app.commandLine.appendSwitch('enable-smooth-scrolling');
 // Chromium flag required for transparent windows on Linux.
 // Hyprland/KWin handle the compositor-level blur-behind on the desktop
 // side; Chromium just needs to render RGBA frames correctly.
-app.commandLine.appendSwitch('enable-transparent-visuals');
+if (IS_LINUX) app.commandLine.appendSwitch('enable-transparent-visuals');
 // Sandbox detection: requires both unprivileged user namespaces AND a non-FUSE
 // root. AppImages use FUSE mounts that break the zygote sandbox startup even
 // when namespaces work, so we disable it whenever APPIMAGE is set.
-let _hasSandbox = !process.env.APPIMAGE;
-try { execFileSync('unshare', ['--user', '--pid', 'true'], { stdio: 'ignore' }); }
-catch { _hasSandbox = false; app.commandLine.appendSwitch('no-sandbox'); }
+let _hasSandbox = IS_LINUX ? !process.env.APPIMAGE : true;
+if (IS_LINUX) {
+    try { execFileSync('unshare', ['--user', '--pid', 'true'], { stdio: 'ignore' }); }
+    catch { _hasSandbox = false; app.commandLine.appendSwitch('no-sandbox'); }
+}
 
 let win    = null;
 let tray   = null;
+let winIntegration = null; // Windows only: SMTC, taskbar buttons, jump list, login item
+const _startHidden = process.argv.includes('--hidden');
 let engineProc = null;
 let isQuitting = false;
 let _engineRestartDelay = 1000; // ms; doubles on each crash, resets on clean uptime
@@ -162,7 +169,8 @@ function _dispatchDeepLink(url) {
 }
 
 // Register custom aml:// URI scheme so `xdg-open aml://song/123` opens AML.
-app.setAsDefaultProtocolClient('aml');
+if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient('aml', process.execPath, [path.resolve(process.argv[1])]);
+else app.setAsDefaultProtocolClient('aml');
 
 // Single-instance lock: if a second instance opens (e.g. user clicked a link
 // while AML is already running), forward the URL to the existing instance.
@@ -173,6 +181,7 @@ if (!_gotLock) {
     app.quit();
 }
 app.on('second-instance', (_e, argv) => {
+    if (winIntegration?.handleArgv(argv)) return; // jump-list transport command
     // argv[argv.length - 1] is the URL on Linux (passed by xdg-open / the OS)
     const url = argv.find(a => a.startsWith('aml://') || a.startsWith('https://music.apple.com'));
     if (url) _dispatchDeepLink(url);
@@ -187,8 +196,8 @@ app.on('second-instance', (_e, argv) => {
 //  1. AML_ENGINE_BIN environment variable (manual override / CI)
 //  2. <resources>/engine  (packaged Electron — app.isPackaged)
 //  3. dist/resources/engine  (dev: electron . from electron/ dir)
-const _resPkgBin  = path.join(process.resourcesPath, 'engine');
-const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'engine');
+const _resPkgBin  = path.join(process.resourcesPath, engineFileName());
+const _resDevBin  = path.join(__dirname, 'dist', 'resources', engineFileName());
 const ENGINE_BIN  = process.env.AML_ENGINE_BIN ||
     (app.isPackaged ? _resPkgBin : (existsSync(_resDevBin) ? _resDevBin : _resPkgBin));
 
@@ -260,7 +269,7 @@ function ensureEngineConfig() {
             'get-m3u8-mode: hires',
             'aac-type: aac-lc',
             'alac-max: 192000',
-            `drm-base-dir: "${drmBase}"`,
+            `drm-base-dir: ${yamlStr(drmBase)}`,
         ].join('\n') + '\n';
         writeFileSync(cfgPath, stub);
         return;
@@ -272,12 +281,12 @@ function ensureEngineConfig() {
     content = content.replace(/^drm-binary-path:.*\n?/m, '');
     let changed = content !== readFile(cfgPath, 'utf8');
     for (const [key, val] of [['drm-base-dir', drmBase]]) {
-        const line = `${key}: "${val}"`;
+        const line = `${key}: ${yamlStr(val)}`;
         if (!content.includes(`${key}:`)) {
             content += `${line}\n`;
             changed = true;
         } else if (!content.includes(line)) {
-            content = content.replace(new RegExp(`${key}:.*`), line);
+            content = content.replace(new RegExp(`${key}:.*`), () => line);
             changed = true;
         }
     }
@@ -292,11 +301,8 @@ function execFileAsync(cmd, args, opts = {}) {
 
 async function killStaleEngine(port) {
     // SIGKILL anything on the port — no graceful shutdown needed for a stale engine.
-    const out = await execFileAsync('ss', ['-tlnpH', `sport = :${port}`],
-        { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const m = out.match(/pid=(\d+)/);
-    if (m) {
-        const pid = parseInt(m[1], 10);
+    const pid = await listeningPid(port);
+    if (pid) {
         console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
         try { process.kill(pid, 'SIGKILL'); } catch (_) {}
     }
@@ -317,10 +323,7 @@ async function killStaleEngine(port) {
     } catch (_) {}
 }
 
-async function isPortFree(port) {
-    const out = await execFileAsync('ss', ['-tlnH', `sport = :${port}`], { timeout: 1000 });
-    return out.trim() === '';
-}
+async function isPortFree(port) { return _portFree(port); }
 
 async function startEngine() {
     if (engineProc) return;
@@ -335,18 +338,22 @@ async function startEngine() {
         await new Promise(r => setTimeout(r, 100));
     }
     ensureEngineConfig();
-    const vlcEnv = existsSync(_vlcDir) ? {
-        LD_LIBRARY_PATH: [_vlcDir, path.join(_ffDir, 'lib'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
-        VLC_PLUGIN_PATH: path.join(_vlcDir, 'plugins'),
-    } : {};
-    const ffEnv = existsSync(path.join(_ffDir, 'bin', 'ffmpeg'))
-        ? { PATH: [path.join(_ffDir, 'bin'), process.env.PATH].filter(Boolean).join(':') } : {};
+    const libEnv = engineLibEnv({
+        vlcDir: _vlcDir, ffDir: _ffDir, resDir: path.dirname(ENGINE_BIN),
+        hasVlc: existsSync(_vlcDir),
+        hasFfmpeg: existsSync(path.join(_ffDir, 'bin', IS_WIN ? 'ffmpeg.exe' : 'ffmpeg')),
+    });
+    // Windows env names are case-insensitive: spreading process.env keeps "Path", so drop it
+    // before adding our PATH or the child would see two competing entries.
+    const baseEnv = { ...process.env };
+    if (IS_WIN && libEnv.PATH) delete baseEnv.Path;
     engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
         cwd: ENGINE_DATA_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
         // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
         // when the engine makes HTTP requests to Apple's API servers.
-        env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv, ...ffEnv },
+        env: { ...baseEnv, GODEBUG: 'netdns=go', ...libEnv },
     });
     const onOut = (d) => console.log('[engine]', d.toString().trimEnd());
     const onErr = (d) => {
@@ -408,13 +415,13 @@ console.log(`[AML] Compositor: desktop=${_desktop || '(unset)'} wayland=${_isWay
 // Used on X11 or Wayland compositors that don't support blur-behind (GNOME/Sway).
 // Captures a desktop screenshot, sends it to the renderer as a blurred CSS background.
 // KDE is excluded: we use the native _KDE_NET_WM_BLUR_BEHIND_REGION atom instead.
-let _useSoftBlur = !_isKde && (!_isWayland ||
+let _useSoftBlur = IS_LINUX && !_isKde && (!_isWayland ||
     ['gnome', 'sway', 'unity', 'cosmic', 'budgie'].some(d => _desktop.includes(d)));
 
 // GPU crash → activate software blur regardless of compositor so the window
 // doesn't show a black void.
 app.on('gpu-process-crashed', (_event, killed) => {
-    if (killed) return;
+    if (killed || !IS_LINUX) return;
     console.warn('[AML] GPU process crashed — activating software blur fallback');
     _useSoftBlur = true;
     refreshBlurBg();
@@ -537,7 +544,18 @@ function _applyHyprlandWallpaperBlur(bwin) {
     } catch (e) { console.warn('[AML] Hyprland wallpaper blur failed:', e.message); }
 }
 
+// Default theme accent. Windows' stock accent is blue, so there the default stays Apple Music pink
+// and the system accent is only offered as an explicit choice (themeInfo.systemAccent).
+async function _getDefaultAccent() { return IS_WIN ? '#fc3c44' : _getSystemAccent(); }
+
 async function _getSystemAccent() {
+    if (IS_WIN) {
+        try {
+            const c = systemPreferences.getAccentColor(); // RRGGBBAA
+            if (/^[0-9a-f]{6}/i.test(c)) return '#' + c.slice(0, 6).toLowerCase();
+        } catch {}
+        return '#fc3c44';
+    }
     if (_isKde) {
         try {
             const out = execFileSync('kreadconfig5', ['--file', 'kdeglobals', '--group', 'General', '--key', 'AccentColor'], { encoding: 'utf8' }).trim();
@@ -787,9 +805,12 @@ function createWindow() {
         // the desktop behind the window with its own blur effect, giving
         // us the visionOS "glass over room" look for free.
         backgroundColor: '#00000000',
-        transparent: true,
+        // Windows: DWM cannot draw Mica behind a layered transparent window, so use the
+        // system backdrop material instead (Windows 11; older builds fall back to a solid frame).
+        transparent: !IS_WIN,
+        ...(IS_WIN ? { backgroundMaterial: 'mica' } : {}),
         show: false,
-        title: 'Apple Music Linux',
+        title: IS_LINUX ? 'Apple Music Linux' : 'Apple Music',
         webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
@@ -830,6 +851,7 @@ function createWindow() {
     const showWindow = () => {
         if (shown) return;
         shown = true;
+        if (_startHidden) return; // launched at login: stay in the tray until asked
         win.setOpacity(0);
         win.show();
         // Ramp opacity 0→1 over ~300 ms so it fades in smoothly.
@@ -1400,7 +1422,7 @@ function applyPersistedViewSettings() {
         if (p.themePalette) {
             _applyThemeVars(p.themePalette);
         } else {
-            _getSystemAccent().then(accent => {
+            _getDefaultAccent().then(accent => {
                 const palette = _generatePalette(accent, p.themeAppearance || 'dark');
                 const fresh = loadPrefs();
                 fresh.themePalette = palette;
@@ -1576,7 +1598,7 @@ ipcMain.handle('theme:get-info', async () => {
 ipcMain.on('theme:set-appearance', async (_, appearance) => {
     const p = loadPrefs();
     p.themeAppearance = appearance;
-    const accent = p.themePalette?.accent || await _getSystemAccent();
+    const accent = p.themePalette?.accent || await _getDefaultAccent();
     p.themePalette = _generatePalette(accent, appearance);
     savePrefs(p);
     _applyThemeVars(p.themePalette);
@@ -1586,7 +1608,7 @@ ipcMain.on('theme:set-mode', async (_, mode) => {
     const p = loadPrefs();
     p.themeMode = mode;
     if (mode === 'accent') {
-        if (!p.themePalette) p.themePalette = _generatePalette(await _getSystemAccent());
+        if (!p.themePalette) p.themePalette = _generatePalette(await _getDefaultAccent());
         savePrefs(p);
         await _clearCustomCss();
         _applyThemeVars(p.themePalette);
@@ -1613,7 +1635,7 @@ ipcMain.on('theme:set-palette', (_, key, value) => {
 
 ipcMain.handle('theme:reset-palette', async () => {
     const p = loadPrefs();
-    p.themePalette = _generatePalette(await _getSystemAccent(), p.themeAppearance || 'dark');
+    p.themePalette = _generatePalette(await _getDefaultAccent(), p.themeAppearance || 'dark');
     savePrefs(p);
     _applyThemeVars(p.themePalette);
     return p.themePalette;
@@ -1741,11 +1763,13 @@ ipcMain.handle('eq:open-file', async (_, arg) => {
 // KDE Connect, etc.) via the org.mpris.MediaPlayer2 D-Bus interface.
 let mprisPlayer = null;
 let _MprisService = null;
-try {
-    const _require = createRequire(import.meta.url);
-    _MprisService = _require('mpris-service');
-} catch (e) {
-    console.warn('[AML] mpris-service not available:', e.message);
+if (IS_LINUX) {
+    try {
+        const _require = createRequire(import.meta.url);
+        _MprisService = _require('mpris-service');
+    } catch (e) {
+        console.warn('[AML] mpris-service not available:', e.message);
+    }
 }
 
 // dbus-next throws "Cannot send message, stream is closed" asynchronously from
@@ -1778,8 +1802,8 @@ function _destroyMprisPlayer() {
 }
 
 function _mprisReady() {
-    // D-Bus session bus must be available.
-    return !!process.env.DBUS_SESSION_BUS_ADDRESS || !!process.env.XDG_RUNTIME_DIR;
+    // D-Bus session bus must be available (Linux only).
+    return IS_LINUX && (!!process.env.DBUS_SESSION_BUS_ADDRESS || !!process.env.XDG_RUNTIME_DIR);
 }
 
 let _mprisRetryTimer = null;
@@ -1947,6 +1971,7 @@ ipcMain.on('mpris:update', (_, data) => {
 
     // Mirror now-playing to the mini player if it's open.
     sendMiniState(data);
+    winIntegration?.update(data);
 
     const wasNull = !mprisPlayer;
     if (!mprisPlayer) mprisPlayer = createMprisPlayer();
@@ -1970,8 +1995,17 @@ ipcMain.on('mpris:update', (_, data) => {
     }
 });
 
+// Transport commands from the page's navigator.mediaSession handlers (Windows SMTC).
+// Only a fixed set of commands is forwarded; the renderer already handles them for MPRIS.
+const _MEDIA_CMDS = new Set(['play', 'pause', 'playpause', 'next', 'previous']);
+ipcMain.on('media:cmd', (_e, c) => {
+    const ok = typeof c === 'string' ? _MEDIA_CMDS.has(c)
+        : !!c && c.type === 'setPosition' && Number.isFinite(c.ms) && c.ms >= 0;
+    if (ok) win?.webContents.send('mpris:cmd', c);
+});
+
 // ── Discord Rich Presence ─────────────────────────────────────────────────────
-// Native Discord IPC — framed JSON over the discord-ipc-N Unix socket, no
+// Native Discord IPC — framed JSON over the discord-ipc-N Unix socket (a named pipe on Windows), no
 // external dependency. Shows the current track as your Discord status.
 // REQUIRES a Discord application client ID: register an app at
 // https://discord.com/developers/applications and paste its Application ID
@@ -1986,16 +2020,7 @@ let _discordPendingActivity = null;
 let _discordReconnectTimer = null;
 let _discordBuf = Buffer.alloc(0);
 
-function _discordSocketPaths() {
-    const bases = [process.env.XDG_RUNTIME_DIR, process.env.TMPDIR, process.env.TMP, process.env.TEMP, '/tmp'].filter(Boolean);
-    const subdirs = ['', 'snap.discord/', 'app/com.discordapp.Discord/', 'app/com.discordapp.DiscordCanary/'];
-    const paths = [];
-    for (const base of bases)
-        for (const sub of subdirs)
-            for (let i = 0; i < 10; i++)
-                paths.push(path.join(base, sub + `discord-ipc-${i}`));
-    return paths;
-}
+function _discordSocketPaths() { return discordIpcPaths(); }
 
 function _discordEncode(op, payload) {
     const json = Buffer.from(JSON.stringify(payload), 'utf8');
@@ -2403,7 +2428,8 @@ function createTray() {
     const iconPath = app.isPackaged
         ? path.join(process.resourcesPath, 'tray-icon.png')
         : path.join(__dirname, '..', 'assets', 'tray-icon.png');
-    const icon = nativeImage.createFromPath(iconPath);
+    let icon = nativeImage.createFromPath(iconPath);
+    if (IS_WIN) icon = icon.resize({ width: 16, height: 16 });
 
     tray = new Tray(icon);
     tray.setToolTip('Apple Music');
@@ -2441,6 +2467,13 @@ function createTray() {
             label: (miniWin && !miniWin.isDestroyed()) ? 'Hide Mini Player' : 'Mini Player',
             click: () => toggleMiniPlayer(),
         },
+        ...(winIntegration ? [{
+            label: 'Launch at login',
+            type: 'checkbox',
+            checked: winIntegration.getOpenAtLogin(),
+            enabled: app.isPackaged,
+            click: (item) => winIntegration.setOpenAtLogin(item.checked),
+        }] : []),
         { type: 'separator' },
         {
             label: 'Restart App',
@@ -2743,7 +2776,17 @@ app.whenReady().then(() => {
     });
 
     Menu.setApplicationMenu(null);
+    if (IS_WIN) {
+        winIntegration = createWinIntegration({
+            app, getWin: () => win, nativeImage,
+            sendCmd: (c) => win?.webContents.send('mpris:cmd', c),
+        });
+    }
     createWindow();
+    if (winIntegration) {
+        winIntegration.init();
+        win.on('show', () => winIntegration.refresh());
+    }
     createTray();
 
     // Global media key shortcuts — catches Bluetooth AVRCP play/pause/next/prev
@@ -2755,7 +2798,9 @@ app.whenReady().then(() => {
         ['MediaPreviousTrack',() => sendMediaCmd('previous')],
         ['MediaStop',         () => sendMediaCmd('pause')],
     ];
-    for (const [key, fn] of _mkShortcuts) {
+    // Windows routes hardware media keys through the SMTC session (win-integration.mjs); a global
+    // shortcut on top would deliver every key press twice and cancel itself out.
+    if (!IS_WIN) for (const [key, fn] of _mkShortcuts) {
         if (!globalShortcut.register(key, fn))
             console.warn('[AML] media key shortcut already taken by another app:', key);
     }

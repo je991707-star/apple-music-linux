@@ -105,6 +105,7 @@ if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('amlBridge', {
     chooseDownloadDir: ()             => ipcRenderer.invoke('dialog:choose-download-dir'),
     mprisUpdate:    (d)         => ipcRenderer.send('mpris:update', d),
     onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
+    mediaCmd:       (c)         => ipcRenderer.send('media:cmd', c),
     // Encrypted per-key store (backed by safeStorage in main process)
     storeRead:   (key)        => ipcRenderer.invoke('store:read',   key),
     storeWrite:  (key, value) => ipcRenderer.invoke('store:write',  key, value),

@@ -205,7 +205,7 @@ func xdgMusicDir() string {
 func homeDir() string {
 	h, err := userHomeDir()
 	if err != nil {
-		return "/tmp"
+		return os.TempDir()
 	}
 	return h
 }

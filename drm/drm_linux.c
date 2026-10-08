@@ -17,7 +17,6 @@
 #define _DEFAULT_SOURCE
 
 #include "drm_types.h"
-#include "fairplay.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +24,9 @@
 #include <pthread.h>
 
 #include <openssl/evp.h>
+#include <openssl/crypto.h>
+
+#define fairplay_secure_zero(p, n) OPENSSL_cleanse((p), (n))
 
 /* ── Module state ─────────────────────────────────────────────────────────── */
 

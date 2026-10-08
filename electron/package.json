@@ -8,10 +8,6 @@
   "engines": {
     "electron": "^43.0.0"
   },
-  "dependencies": {
-    "mpris-service": "^2.1.2",
-    "x11": "^2.3.0"
-  },
   "allowScripts": {
     "abstract-socket@2.1.1": true
   },
@@ -22,7 +18,8 @@
     "build:drm": "make -C ../drm libdrm_client.so",
     "build:engine": "bash ../scripts/build-renderer.sh",
     "build:go": "bash ../scripts/build-engine.sh dist/resources -ldflags=\"-w -s\" -trimpath",
-    "build:vlc": "bash ../scripts/bundle-vlc.sh"
+    "build:vlc": "bash ../scripts/bundle-vlc.sh",
+    "dist:win": "powershell -ExecutionPolicy Bypass -File ../scripts/build-windows.ps1"
   },
   "desktopName": "apple-music-linux.desktop",
   "devDependencies": {
@@ -44,22 +41,6 @@
     ],
     "extraResources": [
       {
-        "from": "dist/resources/engine",
-        "to": "engine"
-      },
-      {
-        "from": "dist/resources/libdrm_client.so",
-        "to": "libdrm_client.so"
-      },
-      {
-        "from": "dist/resources/vlc",
-        "to": "vlc"
-      },
-      {
-        "from": "../third_party/ffmpeg",
-        "to": "ffmpeg"
-      },
-      {
         "from": "../assets/tray-icon.png",
         "to": "tray-icon.png"
       },
@@ -78,7 +59,64 @@
       "syncDesktopName": true,
       "mimeTypes": [
         "x-scheme-handler/aml"
+      ],
+      "extraResources": [
+        {
+          "from": "dist/resources/engine",
+          "to": "engine"
+        },
+        {
+          "from": "dist/resources/libdrm_client.so",
+          "to": "libdrm_client.so"
+        },
+        {
+          "from": "dist/resources/vlc",
+          "to": "vlc"
+        },
+        {
+          "from": "../third_party/ffmpeg",
+          "to": "ffmpeg"
+        }
       ]
-    }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icon.png",
+      "artifactName": "apple-music-linux-setup-${version}.${ext}",
+      "extraResources": [
+        {
+          "from": "dist/resources-win",
+          "to": "."
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Apple Music",
+      "deleteAppDataOnUninstall": false
+    },
+    "protocols": [
+      {
+        "name": "Apple Music",
+        "schemes": [
+          "aml"
+        ]
+      }
+    ]
+  },
+  "optionalDependencies": {
+    "mpris-service": "^2.1.2",
+    "x11": "^2.3.0"
   }
 }

@@ -5,8 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 )
 
 func lookFFmpeg(p string) error {
@@ -324,6 +324,9 @@ func validToolPath(p string, names ...string) bool {
 }
 
 func toolNameOK(base string, names []string) bool {
+	if runtime.GOOS == "windows" {
+		base = strings.TrimSuffix(strings.ToLower(base), ".exe")
+	}
 	for _, n := range names {
 		if base == n || strings.HasPrefix(base, n+"-") {
 			return true
@@ -351,21 +354,5 @@ func checkToolExecutable(p string, names ...string) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		return fmt.Errorf("%s is not an executable file", resolved)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s is writable by other users", resolved)
-	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && int(st.Uid) != os.Geteuid() {
-		return fmt.Errorf("%s is owned by another user", resolved)
-	}
-	dir, err := os.Stat(filepath.Dir(resolved))
-	if err != nil {
-		return err
-	}
-	if dir.Mode().Perm()&0o002 != 0 {
-		return fmt.Errorf("%s is in a directory writable by other users", resolved)
-	}
-	return nil
+	return checkToolTrust(resolved, info)
 }

@@ -53,3 +53,37 @@ jobs:
           npm run build:engine
           git diff --exit-code -- . ':!dist'
       - run: node --test test/*.test.mjs test/engine/*.test.mjs
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-openssl
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install VLC
+        run: choco install vlc --no-progress -y
+      - name: Build the DRM DLL, engine and VLC subset
+        shell: pwsh
+        run: scripts\build-windows.ps1 -Msys C:\msys64\ucrt64\bin -SkipInstaller
+      - name: Windows platform tests
+        working-directory: electron
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts
+          node --test test/platform.test.mjs test/drm-session-dir.test.mjs
