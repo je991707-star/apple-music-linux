@@ -36,6 +36,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 - [Roadmap](#roadmap)
 - [Requirements](#requirements)
 - [Download & Install](#download--install)
+- [Opening links](#opening-links-in-adam)
 - [Login](#login)
 - [Dev](#dev)
 - [Build](#build)
@@ -62,9 +63,8 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 - Output folder configurable via a native folder picker
 
 ### Themes & Appearance
-- **Three theme modes**: Blur (wallpaper blurred behind the app), Accent (system or custom accent colour), or a fully custom CSS file
+- **Three theme modes**: Blur (your wallpaper, blurred, behind the app), Accent (the fixed Apple Music palette, with per-colour pickers and your own saved presets), or a fully custom CSS file. Signed-out pages always use Blur
 - **Album art theming** — album and playlist pages take their colours from the artwork, and follow the playing track
-- Automatically picks up your system accent colour from KDE, Hyprland, or GNOME
 - Save and share your own theme presets (export/import JSON)
 - Adjustable blur strength and sidebar opacity sliders
 - Light and dark mode support
@@ -76,7 +76,8 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 ### Compositor & Blur
 - Native `blur-behind` on KDE X11 (KWin) and KDE Wayland — no screen-share dialog
 - Hyprland wallpaper blur via `hyprpaper` / `swww`
-- Software blur fallback on X11, GNOME, and Sway
+- Wallpaper blur on Windows and GNOME (read from the desktop settings), so Blur works on every desktop
+- Software blur fallback on X11 and Sway
 - Automatically switches to software blur if the GPU crashes
 
 ### System Integration
@@ -148,18 +149,13 @@ After install, launch from your app menu or run `adam` in a terminal.
 No install needed — just run it directly.
 
 ```bash
-chmod +x adam.AppImage
-./adam.AppImage
+chmod +x Adam-*-x86_64.AppImage
+./Adam-*-x86_64.AppImage
 ```
 
 [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) can integrate it into your app menu automatically on first run.
 
-> **AppImage on Ubuntu 22.04+ / Fedora**: requires `libfuse2`.
-> ```bash
-> sudo apt install libfuse2   # Ubuntu/Debian
-> sudo dnf install fuse       # Fedora
-> ```
-> Or run without FUSE: `./adam.AppImage --appimage-extract-and-run`
+Release builds are made on Ubuntu 22.04 (glibc 2.35, checked in CI by `scripts/check-glibc.sh`) and packed with the static AppImage runtime, so they start on 22.04 and newer without `libfuse2`. If your system still has trouble mounting AppImages, run it without FUSE: `./Adam-*-x86_64.AppImage --appimage-extract-and-run`.
 
 ### Option C — Flatpak (118 MB, experimental)
 
@@ -174,7 +170,7 @@ flatpak run io.github.silentone12725.Adam
 It also appears in your app menu as **Apple Music**. To remove it: `flatpak uninstall --user io.github.silentone12725.Adam`.
 
 Things to know:
-- It keeps its own settings and sign-in under `~/.var/app/io.github.silentone12725.Adam/`, separate from the other formats, so you sign in again.
+- It keeps its own settings and web session under `~/.var/app/io.github.silentone12725.Adam/`, separate from the other formats, so you sign in again.
 - Only one copy of the app can run at a time (the engine uses port 20025), so close the other formats first.
 - Wallpaper detection for the blur theme is limited by the sandbox; the software blur is used instead.
 - This is a self-hosted bundle, not a Flathub listing.
@@ -196,29 +192,25 @@ Not available on Windows yet: Cavern (Atmos JOC) rendering and the bundled FFmpe
 
 The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass UI uses a software blur fallback on GNOME — Mutter does not support compositor blur-behind.
 
+## Opening links in Adam
+
+Adam opens Apple Music links from other apps and from the command line (`adam <link>`):
+
+- **`adam://`** links always work: `adam://song/<id>`, `adam://album/<id>`, `adam://playlist/<id>`, `adam://play/<s|a|p|r>/<id>`, `adam://open/<s|a|p|r>/<id>` (add `?sf=us` for a storefront), or `adam://music.apple.com/...` with any Apple Music path.
+- **Apple Music URLs** (`https://music.apple.com/...` on any Apple Music host, including legacy `itunes.apple.com` links and `?i=` song links) play when they point at a song, album, playlist, artist or music video, and open in the app for any other page (browse, radio, search, curators, library, stations).
+- **Apple's own schemes** (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, plus `daap://` and `itpc://`, and the Windows `itunes.assocprotocol.*` aliases) are the ones the Apple Music app registers. **Adam claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so Adam shows a notice for them.
+
+A plain `https://music.apple.com` link clicked in another app opens in your browser: operating systems do not let an app claim links for another company's website. To get from the browser into Adam, turn on `music://` and click **Open in Music** on the website, or use a URL-redirect browser extension that rewrites `music.apple.com` to `adam://music.apple.com`. On Windows you may also have to confirm the choice under Settings → Apps → Default apps.
+
 ## Login
 
-Two separate sign-ins are required.
-
-### 1. Apple Music web session
-
-Sign in on first launch the same way you would at music.apple.com.
+Sign in on first launch the same way you would at music.apple.com. That is the only sign-in: Adam uses the web session for the DRM layer too, so lossless, hi-res and music videos work once you are signed in, and there is no separate account step in Settings.
 
 <div align="center">
   <img src="assets/screenshots/electron_login.png" alt="Apple Music web login" width="600"/>
 </div>
 
-### 2. Engine DRM account (lossless, hi-res & music videos)
-
-This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps and music videos are unavailable.
-
-1. Click the **Settings** cog wheel next to your account button
-2. Click **Sign In**, enter your Apple ID, and wait about 20 seconds for the backend to authenticate and fetch the key
-
-<div align="center">
-  <img src="assets/screenshots/engine_login.png" alt="Adam Settings — Engine Account login" width="49%"/>
-  <img src="assets/screenshots/Account_logged_in.png" alt="Account logged in" width="49%"/>
-</div>
+The **Engine Status** section in Settings shows whether the DRM layer is ready (DRM process, FairPlay, session, backend). If it is not, playback falls back to AAC 256 kbps and music videos are unavailable.
 
 ## Dev
 
@@ -246,13 +238,13 @@ sudo apt install vlc nodejs npm
 **Rebuild the Go engine:**
 
 ```bash
-# CGO + the widevine_backend tag are required for DRM (lossless, hi-res, MVs);
+# CGO + the adamplay_backend tag are required for DRM (lossless, hi-res, MVs);
 # without them the engine builds fine but silently falls back to AAC.
 # CGO's -L cannot take a path with spaces, hence the symlink.
 ln -sfT "$PWD/drm" /tmp/adam-drm
 cd engine
 CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/adam-drm -Wl,-rpath,$ORIGIN' \
-  go build -tags widevine_backend -o ../electron/dist/resources/engine ./cmd
+  go build -tags adamplay_backend -o ../electron/dist/resources/engine ./cmd
 cp ../drm/libdrm_client.so ../electron/dist/resources/
 ```
 

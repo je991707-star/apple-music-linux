@@ -7,6 +7,25 @@ the project's Releases page.
 
 ## Unreleased
 
+### Reliability and sign-in
+Ported from the pull request by Flavio Giacchetti ([silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1)), adapted to Adam (Windows included, `adam` names).
+- **Engine startup no longer kills whatever owns the engine port.** It recovers only an orphan of this exact engine (same binary, data directory and port; `/proc` on Linux, the image path and command line on Windows), never deletes the session lock file (a replacement inode let two engines own the session at once), waits for the port, and reports a clear error when something else is using it. Starts, crash restarts and quitting are owned by one lifecycle module, so a quit during startup cannot spawn an engine.
+- **Quitting is reliable.** Storage and cookies are flushed (with a bounded wait), the engine is stopped with a bounded wait, and then the app exits, so the web player's unload handlers can no longer veto the quit and leave a window open with no engine. The tray *Exit* and *Restart* items go through the same path.
+- **Closing the terminal no longer crashes the app** (`EIO` is ignored like `EPIPE`), and the engine's event streams end when it shuts down.
+- **Sign-in popups keep their opener.** Apple's sign-in and authorize pages open as popups that keep `window.opener` and the session (MusicKit reports completion through it), with no `adamBridge` and every later navigation checked; the Last.fm window is managed the same way. Storage access is granted to Apple pages only.
+- **Settings sign-in fixes.** The verification code was posted to a malformed URL (`…:20025api/v1/drm/challenge`); it now goes to the right endpoint, must be six digits, and a challenge accepts exactly one reply. Enter moves from email to password and submits, the account state is read fresh each time Settings opens (a pre-warmed snapshot could predate a login), and polling can be cancelled. A failed FairPlay session no longer keeps advertising playback capabilities, a pending challenge is no longer erased by unrelated updates, and failed restores and restarts are reported as failed.
+- **Settings → Display → Reduce animations** (off by default) makes the web player use still artwork. Idle startup now pre-warms three tracks instead of ten, and none when something is already playing.
+- **Installer** ships fresh renderer bundles next to the app, so an upgrade over an existing install cannot be overridden by stale copies.
+
+### Themes
+- **Accent-generated themes are gone.** The theme is never derived from an accent colour any more, neither the system's nor a picked one, and the all-pink look that appeared on first run and after the sign-in is removed. The default is the `Apple Music` preset (black, grey sidebar, red only for accents), and Reset returns to it. Palettes saved by older versions are reset once (your own saved presets and chosen mode are kept).
+- **Blur works on every desktop.** The wallpaper layer behind the interface never actually received its image (the page script referenced a variable that only existed in the main process), so blur showed nothing on any desktop. It is fixed and available on Windows (wallpaper from the registry) and GNOME as well as Hyprland and KDE. The wallpaper is blurred once in the app instead of by a full-window CSS filter, which kept machines without a GPU from rendering the page.
+- **Signed-out pages use the blur theme** and the chosen theme applies after sign-in.
+
+### Links
+- **Every Apple Music URL form opens in Adam.** `adam://` gained `play`/`open` forms, any `music.apple.com` path (browse, radio, search, curators, library, stations) is opened in the app, `?i=` song links, legacy `itunes.apple.com` links and all Apple Music hosts work, and `music.apple.com` MPRIS `OpenUri` requests now actually open (they were sent in a shape the page ignored).
+- **Settings → Links lets you choose which of Apple Music's 24 URL schemes Adam claims** (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, `daap://`, `itpc://` and the Windows `itunes.assocprotocol.*` aliases). None is claimed by default, only Adam's own registrations are ever removed, and `daap://` and `itpc://` show a notice because a web client cannot act on them. On Linux the choice is written to `mimeapps.list`.
+
 ### Renamed to Adam
 - **The app is now Adam.** Window and tray names, installer and shortcut names, executable (`adam`), AppImage/`.run`/Flatpak/NSIS artifact names, the app ID (`io.github.silentone12725.Adam`, also the Windows AppUserModelID), the link scheme (`adam://`), environment variables (`ADAM_*`, was `AML_*`), the `adamBridge` page bridge, log prefixes and the default export folder (`~/Music/Adam-Downloads`).
 - **Existing data is migrated on first launch.** `~/.config/apple-music-linux` and `~/.config/aml` merge into `~/.config/adam` (`%APPDATA%\adam` on Windows); `~/.cache/apple-music-linux` and `~/.cache/aml` merge into `~/.cache/adam`. This covers the Apple session, Widevine identity, EQ, HRTF, the MV cache key, the encrypted store (`aml_*` keys become `adam_*`) and page settings. Nothing existing is overwritten.
@@ -15,7 +34,27 @@ the project's Releases page.
 ### Windows
 - **Windows 10/11 x64 support.** NSIS installer built by `scripts/build-windows.ps1`; the DRM library is a MinGW DLL (`drm_linux.c` + libcrypto) and the engine builds with cgo and libvlc.
 - **System integration.** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `adam://` links, Discord Rich Presence over the named pipe, Mica backdrop and a Windows-native config location.
-- **DRM backend renamed `widevine`** (`WidevineBackend`, build tag `widevine_backend`, was `native_backend`); the hybris/Android runtime was removed.
+- **DRM backend renamed `adamplay`** (`AdamplayBackend`, build tag `adamplay_backend`, was `native_backend`); the hybris/Android runtime was removed.
+
+### Playback lifecycle and mixer
+Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1), adapted to Adam.
+- **The desktop mixer is respected.** libvlc gets a stable app identity and its volume is no longer re-applied (or `pactl` run) on every track; the page follows mixer changes through `volume`/`muted` on `/vlc/time`.
+- **Pause, resume and skip no longer race.** Native transport commands are serialised and dropped when the track changed; status replies that arrive after a stop or skip are discarded; a seek response for a skipped track can no longer unfreeze the next one.
+- **Natural end of track advances** instead of replaying the last fragment (the allowed gap is capped at 10% of the track), and recovery reloads the cached source.
+- **Downloads stop with the engine.** ALAC download and precache contexts end on shutdown.
+- **Transport buttons follow the native session** and a poll error no longer stops status updates for good.
+
+### Offline, packaging and cleanup
+- **An offline page** replaces the blank window when Apple Music cannot be reached, and reconnects by itself.
+- **AppImage:** versioned name (`Adam-<version>-x86_64.AppImage`), glibc baseline check (`scripts/check-glibc.sh`) and a static-runtime repack (`scripts/repack-appimage.sh`) in the release workflow.
+- **Config directory housekeeping:** obsolete wrapper-era folders, stale profile data, interrupted-write temp files and over-budget caches are removed at startup (at most daily, rule-based, live data protected). The 256 MB HTTP cache cap now takes effect (it was set too late), and prefs and the credential store are written atomically.
+- **Device identity:** an existing or earlier identity is used before anything else; generating one is opt-in (`ADAM_GENERATE_IDENTITY=1`) because the license server rejects self-made ones. Key contexts are wiped and freed.
+
+### Fixes
+- **Settings no longer has an Engine Account sign-in.** The DRM layer runs on the web session, so the separate sign-in (and its Apple ID and verification-code forms) was removed; Engine Status stays, and the lossless and download tooltips now say the DRM session must be ready.
+- Export: titles containing a dot no longer lose the file extension; the final move never overwrites a file the policy protects; job phases only move forward and finished jobs stay finished; relative output folders are made absolute.
+- Seek requests from a skipped track are refused (409); `NaN`/`Inf` seek times, negative cache sizes and oversized samples or SOFA headers are rejected; the engine accepts only its own loopback origin (`ADAM_ALLOW_LOCAL_ORIGINS=1` allows others).
+- Library: query failures are logged, playlist paging cannot loop forever. Prefetch: closed-queue pushes are handed back; stale context jobs are cancelled. Opening an asset can no longer wedge after a provider panic. SSE: `waitFor` no longer leaks listeners and reconnects back off after short-lived connections. Imported theme presets are validated.
 
 ## 1.4.0 - 2026-10-06
 
