@@ -18,7 +18,7 @@ import os from 'os';
 import { isatty } from 'tty';
 import net from 'net';
 import crypto from 'crypto';
-import { IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, yamlStr, migrateLegacyConfig, migrateStoreKeys } from './platform.mjs';
+import { hasSessionBus, mprisRetryDelay, IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, yamlStr, migrateLegacyConfig, migrateStoreKeys } from './platform.mjs';
 import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 import { parseLink, isLinkArg } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
@@ -1872,13 +1872,15 @@ function _destroyMprisPlayer() {
 }
 
 function _mprisReady() {
-    // D-Bus session bus must be available (Linux only).
-    return IS_LINUX && (!!process.env.DBUS_SESSION_BUS_ADDRESS || !!process.env.XDG_RUNTIME_DIR);
+    // A D-Bus session bus must actually exist (Linux only); the env vars alone do not prove it.
+    return IS_LINUX && hasSessionBus();
 }
 
 let _mprisRetryTimer = null;
+let _mprisFailures = 0; // consecutive D-Bus errors, for the retry backoff
+let _mprisNotBefore = 0; // no reconnect attempt (timer or mpris:update) before this time
 function createMprisPlayer() {
-    if (!_MprisService || !_mprisReady()) return null;
+    if (!_MprisService || !_mprisReady() || Date.now() < _mprisNotBefore) return null;
     try {
         const player = _MprisService({
             name: 'adam',
@@ -1941,17 +1943,21 @@ function createMprisPlayer() {
             // player still holds org.mpris.MediaPlayer2.adam.
             if (mprisPlayer === player) _destroyMprisPlayer();
             if (!_mprisRetryTimer) {
+                const delay = mprisRetryDelay(++_mprisFailures);
+                _mprisNotBefore = Date.now() + delay;
                 _mprisRetryTimer = setTimeout(() => {
                     _mprisRetryTimer = null;
                     if (!mprisPlayer) {
                         mprisPlayer = createMprisPlayer();
                         if (mprisPlayer) replayMprisState();
                     }
-                }, 2000);
+                }, delay);
             }
         });
 
         console.log('[Adam] MPRIS2 service registered');
+        // A player that is still up after 10 s is healthy: forget earlier failures.
+        setTimeout(() => { if (mprisPlayer === player) _mprisFailures = 0; }, 10_000).unref?.();
         return player;
     } catch (e) {
         console.warn('[Adam] MPRIS2 init failed:', e.message);

@@ -151,3 +151,24 @@ export function migrateStoreKeys(store) {
     }
     return changed;
 }
+
+// Is there a D-Bus session bus to talk to? Having DBUS_SESSION_BUS_ADDRESS or XDG_RUNTIME_DIR set is not
+// enough (sandboxes and minimal sessions set them with no bus behind them), and connecting anyway made
+// the MPRIS service retry forever. Unix socket paths are checked for existence; abstract and non-unix
+// transports cannot be checked from here, so they count as available.
+export function hasSessionBus(env = process.env, exists = existsSync) {
+    const addr = env.DBUS_SESSION_BUS_ADDRESS;
+    if (addr) {
+        for (const entry of addr.split(';')) {
+            const m = /^unix:(?:[^,]*,)*path=([^,;]+)/.exec(entry);
+            if (m) { if (exists(decodeURIComponent(m[1]))) return true; continue; }
+            if (/^unix:/.test(entry)) return true; // abstract=... or runtime=...: not checkable
+            if (entry.trim()) return true;         // tcp:, nonce-tcp:, ...
+        }
+        return false;
+    }
+    return !!env.XDG_RUNTIME_DIR && exists(path.join(env.XDG_RUNTIME_DIR, 'bus'));
+}
+
+// Delay before the next MPRIS reconnect: 2 s, doubling to a 60 s ceiling.
+export const mprisRetryDelay = (failures) => Math.min(2000 * 2 ** Math.max(0, failures - 1), 60000);

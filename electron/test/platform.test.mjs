@@ -186,3 +186,22 @@ test('liquid glass overrides every other theme mode, signed in or out', () => {
     }
     assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'accent', isHyprland: false, glass: false }), 'accent');
 });
+
+import { hasSessionBus, mprisRetryDelay } from '../platform.mjs';
+
+test('hasSessionBus needs an actual bus, not just environment variables', () => {
+    const none = () => false, all = () => true;
+    assert.equal(hasSessionBus({}, all), false, 'no variables at all');
+    assert.equal(hasSessionBus({ XDG_RUNTIME_DIR: '/run/user/1000' }, none), false, 'runtime dir without a bus socket');
+    assert.equal(hasSessionBus({ XDG_RUNTIME_DIR: '/run/user/1000' }, p => p === '/run/user/1000/bus'), true);
+    assert.equal(hasSessionBus({ DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' }, none), false, 'address points at a missing socket');
+    assert.equal(hasSessionBus({ DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' }, all), true);
+    assert.equal(hasSessionBus({ DBUS_SESSION_BUS_ADDRESS: 'unix:abstract=/tmp/dbus-x,guid=1' }, none), true, 'abstract sockets cannot be checked');
+    assert.equal(hasSessionBus({ DBUS_SESSION_BUS_ADDRESS: 'unix:path=/a/b;unix:path=/c/d' }, p => p === '/c/d'), true, 'any listed transport will do');
+    assert.equal(hasSessionBus({ DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus,guid=abc' }, p => p === '/run/user/1000/bus'), true, 'trailing parameters');
+});
+
+test('mprisRetryDelay doubles from 2 s up to a 60 s ceiling', () => {
+    assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 20].map(mprisRetryDelay), [2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000]);
+    assert.equal(mprisRetryDelay(0), 2000);
+});
