@@ -1,10 +1,12 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, systemPreferences, net: electronNet } = electronMain;
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
+import { createEngineLifecycle, recoverOrphanEngine, isPortFree } from './engine-lifecycle.mjs';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
-process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
-process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
+// A terminal that goes away (closed window, SSH drop) surfaces as EPIPE or EIO.
+process.stdout.on('error', (e) => { if (!['EPIPE', 'EIO'].includes(e.code)) throw e; });
+process.stderr.on('error', (e) => { if (!['EPIPE', 'EIO'].includes(e.code)) throw e; });
 
 
 import { createRequire } from 'module';
@@ -16,8 +18,18 @@ import os from 'os';
 import { isatty } from 'tty';
 import net from 'net';
 import crypto from 'crypto';
-import { IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, listeningPid, yamlStr, migrateLegacyConfig, migrateStoreKeys, isPortFree as _portFree } from './platform.mjs';
+import { IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, yamlStr, migrateLegacyConfig, migrateStoreKeys } from './platform.mjs';
 import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
+import { parseLink, isLinkArg } from './deeplink.mjs';
+import { createLinkSchemeManager } from './link-schemes.mjs';
+import { resolveThemeMode } from './theme-mode.mjs';
+import { glassModuleDirs, loadGlassModule, createGlassController } from './glass.mjs';
+import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
+import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
+import { parseByteRange } from './range.mjs';
+import { shouldShowOffline, offlineHash } from './load-failure.mjs';
+import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
+import { windowsWallpaperPath, gnomeWallpaperPath, imageMime } from './wallpaper.mjs';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,12 +39,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = migrateLegacyConfig(configRoot(), 'adam');
 const PREF_FILE  = path.join(CONFIG_DIR, 'electron-prefs.json');
 
+// Chromium's profile lives in its own subfolder so it doesn't mix with our prefs/drm data. This must
+// run before the app is ready (and before the single-instance lock): set later, part of the profile
+// had already been created at the config root, leaving two half-used copies.
+app.setPath('userData', path.join(CONFIG_DIR, 'electron-session'));
+// Cap the HTTP cache at 256 MB. Chromium reads this once, while it sets up the cache, so it has to be
+// on the command line before the session exists; appended after ready it did nothing and the cache
+// grew without bound (hundreds of MB past the cap).
+app.commandLine.appendSwitch('disk-cache-size', String(256 * 1024 * 1024));
+
 function loadPrefs() {
     try { return JSON.parse(readFile(PREF_FILE, 'utf8')); } catch { return {}; }
 }
 function savePrefs(p) {
     mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(PREF_FILE, JSON.stringify(p, null, 2));
+    writeFileAtomicSync(PREF_FILE, JSON.stringify(p, null, 2));
 }
 
 // ── Encrypted store ───────────────────────────────────────────────────────────
@@ -56,22 +77,33 @@ async function _storeLoad() {
     return _storeCache;
 }
 
+let _storeWrite = Promise.resolve(); // serialises flushes: two overlapping writes must not interleave
 function _storeFlush() {
     if (_storeFlushTimer) return;
-    _storeFlushTimer = setTimeout(async () => {
+    _storeFlushTimer = setTimeout(() => {
         _storeFlushTimer = null;
         if (!_storeDirty || !_storeCache) return;
         _storeDirty = false;
-        mkdirSync(CONFIG_DIR, { recursive: true });
-        const enc = safeStorage.isEncryptionAvailable();
-        const json = JSON.stringify(_storeCache);
-        await writeFileAsync(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
+        _storeWrite = _storeWrite.then(async () => {
+            try {
+                mkdirSync(CONFIG_DIR, { recursive: true });
+                const enc = safeStorage.isEncryptionAvailable();
+                const json = JSON.stringify(_storeCache); // latest state when this step runs
+                await writeFileAtomic(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
+            } catch (e) {
+                _storeDirty = true; // keep the change; the next flush retries
+                console.warn('[Adam] store flush failed:', e.message);
+            }
+        });
     }, 200);
 }
 
 // ── Chromium flags ──────────────────────────────────────────────────────────
 if (IS_WIN) app.setAppUserModelId(APP_USER_MODEL_ID); // taskbar grouping, toasts and SMTC identity
 if (IS_LINUX) {
+// Opt-in (Settings → Display → Reduce animations): Chromium's reduced-motion preference makes the
+// web player show still artwork instead of animated backgrounds.
+if (loadPrefs().reduceMotion === true) app.commandLine.appendSwitch('force-prefers-reduced-motion');
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 app.commandLine.appendSwitch('enable-features',
     'UseOzonePlatform,WaylandWindowDecorations,' +
@@ -115,61 +147,51 @@ if (IS_LINUX) {
 
 let win    = null;
 let tray   = null;
+const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
+// Liquid glass (Windows, opt-in, experimental; see glass.mjs). Whether it is active is decided once at startup
+// because it needs a transparent frameless window.
+const _glassModule = IS_WIN ? loadGlassModule({
+    dirs: glassModuleDirs({ resourcesPath: process.resourcesPath, devDir: path.join(__dirname, '..', 'native', 'liquid-glass') }),
+    load: (entry) => require(entry),
+    log: (m) => console.warn('[Adam]', m),
+}) : null;
+const _glassWanted = !!_glassModule && (process.env.ADAM_GLASS === '1' || loadPrefs().liquidGlass === true);
+let _glass = null;
+const _glassActive = () => !!_glass?.panel;
 let winIntegration = null; // Windows only: SMTC, taskbar buttons, jump list, login item
 const _startHidden = process.argv.includes('--hidden');
-let engineProc = null;
 let isQuitting = false;
-let _engineRestartDelay = 1000; // ms; doubles on each crash, resets on clean uptime
 
 // ── Deep link handling ────────────────────────────────────────────────────────
-// Supported URL forms:
-//   https://music.apple.com/{sf}/song/{slug}/{id}
-//   https://music.apple.com/{sf}/album/{slug}/{id}
-//   https://music.apple.com/{sf}/artist/{slug}/{id}
-//   https://music.apple.com/{sf}/playlist/{id}         (id = pl.xxx)
-//   https://music.apple.com/{sf}/music-video/{slug}/{id}
-//   adam://song/{id}
-//   adam://album/{id}  etc.
-const APPLE_MUSIC_TYPES = new Set(['song','album','artist','playlist','music-video']);
+// Links arrive as adam://…, music://… and the other Apple Music schemes the user opted into
+// (Settings → Links), or as music.apple.com URLs passed on the command line. deeplink.mjs
+// turns them into either a play/open intent for the page or a music.apple.com page to load.
+const _UNSUPPORTED_LINK_TEXT = {
+    podcast: ['Podcast subscriptions are not supported', 'Adam is an Apple Music client and cannot subscribe to podcast feeds (itpc:// links).'],
+    daap:    ['Shared iTunes libraries are not supported', 'Adam cannot connect to iTunes library shares (daap:// links).'],
+};
 
-function _parseDeepLink(raw) {
-    if (!raw) return null;
-    try {
-        const u = new URL(raw);
-        let parts, sf;
-        if (u.protocol === 'adam:') {
-            // adam://{type}/{id}  — hostname is the type
-            const type = u.hostname;
-            const id   = u.pathname.replace(/^\//, '');
-            if (!APPLE_MUSIC_TYPES.has(type) || !id) return null;
-            return { type, id, sf: null };
-        }
-        if ((u.hostname === 'music.apple.com' || u.hostname === 'itunes.apple.com') && u.protocol === 'https:') {
-            parts = u.pathname.split('/').filter(Boolean);
-            // /{sf}/{type}/{...slugs}/{id}  — last segment is the ID
-            if (parts.length < 3) return null;
-            sf   = parts[0];
-            const type = parts[1];
-            const id   = parts[parts.length - 1];
-            if (!APPLE_MUSIC_TYPES.has(type) || !id) return null;
-            return { type, id, sf };
-        }
-        return null;
-    } catch { return null; }
-}
-
-function _dispatchDeepLink(url) {
-    const intent = _parseDeepLink(url);
-    if (!intent) return;
-    console.log('[Adam] deep link:', intent);
+function _dispatchDeepLink(raw) {
+    const link = parseLink(raw);
+    if (!link) return;
+    console.log('[Adam] deep link:', link);
     if (win) {
         if (win.isMinimized()) win.restore();
+        win.show();
         win.focus();
-        win.webContents.send('adam:open', intent);
+    }
+    if (link.kind === 'intent') {
+        win?.webContents.send('adam:open', link.intent);
+    } else if (link.kind === 'navigate') {
+        if (win && _navigationAllowed(link.url)) win.loadURL(link.url);
+    } else if (link.kind === 'unsupported') {
+        const [title, detail] = _UNSUPPORTED_LINK_TEXT[link.reason] || ['This link is not supported', `Adam cannot open ${link.scheme}:// links.`];
+        dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, { type: 'info', title: 'Adam', message: title, detail });
     }
 }
 
-// Register custom adam:// URI scheme so `xdg-open adam://song/123` opens Adam.
+// Register the custom adam:// URI scheme so `xdg-open adam://song/123` opens Adam. The optional Apple
+// Music schemes are registered separately, per the user's choices (linkSchemes below).
 if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient('adam', process.execPath, [path.resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient('adam');
 
@@ -181,10 +203,19 @@ if (!_gotLock) {
     // handles the URL via the second-instance event below.
     app.quit();
 }
+if (_gotLock) {
+    // Housekeeping before Chromium opens its caches: remove what earlier versions left behind and keep
+    // regenerable data inside its budget. Throttled to once a day; never fatal.
+    try {
+        const r = runCleanupThrottled(CONFIG_DIR, { log: (m) => console.log('[Adam cleanup]', m) });
+        if (r) cleanupCache(path.join(app.getPath('cache'), 'adam'), { log: (m) => console.log('[Adam cleanup]', m) });
+        if (r && r.removed) console.log(`[Adam cleanup] freed ${(r.bytes / 1048576).toFixed(1)} MB (${r.removed} items)`);
+    } catch (e) { console.warn('[Adam cleanup] skipped:', e.message); }
+}
 app.on('second-instance', (_e, argv) => {
     if (winIntegration?.handleArgv(argv)) return; // jump-list transport command
-    // argv[argv.length - 1] is the URL on Linux (passed by xdg-open / the OS)
-    const url = argv.find(a => a.startsWith('adam://') || a.startsWith('https://music.apple.com'));
+    // The clicked link is one of the arguments (xdg-open and the OS pass it on the command line).
+    const url = argv.find(isLinkArg);
     if (url) _dispatchDeepLink(url);
     else if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
 });
@@ -223,7 +254,7 @@ const ENGINE_PORT = 20025;
 const DEBUG_OUTPUT = process.env.ADAM_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
-// DRM runs in-process (WidevineBackend + libdrm_client.so).
+// DRM runs in-process (AdamplayBackend + libdrm_client.so).
 // libdrm_client.so has no Android/hybris dependencies — only OpenSSL + libcurl.
 // The only writable state it needs is drm/files/ (MUSIC_TOKEN, STOREFRONT_ID,
 // mpl_db/) which lives in the user config dir for packaged builds.
@@ -294,71 +325,56 @@ function ensureEngineConfig() {
     if (changed) writeFileSync(cfgPath, content);
 }
 
-function execFileAsync(cmd, args, opts = {}) {
-    return new Promise(resolve => {
-        execFile(cmd, args, { encoding: 'utf8', ...opts }, (err, stdout) => resolve(err ? '' : stdout));
-    });
-}
-
-async function killStaleEngine(port) {
-    // SIGKILL anything on the port — no graceful shutdown needed for a stale engine.
-    const pid = await listeningPid(port);
-    if (pid) {
-        console.log(`[Adam] Killing stale engine on port ${port} (pid ${pid})`);
-        try { process.kill(pid, 'SIGKILL'); } catch (_) {}
-    }
-
-    // Kill the lock-file owner and remove the lock unconditionally.
-    const drmFilesDir = app.isPackaged
-        ? path.join(CONFIG_DIR, 'drm', 'files')
-        : path.join(__dirname, '..', 'drm', 'files');
-    const lockPath = path.join(drmFilesDir, 'engine-session.lock');
-    try {
-        const pidStr = readFileSync(lockPath, 'utf8').trim();
-        const lockPid = parseInt(pidStr, 10);
-        if (lockPid > 0) {
-            try { process.kill(lockPid, 'SIGKILL'); } catch (_) {}
-            unlinkSync(lockPath);
-            console.log(`[Adam] Removed stale session lock (was held by pid ${lockPid})`);
+const engineLifecycle = createEngineLifecycle({
+    isQuitting: () => isQuitting,
+    prepare: async () => {
+        if (!existsSync(ENGINE_BIN)) {
+            throw new Error(`Engine binary not found at ${ENGINE_BIN}`);
         }
-    } catch (_) {}
-}
-
-async function isPortFree(port) { return _portFree(port); }
-
-async function startEngine() {
-    if (engineProc) return;
-    if (!existsSync(ENGINE_BIN)) {
-        console.log('[Adam] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
-        return;
-    }
-    await killStaleEngine(ENGINE_PORT);
-    // Wait up to 2 s for the port to be released after SIGKILL.
-    for (let i = 0; i < 20; i++) {
-        if (await isPortFree(ENGINE_PORT)) break;
-        await new Promise(r => setTimeout(r, 100));
-    }
-    ensureEngineConfig();
-    const libEnv = engineLibEnv({
-        vlcDir: _vlcDir, ffDir: _ffDir, resDir: path.dirname(ENGINE_BIN),
-        hasVlc: existsSync(_vlcDir),
-        hasFfmpeg: existsSync(path.join(_ffDir, 'bin', IS_WIN ? 'ffmpeg.exe' : 'ffmpeg')),
-    });
-    // Windows env names are case-insensitive: spreading process.env keeps "Path", so drop it
-    // before adding our PATH or the child would see two competing entries.
-    const baseEnv = { ...process.env };
-    if (IS_WIN && libEnv.PATH) delete baseEnv.Path;
-    engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
-        cwd: ENGINE_DATA_DIR,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
-        // when the engine makes HTTP requests to Apple's API servers.
-        env: { ...baseEnv, GODEBUG: 'netdns=go', ...libEnv },
-    });
-    const onOut = (d) => console.log('[engine]', d.toString().trimEnd());
-    const onErr = (d) => {
-        const line = d.toString().trimEnd();
+        const drmFilesDir = app.isPackaged
+            ? path.join(CONFIG_DIR, 'drm', 'files')
+            : path.join(__dirname, '..', 'drm', 'files');
+        // Only an orphan of this exact engine (binary, data directory, port) is recovered, and
+        // the session lock file is never deleted: a replacement inode would let two engines
+        // own the session at once.
+        await recoverOrphanEngine({
+            lockPath: path.join(drmFilesDir, 'engine-session.lock'),
+            binary: ENGINE_BIN, dataDir: ENGINE_DATA_DIR, port: ENGINE_PORT,
+        });
+        let portFree = false;
+        for (let i = 0; i < 20 && !isQuitting; i++) {
+            if (await isPortFree(ENGINE_PORT)) { portFree = true; break; }
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (isQuitting) return;
+        if (!portFree) {
+            throw new Error(`Engine port ${ENGINE_PORT} is already in use. Close the other player or service and restart Adam.`);
+        }
+        ensureEngineConfig();
+    },
+    spawn: () => {
+        const libEnv = engineLibEnv({
+            vlcDir: _vlcDir, ffDir: _ffDir, resDir: path.dirname(ENGINE_BIN),
+            hasVlc: existsSync(_vlcDir),
+            hasFfmpeg: existsSync(path.join(_ffDir, 'bin', IS_WIN ? 'ffmpeg.exe' : 'ffmpeg')),
+        });
+        // Windows env names are case-insensitive: spreading process.env keeps "Path", so drop it
+        // before adding our PATH or the child would see two competing entries.
+        const baseEnv = { ...process.env };
+        if (IS_WIN && libEnv.PATH) delete baseEnv.Path;
+        return spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
+            cwd: ENGINE_DATA_DIR,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+            // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
+            // when the engine makes HTTP requests to Apple's API servers.
+            env: { ...baseEnv, GODEBUG: 'netdns=go', ...libEnv },
+        });
+    },
+    killDelay: 3000, // allow normal VLC teardown before forced termination
+    onOutput: data => console.log('[engine]', data.toString().trimEnd()),
+    onStderr: data => {
+        const line = data.toString().trimEnd();
         console.error('[engine]', line);
         // Unprivileged user namespaces disabled (Ubuntu 23.10+, Debian 12+ with AppArmor).
         // The DRM binary needs clone(CLONE_NEWUSER|CLONE_NEWPID) — surface this clearly.
@@ -371,36 +387,16 @@ async function startEngine() {
                 'Or permanently in /etc/sysctl.d/99-userns.conf:\n  kernel.unprivileged_userns_clone = 1'
             );
         }
-    };
-    engineProc.stdout.on('data', onOut);
-    engineProc.stderr.on('data', onErr);
-    const startTime = Date.now();
-    engineProc.on('exit', (code) => {
-        console.log('[Adam] Engine exited (code', code ?? 0, ')');
-        engineProc = null;
-        if (isQuitting) return;
-        // Reset backoff if engine ran for >30s (healthy uptime), otherwise double it.
-        if (Date.now() - startTime > 30_000) {
-            _engineRestartDelay = 1000;
-        } else {
-            _engineRestartDelay = Math.min(_engineRestartDelay * 2, 30_000);
-        }
-        console.log('[Adam] Restarting engine in', _engineRestartDelay, 'ms…');
-        setTimeout(() => startEngine(), _engineRestartDelay);
-    });
-    console.log('[Adam] Engine started on port', ENGINE_PORT, '(pid', engineProc.pid, ')');
-}
+    },
+    onError: error => {
+        console.error('[Adam] Engine startup failed:', error.message);
+        // A missing binary is not fatal: the renderer falls back to the Apple CDN without the engine.
+        if (!isQuitting && existsSync(ENGINE_BIN)) dialog.showErrorBox('Playback engine could not start', error.message);
+    },
+});
 
-function stopEngine() {
-    if (!engineProc) return;
-    const proc = engineProc;
-    engineProc = null;
-    proc.kill('SIGTERM');
-    // SIGTERM lets the Go engine call vlcPlayer.Close() to stop audio immediately,
-    // then drain its shutdown sequence. SIGKILL after 800ms is a safety net in case
-    // the engine hangs — keeps total quit time under ~1s.
-    setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 800);
-}
+function startEngine() { return engineLifecycle.start(); }
+function stopEngine() { return engineLifecycle.stop(); }
 
 // ── Compositor / blur detection ───────────────────────────────────────────────
 const _isWayland = !!process.env.WAYLAND_DISPLAY;
@@ -448,13 +444,16 @@ function _kdeWallpaperPath() {
 // position:fixed + prepend means they're behind all app content in DOM order.
 // Works on transparent Electron windows — the divs have visible pixels so they paint.
 function _injectBlurLayer(bwin, dataUrl) {
-    const safe = dataUrl;
     // Position tracking runs inside the renderer via requestAnimationFrame —
     // window.screenX/screenY are standard browser APIs Chromium exposes, updated
     // every frame. This avoids IPC overhead and works on both X11 and Wayland.
     // Math: #_adamBlurBg has inset:-80px, so its origin is (winX-80, winY-80) on
     // screen. background-position = (80-winX, 80-y) + 'px ' + (80 - y) + 'px' keeps wallpaper aligned.
+    // The URL has to be spliced into the page script as a literal: the page has no access to this
+    // function's variables, and a bare reference threw a ReferenceError that was swallowed, which left
+    // an empty layer (and no blur) on every desktop.
     bwin.webContents.executeJavaScript(`(function(){
+        const safe = ${JSON.stringify(String(dataUrl))};
         let bg = document.getElementById('_adamBlurBg');
         if (!bg) {
             bg = document.createElement('div');
@@ -462,11 +461,10 @@ function _injectBlurLayer(bwin, dataUrl) {
             const tint = document.createElement('div');
             tint.id = '_adamBlurTint';
             // Set styles for the blur layer and the tint
+            // 80px of overscan on every side (the position math below assumes it). Do not set width or
+            // height here: they override inset's right/bottom and leave an 80px strip uncovered.
             bg.style.position = 'fixed';
-            bg.style.top = '0';
-            bg.style.left = '0';
-            bg.style.width = '100%';
-            bg.style.height = '100%';
+            bg.style.inset = '-80px';
             bg.style.zIndex = '-1';
             tint.style.position = 'fixed';
             tint.style.top = '0';
@@ -501,13 +499,50 @@ function _injectBlurLayer(bwin, dataUrl) {
 function _applyKdeWallpaperBlur(bwin) {
     const wp = _kdeWallpaperPath();
     if (!wp) { console.warn('[Adam] KDE wallpaper blur: no Image= found in plasma config'); return; }
-    if (!existsSync(wp)) { console.warn('[Adam] KDE wallpaper blur: file not found:', wp); return; }
+    _injectWallpaperFile(bwin, wp, 'KDE');
+}
+
+// The wallpaper currently drawn behind the interface in blur mode.
+let _blurWallpaper = '';
+
+// A small copy of the wallpaper as a data: URL. The blur is done here, once: a wallpaper reduced to
+// a few dozen pixels and scaled back up is already soft, and it costs nothing per frame, whereas a
+// full-window CSS blur() filter made the page crawl on machines without a GPU. The Background blur
+// slider sets how far the image is reduced.
+function _blurDataUrl(img, refWidth) {
+    if (!img || img.isEmpty()) return null;
+    const blurPx = Math.max(1, parseFloat(loadPrefs().bgBlur) || 18);
+    const width = Math.max(48, Math.min(960, Math.round(refWidth / (blurPx * 1.2))));
+    return 'data:image/jpeg;base64,' + img.resize({ width, quality: 'good' }).toJPEG(80).toString('base64');
+}
+
+function _blurredWallpaperUrl(wp) {
+    return _blurDataUrl(nativeImage.createFromBuffer(readFileSync(wp)), screen.getPrimaryDisplay().size.width || 1920);
+}
+
+// Draw a wallpaper file (blurred as above) behind the interface. Used wherever the compositor cannot
+// blur what is behind the window: Windows, GNOME, Hyprland and KDE Wayland.
+function _injectWallpaperFile(bwin, wp, label) {
     try {
-        const data = readFileSync(wp);
-        const ext  = path.extname(wp).slice(1).replace('jpg', 'jpeg') || 'png';
-        _injectBlurLayer(bwin, `data:image/${ext};base64,${data.toString('base64')}`);
-        console.log('[Adam] KDE wallpaper blur applied:', wp);
-    } catch (e) { console.warn('[Adam] KDE wallpaper blur read failed:', e.message); }
+        if (!wp || !existsSync(wp)) { console.warn(`[Adam] ${label} wallpaper blur: no wallpaper file`); return false; }
+        if (statSync(wp).size > 60 * 1024 * 1024) { console.warn(`[Adam] ${label} wallpaper blur: ${wp} is too large`); return false; }
+        const url = _blurredWallpaperUrl(wp);
+        if (!url) { console.warn(`[Adam] ${label} wallpaper blur: could not decode ${wp}`); return false; }
+        _blurWallpaper = wp;
+        _injectBlurLayer(bwin, url);
+        console.log(`[Adam] ${label} wallpaper blur applied:`, wp);
+        return true;
+    } catch (e) { console.warn(`[Adam] ${label} wallpaper blur failed:`, e.message); return false; }
+}
+
+// Re-render the blur layer after the Background blur slider moves.
+function _refreshWallpaperBlur() {
+    if (win && _blurWallpaper) _injectWallpaperFile(win, _blurWallpaper, 'Refreshed');
+}
+
+async function _applyPlatformWallpaperBlur(bwin) {
+    if (IS_WIN) return _injectWallpaperFile(bwin, await windowsWallpaperPath(), 'Windows');
+    return _injectWallpaperFile(bwin, await gnomeWallpaperPath(), 'GNOME');
 }
 
 function _hyprlandWallpaperPath() {
@@ -536,97 +571,15 @@ function _hyprlandWallpaperPath() {
 function _applyHyprlandWallpaperBlur(bwin) {
     const wp = _hyprlandWallpaperPath();
     if (!wp) { console.warn('[Adam] Hyprland wallpaper blur: no wallpaper found'); return; }
-    if (!existsSync(wp)) { console.warn('[Adam] Hyprland wallpaper blur: file not found:', wp); return; }
-    try {
-        const data = readFileSync(wp);
-        const ext  = path.extname(wp).slice(1).replace('jpg', 'jpeg') || 'png';
-        _injectBlurLayer(bwin, `data:image/${ext};base64,${data.toString('base64')}`);
-        console.log('[Adam] Hyprland wallpaper blur applied:', wp);
-    } catch (e) { console.warn('[Adam] Hyprland wallpaper blur failed:', e.message); }
-}
-
-// Default theme accent. Windows' stock accent is blue, so there the default stays Apple Music pink
-// and the system accent is only offered as an explicit choice (themeInfo.systemAccent).
-async function _getDefaultAccent() { return IS_WIN ? '#fc3c44' : _getSystemAccent(); }
-
-async function _getSystemAccent() {
-    if (IS_WIN) {
-        try {
-            const c = systemPreferences.getAccentColor(); // RRGGBBAA
-            if (/^[0-9a-f]{6}/i.test(c)) return '#' + c.slice(0, 6).toLowerCase();
-        } catch {}
-        return '#fc3c44';
-    }
-    if (_isKde) {
-        try {
-            const out = execFileSync('kreadconfig5', ['--file', 'kdeglobals', '--group', 'General', '--key', 'AccentColor'], { encoding: 'utf8' }).trim();
-            if (out) {
-                const parts = out.split(',').map(s => parseInt(s.trim(), 10));
-                if (parts.length === 3 && parts.every(n => !isNaN(n)))
-                    return '#' + parts.map(n => n.toString(16).padStart(2, '0')).join('');
-            }
-        } catch {}
-    }
-    if (_isHyprland) {
-        try {
-            const conf = path.join(os.homedir(), '.config', 'hypr', 'hyprland.conf');
-            for (const line of readFileSync(conf, 'utf8').split('\n')) {
-                const m = line.match(/col\.active_border\s*=.*?rgba?\(([0-9a-fA-F]{6})/);
-                if (m) return '#' + m[1].toLowerCase();
-            }
-        } catch {}
-    }
-    try {
-        const out = execFileSync('gsettings', ['get', 'org.gnome.desktop.interface', 'accent-color'], { encoding: 'utf8' }).trim().replace(/'/g, '');
-        const gnomeMap = { blue:'#3584e4', teal:'#2190a4', green:'#3a944a', yellow:'#c88800', orange:'#ed5b00', red:'#e62d42', pink:'#d56199', purple:'#9141ac', slate:'#6f8396' };
-        if (gnomeMap[out]) return gnomeMap[out];
-    } catch {}
-    return '#fc3c44';
-}
-
-function _generatePalette(hex, appearance = 'dark') {
-    hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#fc3c44';
-    const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
-    const max = Math.max(r,g,b), min = Math.min(r,g,b), l = (max+min)/2;
-    const d = max-min, s = d === 0 ? 0 : d/(1-Math.abs(2*l-1));
-    let h = 0;
-    if (d) {
-        if (max===r) h=((g-b)/d+6)%6;
-        else if (max===g) h=(b-r)/d+2;
-        else h=(r-g)/d+4;
-        h*=60;
-    }
-    const hi=Math.round(h), si=Math.round(s*100);
-    if (appearance === 'light') {
-        return {
-            accent:       hex,
-            appearance:   'light',
-            bgColor:      `hsla(${hi}, ${Math.round(si*0.25)}%, 96%, 1)`,
-            navBg:        `hsla(${hi}, ${Math.round(si*0.3)}%, 91%, 0.95)`,
-            navBorder:    `hsla(${hi}, ${Math.round(si*0.6)}%, 30%, 0.15)`,
-            accentActive: `hsla(${hi}, ${si}%, 45%, 0.15)`,
-        };
-    }
-    // Dark mode — research-backed values (Spotify/Linear/Radix approach):
-    // bgColor:  s×0.5 gives noticeable hue without mud; 10% L avoids pure black
-    // navBg:    s×0.8 makes sidebar feel colorful; 2% L lift creates hierarchy
-    // navBorder: L=50% sweet spot; 0.25 opacity hits 3:1 contrast minimum
-    // accentActive: s×0.9 pops as clearly interactive; L=60% reads as "active"
-    return {
-        accent:       hex,
-        appearance:   'dark',
-        bgColor:      `hsla(${hi}, ${Math.round(si*0.5)}%, 10%, 1)`,
-        navBg:        `hsla(${hi}, ${Math.round(si*0.8)}%, 14%, 0.72)`,
-        navBorder:    `hsla(${hi}, ${Math.round(si*0.7)}%, 50%, 0.25)`,
-        accentActive: `hsla(${hi}, ${Math.round(si*0.9)}%, 60%, 0.28)`,
-    };
+    _injectWallpaperFile(bwin, wp, 'Hyprland');
 }
 
 function _withAlpha(color, alpha) {
-    if (!color) return '';
+    if (!color || typeof color !== 'string') return '';
     const m = color.match(/^hsla?\((.+)\)$/);
     if (m) {
         const parts = m[1].split(',').map(s => s.trim());
+        if (parts.length < 3) return color;
         return `hsla(${parts[0]}, ${parts[1]}, ${parts[2]}, ${alpha})`;
     }
     if (/^#[0-9a-fA-F]{6}$/.test(color)) {
@@ -638,7 +591,7 @@ function _withAlpha(color, alpha) {
 
 function _applyThemeVars(palette) {
     if (!win || !palette) return;
-    const p = palette;
+    const p = sanitizePalette(palette) ?? defaultPalette(); // a poisoned saved palette must not break startup
     const isLight = p.appearance === 'light';
     nativeTheme.themeSource = isLight ? 'light' : 'dark';
     const bg = JSON.stringify(p.bgColor || (isLight ? 'hsl(0,0%,96%)' : 'hsl(0,0%,10%)'));
@@ -775,7 +728,9 @@ async function refreshBlurBg() {
         })()`).catch(() => {});
         return;
     }
-    _injectBlurLayer(win, sources[0].thumbnail.toDataURL());
+    const shot = sources[0].thumbnail;
+    const url = _blurDataUrl(shot, shot.getSize().width);
+    if (url) _injectBlurLayer(win, url);
 }
 
 function setupDebugLogging(win) {
@@ -798,6 +753,55 @@ function setupDebugLogging(win) {
     });
 }
 
+// The title bar and surface styling of the frameless glass window (the native frame is gone). Idempotent.
+function _injectGlassChrome() {
+    const solid = !_glassActive(); // the panel failed to start: nothing is drawn behind the page, so fill it in
+    const css = `
+        html { background: ${solid ? '#1c1c1e' : 'transparent'} !important; border-radius: 14px !important; overflow: hidden !important;
+               box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10) !important; }
+        body { background: transparent !important; }
+        #_adamBlurBg, #_adamBlurTint { display: none !important; }
+        #adam-caption { position: fixed; top: 0; left: 0; right: 0; height: 32px; z-index: 2147483000; display: flex;
+               justify-content: flex-end; -webkit-app-region: drag; user-select: none; }
+        #adam-caption button { width: 46px; height: 32px; border: 0; background: transparent; color: rgba(255,255,255,0.85);
+               -webkit-app-region: no-drag; display: flex; align-items: center; justify-content: center; cursor: default; }
+        #adam-caption button:hover { background: rgba(255,255,255,0.12); }
+        #adam-caption button.close:hover { background: #e81123; color: #fff; }
+        #adam-caption svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1; }
+    `;
+    win.webContents.executeJavaScript(`(function(){
+        if (!document.getElementById('adam-glass-style')) {
+            const st = document.createElement('style'); st.id = 'adam-glass-style'; st.textContent = ${JSON.stringify(css)};
+            document.documentElement.appendChild(st);
+        }
+        if (document.getElementById('adam-caption') || !document.body) return;
+        const bar = document.createElement('div'); bar.id = 'adam-caption';
+        const mk = (cls, action, svg) => { const b = document.createElement('button'); b.className = cls; b.setAttribute('aria-label', action);
+            b.innerHTML = svg; b.onclick = () => window.adamBridge && window.adamBridge.winControl && window.adamBridge.winControl(action); return b; };
+        bar.appendChild(mk('min', 'minimize', '<svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg>'));
+        bar.appendChild(mk('max', 'maximize', '<svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>'));
+        bar.appendChild(mk('close', 'close', '<svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg>'));
+        document.body.appendChild(bar);
+    })()`).catch(() => {});
+}
+
+// Title-bar buttons of the frameless window. A fixed set of actions; the page cannot ask for anything else.
+ipcMain.on('win:control', (_e, action) => {
+    if (!win || win.isDestroyed()) return;
+    if (action === 'minimize') win.minimize();
+    else if (action === 'maximize') (win.isMaximized() ? win.unmaximize() : win.maximize());
+    else if (action === 'close') win.close();
+});
+
+// Settings → Theme → Liquid glass.
+ipcMain.handle('glass:state', () => ({ supported: !!_glassModule, enabled: loadPrefs().liquidGlass === true, active: _glassActive() }));
+ipcMain.handle('glass:set', (_e, on) => {
+    if (typeof on !== 'boolean') throw new Error('bad argument');
+    const p = loadPrefs(); p.liquidGlass = on; savePrefs(p);
+    return { supported: !!_glassModule, enabled: on, active: _glassActive() };
+});
+ipcMain.on('app:restart', () => { app.relaunch(); app.quit(); });
+
 function createWindow() {
     win = new BrowserWindow({
         width: 1200,
@@ -808,8 +812,11 @@ function createWindow() {
         backgroundColor: '#00000000',
         // Windows: DWM cannot draw Mica behind a layered transparent window, so use the
         // system backdrop material instead (Windows 11; older builds fall back to a solid frame).
-        transparent: !IS_WIN,
-        ...(IS_WIN ? { backgroundMaterial: 'mica' } : {}),
+        ...(_glassWanted
+            // Liquid glass: the native panel under this window draws the refracted desktop, so the window is
+            // frameless and fully transparent and carries only the interface (and its own title bar).
+            ? { frame: false, transparent: true, hasShadow: false }
+            : { transparent: !IS_WIN, ...(IS_WIN ? { backgroundMaterial: 'mica' } : {}) }),
         show: false,
         title: 'Adam',
         webPreferences: {
@@ -823,8 +830,13 @@ function createWindow() {
         },
     });
 
+    if (_glassWanted) {
+        _glass = createGlassController({ glass: _glassModule, win, screen, log: (m) => console.warn('[Adam]', m) });
+        if (!_glass.start()) { console.warn('[Adam] liquid glass could not start; using a solid background'); _glass = null; }
+    }
+
     win.on('page-title-updated', (e) => e.preventDefault());
-    win.loadURL('https://music.apple.com');
+    win.loadURL('https://music.apple.com').catch(e => console.error('[Adam] Apple Music load failed:', e.message));
 
     // KDE X11: set the blur atom before the window is mapped.
     // ready-to-show fires after Chromium's first paint but before win.show(),
@@ -862,12 +874,14 @@ function createWindow() {
             win.setOpacity(op);
             if (op >= 1) clearInterval(step);
         }, 16);
-        // Software blur fallback (X11 / GNOME / Sway).
-        if (_useSoftBlur) refreshBlurBg();
-        // KDE Wayland: inject wallpaper blur via CSS (needs executeJavaScript,
-        // so must run after the page is loaded — here is fine since showWindow
-        // fires on app:ui-ready).
-        if (_isHyprland) _applyHyprlandWallpaperBlur(win);
+        // Blur layer (needs executeJavaScript, so it runs after the page is loaded; showWindow fires
+        // on app:ui-ready). Hyprland reads its own wallpaper config; Windows and GNOME use the
+        // wallpaper file; anything else falls back to a software screenshot blur (X11 / Sway).
+        if (_glassActive()) { /* the native glass panel is the background */ }
+        else if (_isHyprland) _applyHyprlandWallpaperBlur(win);
+        else if (IS_WIN || _desktop.includes('gnome')) {
+            _applyPlatformWallpaperBlur(win).then(ok => { if (!ok && _useSoftBlur) refreshBlurBg(); });
+        } else if (_useSoftBlur) refreshBlurBg();
     };
     win.on('move', () => {
         // Position tracking is handled by requestAnimationFrame in the renderer.
@@ -876,6 +890,22 @@ function createWindow() {
         _bgTimer = setTimeout(refreshBlurBg, 500);
     });
     const showFallback = setTimeout(showWindow, 7000);
+
+    // True while the offline page replaces Apple Music. Chromium's error page still reports the failed
+    // Apple URL, so the URL alone cannot tell the injection code to stand down.
+    let offlineShown = false;
+
+    // Offline, DNS failure, proxy down: show a page that explains it and retries by itself, instead of
+    // the blank window the failed load leaves behind. The page's own load never reports back here.
+    win.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        if (!shouldShowOffline({ errorCode, isMainFrame, validatedURL })) return;
+        console.warn(`[Adam] Apple Music failed to load: ${errorDescription} (${errorCode})`);
+        offlineShown = true;
+        win.loadFile(path.join(__dirname, 'offline.html'), { hash: offlineHash(errorCode, errorDescription) })
+            .catch(e => console.error('[Adam] offline page failed:', e.message));
+        clearTimeout(showFallback);
+        showWindow();
+    });
 
     ipcMain.once('app:ui-ready', () => {
         clearTimeout(showFallback);
@@ -930,8 +960,8 @@ function createWindow() {
             border-right: 1px solid rgba(255,255,255,0.12) !important;
         }
         /* Software blur layer: two real DOM divs injected by _injectBlurLayer().
-           #_adamBlurBg  — wallpaper image + filter:blur, prepended to body so it
-                          renders behind all app content in DOM stacking order.
+           #_adamBlurBg  — the (already blurred, see _blurredWallpaperUrl) wallpaper image,
+                          prepended to body so it renders behind all app content.
            #_adamBlurTint — dark overlay on top of the blur.
            position:fixed + inset:-80px overflows the viewport to hide blur edge fringing. */
         #_adamBlurBg {
@@ -939,7 +969,6 @@ function createWindow() {
             inset: -80px !important;
             pointer-events: none !important;
             background-repeat: no-repeat !important;
-            filter: blur(var(--adam-bg-blur, 18px)) brightness(0.92) !important;
             z-index: -1 !important;
         }
         #_adamBlurTint {
@@ -1276,7 +1305,7 @@ function createWindow() {
     let bundleInjected = false;
 
     async function injectBundles() {
-        if (_httpsHost(win.webContents.getURL()) !== 'music.apple.com' || bundleInjected) return;
+        if (offlineShown || _httpsHost(win.webContents.getURL()) !== 'music.apple.com' || bundleInjected) return;
         bundleInjected = true;
         console.log('[Adam] Injecting bundles into world 0');
 
@@ -1297,9 +1326,21 @@ function createWindow() {
             .catch(e => console.error('[Adam] bundle injection error:', e));
 
         applyPersistedViewSettings();
+        if (_glassWanted) _injectGlassChrome();
     }
 
     win.webContents.on('did-frame-finish-load', injectBundles);
+
+    // The offline page is ours, not Apple's: leave offline mode when the user (or its own retry) heads
+    // back to Apple Music, and keep the glass styling above from making that page transparent.
+    win.webContents.on('did-start-navigation', (details) => {
+        if (details?.isMainFrame && !details.isSameDocument && _httpsHost(details.url) === 'music.apple.com') offlineShown = false;
+    });
+    win.webContents.on('did-finish-load', () => {
+        if (offlineShown && win.webContents.getURL().startsWith('file:')) {
+            win.webContents.insertCSS('html, body { background: #000 !important; }').catch(() => {});
+        }
+    });
 
     win.webContents.on('did-navigate', () => {
         if (_httpsHost(win.webContents.getURL()) === 'music.apple.com') bundleInjected = false;
@@ -1314,15 +1355,10 @@ function createWindow() {
         if (_httpsHost(url)) shell.openExternal(url);
     });
 
-    win.webContents.setWindowOpenHandler(({ url }) => {
-        if (_IN_WINDOW_HOSTS.has(_httpsHost(url))) {
-            win.loadURL(url);
-            return { action: 'deny' };
-        }
-        // Only open safe https:// URLs externally; drop file://, app://, etc.
-        if (url.startsWith('https://')) shell.openExternal(url);
-        return { action: 'deny' };
-    });
+    // Apple's sign-in and authorize pages open as real popups: MusicKit talks back to the page that
+    // opened them through window.opener, which navigating the player itself would lose. Ordinary
+    // music.apple.com links still load in this window.
+    configureAuthPopups(win.webContents, _navigationAllowed, (url) => _httpsHost(url) === 'music.apple.com');
 
     win.webContents.on('did-navigate', () => {
         // Only show if the initial ready-signal already fired; don't interrupt the
@@ -1341,8 +1377,39 @@ function createWindow() {
     win.on('closed', () => { win = null; });
 }
 
-// Hosts allowed to load inside the privileged main window (Apple Music + sign-in).
-const _IN_WINDOW_HOSTS = new Set(['music.apple.com', 'appleid.apple.com', 'idmsa.apple.com']);
+// Popups opened for authentication keep their opener and session. No adamBridge is exposed to
+// them (see auth-preload.cjs). A blank popup is allowed because sites open first and navigate
+// second; every later navigation of a popup is gated by `allowed`. `inWindow` URLs are loaded in
+// the opener's own window instead of a popup.
+function configureAuthPopups(contents, allowed, inWindow = () => false) {
+    contents.setWindowOpenHandler(({ url }) => {
+        if (inWindow(url)) {
+            contents.loadURL(url).catch(() => {});
+            return { action: 'deny' };
+        }
+        if (url === 'about:blank' || allowed(url)) {
+            return { action: 'allow', overrideBrowserWindowOptions: {
+                width: 520, height: 760, show: true, autoHideMenuBar: true,
+                backgroundColor: '#1c1c1e',
+                webPreferences: { preload: path.join(__dirname, 'auth-preload.cjs'), contextIsolation: true,
+                    nodeIntegration: false, sandbox: _hasSandbox },
+            } };
+        }
+        // Only open safe https:// URLs externally; drop file://, app://, etc.
+        if (_httpsHost(url)) shell.openExternal(url).catch(() => {});
+        return { action: 'deny' };
+    });
+    contents.on('did-create-window', (child) => {
+        const gate = (event, url) => {
+            if (url === 'about:blank' || allowed(url)) return;
+            event.preventDefault();
+            if (_httpsHost(url)) shell.openExternal(url).catch(() => {});
+        };
+        child.webContents.on('will-navigate', gate);
+        child.webContents.on('will-redirect', gate);
+        configureAuthPopups(child.webContents, allowed);
+    });
+}
 
 // Hostname of an https:// URL, or null. Origin decisions must compare parsed
 // hostnames: substring/prefix tests also accept music.apple.com.attacker.example.
@@ -1406,6 +1473,46 @@ function applyGlassEffect(blur, opacity) {
     `).catch(() => {});
 }
 
+// ── Theme mode ───────────────────────────────────────────────────────────────
+// Whether the page reports a signed-in Apple Music account (see theme-mode.mjs). The last reported
+// state is remembered so a signed-in user gets no flash of the signed-out look.
+{
+    // Earlier versions saved a palette generated from an accent colour; reset it once.
+    const prefs = loadPrefs();
+    if (migrateThemePrefs(prefs)) savePrefs(prefs);
+}
+let _signedIn = !!loadPrefs().signedIn;
+
+const _resolveThemeMode = (p) => resolveThemeMode({ signedIn: _signedIn, themeMode: p.themeMode, isHyprland: _isHyprland, glass: _glassActive() });
+
+function applyThemeMode() {
+    const p = loadPrefs();
+    const mode = _resolveThemeMode(p);
+    if (mode === 'accent') {
+        if (!p.themePalette) {
+            p.themePalette = defaultPalette();
+            savePrefs(p);
+        }
+        _applyThemeVars(p.themePalette);
+    } else if (mode === 'custom') {
+        _injectCustomFallbackBg();
+        if (p.customCssPath) _injectCustomCss(p.customCssPath);
+    } else {
+        _clearThemeVars();
+        _clearCustomCss();
+    }
+}
+
+ipcMain.on('app:auth-state', (_e, signedIn) => {
+    const on = signedIn === true;
+    if (on === _signedIn) return;
+    _signedIn = on;
+    const p = loadPrefs();
+    p.signedIn = on;
+    savePrefs(p);
+    applyThemeMode();
+});
+
 function applyPersistedViewSettings() {
     const p = loadPrefs();
     if (p.zoomFactor && p.zoomFactor !== 1.0)
@@ -1416,25 +1523,7 @@ function applyPersistedViewSettings() {
             `document.documentElement.style.setProperty('--adam-bg-blur','${parseFloat(p.bgBlur) || 18}px')`
         ).catch(() => {});
     applyTweak('__noop', null);
-    // Resolve effective mode: non-Hyprland can't use blur, fall back to accent.
-    const _effectiveMode = (p.themeMode === 'blur' && !_isHyprland)
-        ? 'accent' : (p.themeMode || (_isHyprland ? 'blur' : 'accent'));
-    if (_effectiveMode === 'accent') {
-        if (p.themePalette) {
-            _applyThemeVars(p.themePalette);
-        } else {
-            _getDefaultAccent().then(accent => {
-                const palette = _generatePalette(accent, p.themeAppearance || 'dark');
-                const fresh = loadPrefs();
-                fresh.themePalette = palette;
-                savePrefs(fresh);
-                _applyThemeVars(palette);
-            });
-        }
-    } else if (_effectiveMode === 'custom') {
-        _injectCustomFallbackBg();
-        if (p.customCssPath) _injectCustomCss(p.customCssPath);
-    }
+    applyThemeMode();
 }
 
 // ── IPC sender check ─────────────────────────────────────────────────────────
@@ -1548,13 +1637,14 @@ ipcMain.on('view:bg-blur',   (_, b) => {
     win?.webContents.executeJavaScript(
         `document.documentElement.style.setProperty('--adam-bg-blur','${parseInt(b)}px')`
     ).catch(() => {});
+    _refreshWallpaperBlur();
 });
 // view:tweak is the settings panel's generic pref writer, reachable from the
 // Apple Music page. Keys the main process owns (read from disk, drive theme or
 // window state) are set only through their dedicated handlers, never here.
 const _MAIN_OWNED_PREFS = new Set([
     'customCssPath', 'themePalette', 'themePresets', 'themeMode', 'themeAppearance',
-    'themeNavBgAlpha', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur',
+    'themeNavBgAlpha', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur', 'linkSchemes', 'linkSchemesApplied', 'signedIn', 'themeVersion', 'liquidGlass',
 ]);
 const _tweakKeyRe = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 function _validTweak(k, v) {
@@ -1583,33 +1673,23 @@ ipcMain.handle('theme:get-info', async () => {
     const p = loadPrefs();
     return {
         desktop:        _desktop || 'unknown',
-        blurAvailable:  _isHyprland,
-        systemAccent:   await _getSystemAccent(),
-        themeMode:      (p.themeMode === 'blur' && !_isHyprland) ? 'accent' : (p.themeMode || (_isHyprland ? 'blur' : 'accent')),
+        blurAvailable:  true,
+        themeMode:      resolveThemeMode({ signedIn: true, themeMode: p.themeMode, isHyprland: _isHyprland }),
         themePalette:   p.themePalette || null,
+        defaultPalette: defaultPalette(),
         themePresets:   [
-            ...Object.entries(_builtinPresets).map(([name, fn]) => ({ name, palette: fn(p.themeAppearance || 'dark'), builtin: true })),
+            ...Object.entries(BUILTIN_PRESETS).map(([name, fn]) => ({ name, palette: fn(), builtin: true })),
             ...(p.themePresets || []),
         ],
         customCssPath:  p.customCssPath || null,
-        themeAppearance: p.themeAppearance || 'dark',
     };
-});
-
-ipcMain.on('theme:set-appearance', async (_, appearance) => {
-    const p = loadPrefs();
-    p.themeAppearance = appearance;
-    const accent = p.themePalette?.accent || await _getDefaultAccent();
-    p.themePalette = _generatePalette(accent, appearance);
-    savePrefs(p);
-    _applyThemeVars(p.themePalette);
 });
 
 ipcMain.on('theme:set-mode', async (_, mode) => {
     const p = loadPrefs();
     p.themeMode = mode;
     if (mode === 'accent') {
-        if (!p.themePalette) p.themePalette = _generatePalette(await _getDefaultAccent());
+        if (!p.themePalette) p.themePalette = defaultPalette();
         savePrefs(p);
         await _clearCustomCss();
         _applyThemeVars(p.themePalette);
@@ -1636,7 +1716,7 @@ ipcMain.on('theme:set-palette', (_, key, value) => {
 
 ipcMain.handle('theme:reset-palette', async () => {
     const p = loadPrefs();
-    p.themePalette = _generatePalette(await _getDefaultAccent(), p.themeAppearance || 'dark');
+    p.themePalette = defaultPalette();
     savePrefs(p);
     _applyThemeVars(p.themePalette);
     return p.themePalette;
@@ -1672,22 +1752,11 @@ ipcMain.on('theme:delete-preset', (_, name) => {
     savePrefs(p);
 });
 
-const _builtinPresets = {
-    'Apple Music Pink': (_appearance) => ({
-        accent:       '#fc3c44',
-        appearance:   'dark',
-        bgColor:      '#000000',
-        navBg:        '#303030',
-        navBorder:    '#3b3b3b',
-        accentActive: 'hsla(358, 87%, 60%, 0.28)',
-    }),
-};
-
 ipcMain.on('theme:apply-preset', (_, name) => {
     if (!_str(name, 64)) return;
     const p = loadPrefs();
-    const palette = _builtinPresets[name]
-        ? _builtinPresets[name](p.themeAppearance || 'dark')
+    const palette = BUILTIN_PRESETS[name]
+        ? BUILTIN_PRESETS[name]()
         : (p.themePresets || []).find(x => x.name === name)?.palette;
     if (!palette) return;
     p.themePalette = palette;
@@ -1716,8 +1785,8 @@ ipcMain.handle('theme:import-preset', async () => {
     });
     if (canceled || !filePaths.length) return null;
     try {
-        const preset = JSON.parse(readFileSync(filePaths[0], 'utf8'));
-        if (!preset.name || !preset.palette) return null;
+        const preset = sanitizePreset(JSON.parse(readFileSync(filePaths[0], 'utf8')));
+        if (!preset) return null;
         const p = loadPrefs();
         p.themePresets = (p.themePresets || []).filter(x => x.name !== preset.name);
         p.themePresets.push(preset);
@@ -1850,8 +1919,7 @@ function createMprisPlayer() {
         // MPRIS2 § OpenUri: forward to the deep-link dispatcher (https:// only).
         player.on('open-uri', (uri) => {
             const s = String(uri ?? '');
-            if (s.startsWith('https://music.apple.com/') || s.startsWith('adam://'))
-                win?.webContents.send('adam:open', { url: s });
+            if (isLinkArg(s)) _dispatchDeepLink(s);
         });
 
         // MPRIS → app: Seek (delta µs) and SetPosition (absolute µs).
@@ -1994,6 +2062,14 @@ ipcMain.on('mpris:update', (_, data) => {
         console.warn('[Adam] MPRIS update failed, will reconnect:', e.message);
         _destroyMprisPlayer();
     }
+});
+
+// Settings → Links: which URL schemes Adam claims. The scheme list and the choices live in
+// link-schemes.mjs; the page can only toggle schemes that module offers.
+ipcMain.handle('links:get', () => linkSchemes.list());
+ipcMain.handle('links:set', (_e, scheme, enabled) => {
+    if (typeof scheme !== 'string' || typeof enabled !== 'boolean') throw new Error('bad arguments');
+    return linkSchemes.set(scheme, enabled);
 });
 
 // Transport commands from the page's navigator.mediaSession handlers (Windows SMTC).
@@ -2224,7 +2300,12 @@ function openLastfmAuthWindow(url) {
             "try{document.documentElement.style.colorScheme='dark';}catch(e){}").catch(() => {});
     });
     _lastfmAuthWin.on('closed', () => { _lastfmAuthWin = null; });
-    _lastfmAuthWin.loadURL(url);
+    configureAuthPopups(_lastfmAuthWin.webContents, (u) => {
+        const host = _httpsHost(u);
+        return host === 'last.fm' || host?.endsWith('.last.fm') ||
+            host === 'accounts.google.com' || host === 'www.facebook.com';
+    });
+    _lastfmAuthWin.loadURL(url).catch(e => console.error('[Adam] Last.fm login load failed:', e.message));
 }
 
 ipcMain.handle('lastfm:auth', async () => {
@@ -2487,17 +2568,12 @@ function createTray() {
                     _storeDirty = true;
                     _storeFlushSync();
                 } catch (_) {}
-                app.relaunch(); isQuitting = true; app.exit(0);
+                app.relaunch(); app.quit();
             },
         },
         {
             label: 'Exit',
-            click: () => {
-                isQuitting = true;
-                stopEngine();
-                if (tray) { tray.destroy(); tray = null; }
-                app.exit(0);
-            },
+            click: () => app.quit(),
         },
     ]);
 
@@ -2543,27 +2619,14 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
     const base = { 'Accept-Ranges': 'bytes', 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store' };
     const isHead = (method || 'GET').toUpperCase() === 'HEAD';
 
-    // Parse a single byte range; ignore multi-range (comma) — RFC 7233 permits 200.
-    let start, end;
-    const m = rangeHeader && !rangeHeader.includes(',') && /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i.exec(rangeHeader);
-    if (m && !(m[1] === '' && m[2] === '')) {
-        if (size <= 0) {
-            console.warn(`[adam-video] serveLocal 416 (empty file) range=${rangeHeader} size=${size}`);
-            return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
-        }
-        if (m[1] === '') {
-            const suffix = Math.min(Number(m[2]), size);
-            start = size - suffix; end = size - 1;
-            if (suffix <= 0) start = -1;
-        } else {
-            start = Number(m[1]);
-            end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
-        }
-        if (start < 0 || start >= size || start > end) {
-            console.warn(`[adam-video] serveLocal 416 unsatisfiable range=${rangeHeader} start=${start} end=${end} size=${size}`);
-            return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
-        }
+    // Single byte range only; multi-range and malformed headers fall back to a full 200 (RFC 7233).
+    const parsed = parseByteRange(rangeHeader, size);
+    if (parsed.kind === 'unsatisfiable') {
+        console.warn(`[adam-video] serveLocal 416 unsatisfiable range=${rangeHeader} size=${size}`);
+        return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
     }
+    const start = parsed.kind === 'range' ? parsed.start : undefined;
+    const end = parsed.kind === 'range' ? parsed.end : undefined;
 
     // Build a web ReadableStream from a bounded file read with explicit cancel
     // handling. Chrome aborts range requests constantly while seeking; if that
@@ -2624,10 +2687,6 @@ app.whenReady().then(() => {
     setTimeout(() => { if (!mprisPlayer) mprisPlayer = createMprisPlayer(); }, 1500);
 
     console.log('[Adam] Electron ready, process.type:', process.type);
-    // Keep Chromium session data in its own subfolder so it doesn't
-    // pollute the same directory as our app prefs/drm data.
-    app.setPath('userData', path.join(CONFIG_DIR, 'electron-session'));
-
     const s = session.fromPartition('persist:apple-music');
     // This session loads remote pages, so the default of "yes to everything" would hand a
     // compromised page the camera, microphone, location, USB and the clipboard. Deny the
@@ -2635,14 +2694,20 @@ app.whenReady().then(() => {
     const DENIED_PERMISSIONS = new Set([
         'media', 'geolocation', 'midi', 'midiSysex', 'hid', 'serial', 'usb', 'bluetooth',
         'display-capture', 'clipboard-read', 'idle-detection', 'fileSystem', 'window-management',
-        'openExternal', 'speaker-selection', 'storage-access', 'top-level-storage-access',
+        'openExternal', 'speaker-selection',
     ]);
+    // Sign-in embeds third-party storage from Apple pages, so storage access is granted to Apple
+    // origins only and denied everywhere else.
+    const isStorage = (perm) => perm === 'storage-access' || perm === 'top-level-storage-access';
     s.setPermissionRequestHandler((wc, perm, cb) => {
-        const deny = DENIED_PERMISSIONS.has(perm);
+        const deny = DENIED_PERMISSIONS.has(perm) || (isStorage(perm) && !_navigationAllowed(wc?.getURL()));
         if (deny) console.warn(`[Adam] denied permission request: ${perm}`);
         cb(!deny);
     });
-    s.setPermissionCheckHandler((wc, perm) => !DENIED_PERMISSIONS.has(perm));
+    s.setPermissionCheckHandler((wc, perm, origin) => {
+        if (isStorage(perm)) return _navigationAllowed(origin) && _navigationAllowed(wc?.getURL());
+        return !DENIED_PERMISSIONS.has(perm);
+    });
 
     // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">
     // loads. This lets MV video use a real HTTPS origin → Chrome's native, reliable
@@ -2703,15 +2768,9 @@ app.whenReady().then(() => {
         }
     });
 
-    // 256 MB disk cache — Apple Music loads ~80 MB of JS/CSS/fonts per session
-    // plus mzstatic.com artwork; 256 MB caches a full session's assets with room
-    // to spare while keeping Chromium's in-memory cache index (which scales with
-    // the cap) small. Larger gave diminishing returns and inflated memory. The
-    // flag must be set before the session allocates its cache, so we set it on
-    // app.commandLine (takes effect on next launch).
+    // The 256 MB cache cap is set at the top of this file, before the session is created.
     s.getCacheSize().then(size =>
         console.log('[Adam] Cache size:', Math.round(size / 1024 / 1024) + ' MB'));
-    app.commandLine.appendSwitch('disk-cache-size', String(256 * 1024 * 1024));
 
     // ── Response header overrides ─────────────────────────────────────────────
     // Two jobs in one hook (single hook per session):
@@ -2777,6 +2836,7 @@ app.whenReady().then(() => {
     });
 
     Menu.setApplicationMenu(null);
+    linkSchemes.apply(); // claim the Apple Music schemes the user turned on (none by default)
     if (IS_WIN) {
         winIntegration = createWinIntegration({
             app, getWin: () => win, nativeImage,
@@ -2815,7 +2875,7 @@ app.whenReady().then(() => {
     // xdg-open or a browser "Open in Adam" prompt), dispatch it after the window
     // is ready. The renderer registers its adam:open listener inside waitForMusicKit,
     // so we defer until ui-ready has fired (listener installed in main.mjs).
-    const coldUrl = process.argv.find(a => a.startsWith('adam://') || a.startsWith('https://music.apple.com'));
+    const coldUrl = process.argv.find(isLinkArg);
     if (coldUrl) {
         ipcMain.once('app:ui-ready', () => {
             // Give MusicKit ~2 s to fully initialise after ui-ready before
@@ -2835,7 +2895,7 @@ function _storeFlushSync() {
         mkdirSync(CONFIG_DIR, { recursive: true });
         const enc = safeStorage.isEncryptionAvailable();
         const json = JSON.stringify(_storeCache);
-        writeFileSync(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
+        writeFileAtomicSync(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
         _storeDirty = false;
     } catch (_) {}
 }
@@ -2851,10 +2911,18 @@ app.on('before-quit', (e) => {
     // sync-writing to disk and really quitting.
     try { win?.webContents?.send('app:flush-and-quit'); } catch (_) {}
     globalShortcut.unregisterAll();
-    setTimeout(() => {
+    try { _glass?.stop(); _glassModule?.shutdown?.(); } catch (_) {}
+    setTimeout(async () => {
         _storeFlushSync();
-        stopEngine();
-        app.quit();
+        // Bound the cookie flush: a stalled promise must not hold the quit open.
+        const part = session.fromPartition('persist:apple-music');
+        part.flushStorageData();
+        await Promise.race([part.cookies.flushStore().catch(() => {}), new Promise(r => setTimeout(r, 3000))]);
+        await stopEngine();
+        if (tray) { tray.destroy(); tray = null; }
+        // Cleanup is complete: the web player's unload handlers must not be able to veto the quit
+        // and leave a window open with a stopped engine.
+        app.exit(0);
     }, 300);
 });
 

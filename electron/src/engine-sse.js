@@ -57,12 +57,14 @@ class EngineSSE {
      */
     waitFor(type, timeoutMs = 10000) {
         return new Promise((resolve, reject) => {
+            // Register the exact function we later remove: once() wraps its callback, so removing
+            // the unwrapped one after a timeout would leave the wrapper subscribed forever.
+            const handler = (data) => { clearTimeout(timer); this.off(type, handler); resolve(data); };
             const timer = setTimeout(() => {
                 this.off(type, handler);
                 reject(new Error(`SSE waitFor('${type}') timed out after ${timeoutMs}ms`));
             }, timeoutMs);
-            const handler = (data) => { clearTimeout(timer); resolve(data); };
-            this.once(type, handler);
+            this.on(type, handler);
         });
     }
 
@@ -80,9 +82,16 @@ class EngineSSE {
         });
     }
 
+    // Back off again unless the stream stayed up long enough to count as healthy; resetting on mere
+    // connect made a server that accepts and immediately drops us a one-second reconnect loop.
+    _noteStreamEnded(livedMs) {
+        if (livedMs >= 10_000) this._retryDelay = 1000;
+    }
+
     async _connect() {
         if (this._ctrl) this._ctrl.abort();
         this._ctrl = new AbortController();
+        let connectedAt = 0;
 
         try {
             const headers = { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' };
@@ -96,7 +105,7 @@ class EngineSSE {
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
             this._connected = true;
-            this._retryDelay = 1000; // reset on successful connect
+            connectedAt = Date.now();
             console.log('[Adam SSE] Connected');
             this._dispatch('sse.open', {}); // local event: lets clients re-send state a restarted engine lost
 
@@ -105,6 +114,7 @@ class EngineSSE {
             if (e.name === 'AbortError') return;
             console.warn('[Adam SSE] Disconnected:', e.message);
         }
+        if (connectedAt) this._noteStreamEnded(Date.now() - connectedAt);
 
         this._connected = false;
         this._scheduleReconnect();

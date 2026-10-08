@@ -11,6 +11,9 @@
 const ENGINE = window._adamEngineURL || 'https://127.0.0.1:20025';
 const PLAY_COUNTS_KEY = 'adam_play_counts';
 const MAX_STORED_TRACKS = 200;
+// The engine accepts at most 512 KB per context and only warms a handful of tracks; a very large queue
+// would exceed it and get no prefetching at all, so send a window around the current position.
+const MAX_CONTEXT_TRACKS = 200;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -76,6 +79,7 @@ class SmartCache {
         // Named job slots: album, playlist, queue, startup.
         // Cancellations are per-slot so a queue change doesn't cancel album warming.
         this._jobs   = {};
+        this._seq    = {};   // per slot: which sendContext call is the latest
         this._counts = loadPlayCounts();
 
         // Auto-clear job slots when the engine reports a job is done or cancelled.
@@ -94,6 +98,7 @@ class SmartCache {
     // ── Context emission ───────────────────────────────────────────────────────
 
     async sendContext({ type, id, reason, slot, tracks, currentIndex, mk }) {
+        const mine = this._seq[slot] = (this._seq[slot] ?? 0) + 1;
         // Cancel the previous job in THIS slot only.
         const prevJobId = this._jobs[slot];
         if (prevJobId) {
@@ -104,11 +109,15 @@ class SmartCache {
         if (!tracks || tracks.length === 0) return;
 
         const sf = mk?.storefrontId ?? 'us';
+        // Window around the current track for huge queues; indices stay relative to the full queue.
+        const start = tracks.length > MAX_CONTEXT_TRACKS
+            ? Math.max(0, Math.min((currentIndex ?? 0) - 10, tracks.length - MAX_CONTEXT_TRACKS)) : 0;
         const payload = {
             context: { type, id: id ?? null, reason },
             currentIndex: currentIndex ?? -1,
             lossless: window._adamLossless ?? false,
-            tracks: tracks.map((t, i) => {
+            tracks: tracks.slice(start, start + MAX_CONTEXT_TRACKS).map((t, k) => {
+                const i = start + k;
                 const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId
                     ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
                 if (!assetId) return null;
@@ -138,6 +147,12 @@ class SmartCache {
             });
             if (resp.ok) {
                 const { jobId } = await resp.json();
+                // A newer call for this slot started while this one was in flight: its tracks are the
+                // stale ones, so cancel the job instead of letting it overwrite the newer job id.
+                if (this._seq[slot] !== mine) {
+                    if (jobId) fetch(`${ENGINE}/api/v1/jobs/${jobId}`, { method: 'DELETE' }).catch(() => {});
+                    return;
+                }
                 this._jobs[slot] = jobId;
                 console.log(`[Adam Cache] ${reason} → jobId=${jobId} slot=${slot} tracks=${payload.tracks.length}`);
             }
@@ -153,7 +168,7 @@ class SmartCache {
     async onAlbumOpen(id, mk) {
         const sf = mk?.storefrontId ?? 'us';
         try {
-            const r = await fetch(`${ENGINE}/api/v1/catalog/albums/${id}?sf=${sf}`);
+            const r = await fetch(`${ENGINE}/api/v1/catalog/albums/${encodeURIComponent(id)}?sf=${encodeURIComponent(sf)}`);
             if (!r.ok) return;
             const data = await r.json();
             const tracks = data?.data?.[0]?.relationships?.tracks?.data ?? data?.tracks ?? [];
@@ -170,7 +185,7 @@ class SmartCache {
     async onPlaylistOpen(id, mk) {
         const sf = mk?.storefrontId ?? 'us';
         try {
-            const r = await fetch(`${ENGINE}/api/v1/catalog/playlists/${id}?sf=${sf}`);
+            const r = await fetch(`${ENGINE}/api/v1/catalog/playlists/${encodeURIComponent(id)}?sf=${encodeURIComponent(sf)}`);
             if (!r.ok) return;
             const data = await r.json();
             const tracks = data?.data?.[0]?.relationships?.tracks?.data ?? data?.tracks ?? [];
@@ -218,9 +233,10 @@ class SmartCache {
 
     // ── Startup warm ───────────────────────────────────────────────────────────
 
-    // Warms top-10 most-played tracks immediately on app startup.
+    // Warms a small set of most-played tracks on idle startup. Active playback already warms its queue.
     async warmOnStartup(mk) {
-        const ids = this.topPlayed(10);
+        if (mk?.nowPlayingItem) return;
+        const ids = this.topPlayed(3);
         if (ids.length === 0) return;
         const tracks = ids.map(id => ({ id }));
         await this.sendContext({
@@ -240,6 +256,10 @@ class SmartCache {
         const onNavigate = (url) => {
             const parsed = parseContentUrl(url);
             if (!parsed) return;
+            // pushState/replaceState fire constantly inside the SPA; act once per page, not per call.
+            const key = `${parsed.type}:${parsed.id}`;
+            if (key === this._lastNavKey) return;
+            this._lastNavKey = key;
             const mk = getMk();
             if (!mk) return;
             if (parsed.type === 'album') {

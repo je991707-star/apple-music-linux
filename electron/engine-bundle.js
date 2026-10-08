@@ -166,6 +166,115 @@
     };
   }
 
+  // src/engine/auth.js
+  function accountSignedIn(status) {
+    const state = status?.state ?? {};
+    if (state.authentication === "failed" || state.session === "expired") return false;
+    return status?.capabilities?.cbcs === true || state.fairplay === "ready" || state.authentication === "logged_in" || state.session === "valid";
+  }
+
+  // src/engine/transport.js
+  function createTransportController({ scope, send }) {
+    let tail = Promise.resolve(), desired = null, revision = 0, pending = 0, epoch = 0;
+    return {
+      get desired() {
+        return desired;
+      },
+      get revision() {
+        return revision;
+      },
+      get pending() {
+        return pending > 0;
+      },
+      reset(paused = null) {
+        desired = paused;
+        revision++;
+        epoch++;
+      },
+      request(paused) {
+        if (desired === paused) return tail;
+        desired = paused;
+        revision++;
+        const owner = scope(), issuedEpoch = epoch;
+        pending++;
+        const result = tail.catch(() => {
+        }).then(async () => {
+          if (owner !== scope() || issuedEpoch !== epoch) return;
+          await send(paused);
+        }).finally(() => {
+          pending--;
+        });
+        tail = result;
+        return result;
+      }
+    };
+  }
+
+  // src/engine/transport-controls.js
+  function installTransportControls({ root = document, state, command }) {
+    const original = /* @__PURE__ */ new Map();
+    const playIcon = '<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 4v20l16-10z"/></svg>';
+    const pauseIcon = '<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 4h4v20h-4zm8 0h4v20h-4z"/></svg>';
+    function button(host, action, icon, label) {
+      let b = host.querySelector("[data-aml-transport]");
+      if (!b) {
+        b = root.createElement("button");
+        b.dataset.amlTransport = action;
+        b.dataset.testid = `aml-transport-${action}`;
+        b.style.cssText = "display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;background:transparent;color:inherit;cursor:pointer";
+        b.onclick = (event) => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const s = state();
+          if (s.active) command(action === "play" ? s.paused ? "play" : "pause" : action);
+        };
+        host.appendChild(b);
+      }
+      if (b.innerHTML !== icon) b.innerHTML = icon;
+      if (b.getAttribute("aria-label") !== label) b.setAttribute("aria-label", label);
+      return b;
+    }
+    function restore() {
+      for (const [node, display] of original) node.style.display = display;
+      original.clear();
+      root.querySelectorAll("[data-aml-transport]").forEach((b) => b.remove());
+    }
+    function sync() {
+      const s = state();
+      for (const node of original.keys()) if (!node.isConnected) original.delete(node);
+      if (!s.active) {
+        restore();
+        return;
+      }
+      for (const host of root.querySelectorAll("amp-playback-controls-play, amp-playback-controls-item-skip")) {
+        for (const native of host.querySelectorAll("button:not([data-aml-transport])")) {
+          if (!original.has(native)) original.set(native, native.style.display);
+          if (native.style.display !== "none") native.style.display = "none";
+        }
+        if (host.tagName === "AMP-PLAYBACK-CONTROLS-PLAY") {
+          button(host, "play", s.paused ? playIcon : pauseIcon, s.paused ? "Play" : "Pause");
+        } else {
+          const previous = host.getAttribute("direction") === "previous";
+          const action = previous ? "previous" : "next";
+          const icon = `<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><g fill="currentColor"${previous ? ' transform="translate(32 0) scale(-1 1)"' : ""}><path d="M5 5v18l11-9zm11 0v18l11-9zM27 5h2v18h-2z"/></g></svg>`;
+          const b = button(host, action, icon, previous ? "Previous track" : "Next track");
+          const disabled = previous ? !s.canPrevious : !s.canNext;
+          if (b.disabled !== disabled) b.disabled = disabled;
+          b.style.opacity = disabled ? "0.35" : "";
+        }
+      }
+    }
+    const observer = new MutationObserver((records) => {
+      if (records.some((r) => [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1 && (n.matches?.("amp-playback-controls-play, amp-playback-controls-item-skip, button") || n.querySelector?.("amp-playback-controls-play, amp-playback-controls-item-skip"))))) sync();
+    });
+    observer.observe(root.documentElement, { childList: true, subtree: true });
+    sync();
+    return { sync, dispose() {
+      observer.disconnect();
+      restore();
+    } };
+  }
+
   // src/engine/handoff.js
   function playbackMode(sess) {
     if (sess?.capabilities?.video) return "mv";
@@ -190,6 +299,32 @@
     }
   }
 
+  // src/engine/playstate.js
+  var PLAY_STATE = Object.freeze({
+    IDLE: "idle",
+    // no active attempt
+    OPENING: "opening",
+    // POST /api/v1/playback in flight
+    CDN_SETTLING: "cdn-settling",
+    // session open; CDN gate open so MK can fire NPIDF
+    STREAMING: "streaming",
+    // MSE source buffer active
+    COMPLETE: "complete"
+    // stream fully pumped
+  });
+  var S = PLAY_STATE;
+  var PLAY_TRANSITIONS = Object.freeze({
+    [S.IDLE]: Object.freeze([S.OPENING]),
+    [S.OPENING]: Object.freeze([S.CDN_SETTLING, S.STREAMING, S.IDLE]),
+    [S.CDN_SETTLING]: Object.freeze([S.STREAMING, S.IDLE]),
+    [S.STREAMING]: Object.freeze([S.COMPLETE, S.IDLE]),
+    [S.COMPLETE]: Object.freeze([S.IDLE])
+  });
+  function isLegalPlayTransition(prev, next) {
+    if (prev === next) return prev in PLAY_TRANSITIONS;
+    return PLAY_TRANSITIONS[prev]?.includes(next) ?? false;
+  }
+
   // src/engine-playback.js
   try {
     for (const k of Object.keys(localStorage)) {
@@ -203,7 +338,6 @@
   if (window.__adamEngineInjected) throw new Error("[Adam] double-injection guard");
   window.__adamEngineInjected = true;
   var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
-  var ENGINE_HTTPS = ENGINE;
   var _ADAM_DEBUG = !!(window.adamBridge?.isDev || window.adamBridge?.debug) || localStorage.getItem("_ADAM_DEBUG") === "1";
   var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
   var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
@@ -382,6 +516,7 @@
   var _directPlayGen = 0;
   var _directPlayPromise = null;
   var _adamNextRef = null;
+  var _adamPrevRef = null;
   var _iframePlay = (() => {
     try {
       const ifr = document.createElement("iframe");
@@ -400,6 +535,7 @@
   var _vlcMode = false;
   var _vlcPosMs = 0;
   var _vlcPaused = false;
+  var _vlcSyncVolume = null;
   var _vlcVolPersist = 100;
   var _adamTransitioning = false;
   var _sessionContainers = [];
@@ -659,6 +795,31 @@
     } catch (_) {
     }
   }
+  var _syncVLCControls = () => {
+  };
+  var _pendingVLCIntent = null;
+  var _vlcTransport = createTransportController({
+    scope: () => _sessionId,
+    send: async (paused) => {
+      const response = await fetch(`${ENGINE}/api/v1/vlc/${paused ? "pause" : "resume"}`, {
+        method: "POST",
+        signal: AbortSignal.timeout(4e3)
+      });
+      if (!response.ok) throw new Error(`VLC transport: HTTP ${response.status}`);
+    }
+  });
+  function _requestVLCTransport(paused) {
+    _vlcPaused = paused;
+    _syncVLCControls();
+    const command = _vlcTransport.request(paused);
+    const revision = _vlcTransport.revision;
+    return command.catch((error) => {
+      console.warn("[Adam VLC] transport:", error.message);
+      if (_vlcTransport.revision === revision) _vlcTransport.reset();
+    });
+  }
+  var _vlcSeekRevision = 0;
+  var _vlcPollGeneration = 0;
   var _vlcPollTimer = null;
   var _vlcSeekTimer = null;
   var _vlcSeekFrozen = false;
@@ -697,8 +858,6 @@
   var _streamComplete = false;
   var _chunkCache = null;
   var _msePaused = false;
-  var _wcStallPaused = false;
-  var _wcAudioHold = false;
   var _activeMvControls = null;
   var _vlcLive = false;
   var _prevMs = null;
@@ -739,13 +898,7 @@
   function _warnIfOurSourceCleared(el, how) {
     if (!_activeMs || _activeMs.readyState === "closed" || !_ourBlobUrl) return;
     if (how.startsWith("src=") && how !== 'src=""') return;
-    console.warn("[Adam MSE] our MediaSource is being detached by " + how + "\n" + (() => {
-      const l = Error.stackTraceLimit;
-      Error.stackTraceLimit = 30;
-      const st = (new Error().stack || "").split("\n").slice(2, 22).join("\n");
-      Error.stackTraceLimit = l;
-      return st;
-    })());
+    console.warn("[Adam MSE] our MediaSource is being detached by " + how + "\n" + (new Error().stack || "").split("\n").slice(2, 8).join("\n"));
   }
   function blockAppleCDN() {
     if (window.__adamCDNBlocked) return;
@@ -801,23 +954,16 @@
     });
     mkAudio.play = () => {
       if (_vlcMode) {
+        if (_vlcTransport.desired === true) return Promise.resolve();
         console.log(`[Adam VLC] audio.play() \u2192 resume`);
         _vlcPaused = false;
         const p2 = new Promise((resolve) => _resolvers.push(resolve));
         mkAudio.dispatchEvent(new Event("playing"));
         if (_vlcLoading) mkAudio.dispatchEvent(new Event("waiting"));
-        fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
-        });
         return p2;
       }
-      if (_msePaused || _wcStallPaused) return new Promise(() => {
+      if (_msePaused) return new Promise(() => {
       });
-      if (_wcAudioHold) {
-        const p2 = new Promise((resolve) => _resolvers.push(resolve));
-        mkAudio.dispatchEvent(new Event("playing"));
-        mkAudio.dispatchEvent(new Event("waiting"));
-        return p2;
-      }
       if (!_sessionId) {
         if (!_directPlayAdamId) {
           return new Promise((resolve) => _resolvers.push(resolve));
@@ -841,6 +987,7 @@
     mk.seekToTime = async function(seekSec) {
       const audio = getMKAudio();
       if (_vlcMode) {
+        const seekRevision = ++_vlcSeekRevision;
         _vlcPosMs = Math.round(seekSec * 1e3);
         _vlcSeekFrozen = true;
         console.log(`[Adam VLC] seekToTime(${seekSec.toFixed(3)})  target=${_vlcPosMs}ms  debounce-reset`);
@@ -865,12 +1012,14 @@
             });
             const rtt = (performance.now() - t0).toFixed(0);
             const seekData = await seekResp.json().catch(() => ({}));
+            if (seekRevision !== _vlcSeekRevision) return;
             actualStartMs = seekData.actualStartMs ?? seekTarget;
             console.log(`[Adam VLC seek] \u25C4 RECV  target=${seekTarget}ms  engine.actualStart=${actualStartMs}ms  rtt=${rtt}ms`);
             _vlcPosMs = seekTarget;
           } catch (e) {
             console.warn(`[Adam VLC seek] \u2717 ERROR`, e);
           }
+          if (seekRevision !== _vlcSeekRevision) return;
           _vlcSeekOffsetMs = 0;
           _vlcPrevState = null;
           _vlcSeekFrozen = false;
@@ -878,8 +1027,7 @@
           if (_vlcWasPlaying) {
             _vlcPaused = false;
             _vlcPostSeek = true;
-            fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
-            });
+            _requestVLCTransport(false);
           }
           console.log(`[Adam VLC seek] \u21BA UNFREEZE  uiPos=${_vlcPosMs}ms  postSeek=${_vlcPostSeek}`);
           window.adamBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3, seeked: true });
@@ -985,21 +1133,10 @@
     "rgba(255,255,255,.12) var(--adam-buffer,var(--progress,0%))",
     ")!important}"
   ].join("");
-  var PLAY_STATE = Object.freeze({
-    IDLE: "idle",
-    // no active attempt
-    OPENING: "opening",
-    // POST /api/v1/playback in flight
-    CDN_SETTLING: "cdn-settling",
-    // session open; CDN gate open so MK can fire NPIDF
-    STREAMING: "streaming",
-    // MSE source buffer active
-    COMPLETE: "complete"
-    // stream fully pumped
-  });
   var _playState = PLAY_STATE.IDLE;
   function setPlayState(next, ctx) {
     const prev = _playState;
+    if (!isLegalPlayTransition(prev, next)) console.warn(`[Adam State] unexpected transition ${prev} \u2192 ${next}${ctx ? " | " + ctx : ""}`);
     _playState = next;
     if (prev !== next) console.log(`[Adam State] ${prev} \u2192 ${next}${ctx ? " | " + ctx : ""}`);
   }
@@ -1426,8 +1563,8 @@
       });
     }
   }
-  async function _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec) {
-    if (pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) return;
+  async function _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl2, mySC, wasStreamComplete, seekSec) {
+    if (pipeCtrl2.signal.aborted || _seekFetchCtrl !== mySC) return;
     await _sbWaitUpdate(sb, 0);
     if (wasStreamComplete) {
       if (ms.readyState === "open") {
@@ -1444,18 +1581,18 @@
       const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : seekSec;
       let resumeResp;
       try {
-        resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl.signal });
+        resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl2.signal });
       } catch (_) {
         return;
       }
-      if (!resumeResp.ok || pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) {
+      if (!resumeResp.ok || pipeCtrl2.signal.aborted || _seekFetchCtrl !== mySC) {
         resumeResp?.body?.cancel();
         return;
       }
-      await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl.signal, ms, _durationSec, performance.now());
+      await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl2.signal, ms, _durationSec, performance.now());
     }
   }
-  async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec) {
+  async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl2, mySC, wasStreamComplete, seekSec) {
     const waitIdle = () => new Promise((res, rej) => {
       if (!sb.updating) return res();
       const done = () => {
@@ -1473,7 +1610,7 @@
     });
     try {
       await waitIdle();
-      if (pipeCtrl.signal.aborted || ms.readyState !== "open") return;
+      if (pipeCtrl2.signal.aborted || ms.readyState !== "open") return;
       if (sb.buffered.length > 0) sb.remove(0, Infinity);
       await waitIdle();
       try {
@@ -1481,9 +1618,9 @@
       } catch (_) {
       }
       for (const chunk of cacheSnap.chunks) {
-        if (pipeCtrl.signal.aborted) return;
+        if (pipeCtrl2.signal.aborted) return;
         await waitIdle();
-        if (pipeCtrl.signal.aborted || ms.readyState !== "open") return;
+        if (pipeCtrl2.signal.aborted || ms.readyState !== "open") return;
         try {
           sb.appendBuffer(chunk);
         } catch (e) {
@@ -1491,9 +1628,9 @@
           return;
         }
       }
-      await _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec);
+      await _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl2, mySC, wasStreamComplete, seekSec);
     } catch (e) {
-      if (!pipeCtrl.signal.aborted) console.error("[Adam MSE] cache re-inject error:", e.message);
+      if (!pipeCtrl2.signal.aborted) console.error("[Adam MSE] cache re-inject error:", e.message);
     }
   }
   function _mseCacheSeek(sb, audio, ms, seekSec) {
@@ -1516,16 +1653,16 @@
       _pipeCtrl = null;
     }
     _pipeCtrl = new AbortController();
-    const pipeCtrl = _pipeCtrl;
+    const pipeCtrl2 = _pipeCtrl;
     console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
-    _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec).catch(() => {
+    _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl2, mySC, wasStreamComplete, seekSec).catch(() => {
     });
     try {
       _nativeCTSet.call(audio, seekSec);
     } catch (_) {
     }
     audio.addEventListener("canplay", () => {
-      if (pipeCtrl.signal.aborted) return;
+      if (pipeCtrl2.signal.aborted) return;
       try {
         sb.appendWindowStart = 0;
       } catch (_) {
@@ -1603,12 +1740,12 @@
     } catch (_) {
     }
     _pipeCtrl = new AbortController();
-    const pipeCtrl = _pipeCtrl;
-    pipeToSourceBuffer(sb, audio, resp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch((e) => {
-      if (!pipeCtrl.signal.aborted) console.error("[Adam MSE] Seek pipe error:", e.message);
+    const pipeCtrl2 = _pipeCtrl;
+    pipeToSourceBuffer(sb, audio, resp, pipeCtrl2.signal, ms, _durationSec, performance.now()).catch((e) => {
+      if (!pipeCtrl2.signal.aborted) console.error("[Adam MSE] Seek pipe error:", e.message);
     });
     audio.addEventListener("canplay", () => {
-      if (pipeCtrl.signal.aborted) return;
+      if (pipeCtrl2.signal.aborted) return;
       try {
         sb.appendWindowStart = 0;
       } catch (_) {
@@ -1645,6 +1782,7 @@
     await _mseNetworkSeek(sb, audio, ms, seekSec);
   }
   function stopVLCPoll() {
+    _vlcPollGeneration++;
     if (_vlcPollTimer) {
       clearInterval(_vlcPollTimer);
       _vlcPollTimer = null;
@@ -1744,17 +1882,10 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _nativeVideo = false;
-    const _wcVideo = false;
-    const _mp4Video = false;
     const _vsegVideo = true;
     let _vsegBufferedSec = 0;
     let _vsegSb = null;
-    let _wcCleanup = null;
-    let _wcBufferedSec = 0;
-    let _wcParsedSec = 0;
-    let _wcVW = 0, _wcVH = 0;
-    console.log("%c[Adam MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _vsegVideo ? "vseg" : _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
+    console.log("%c[Adam MV]%c video backend = vseg", "color:#bf5af2;font-weight:bold", "color:inherit");
     const _nativeVidStopEvt = (e) => e.stopImmediatePropagation();
     if (nativeVidEl) {
       ["waiting", "stalled", "suspend"].forEach(
@@ -1879,25 +2010,23 @@
     }
     const mvPlay = () => {
       _userPaused = false;
-      if (_wcVideo) return _iframePlay.call(mkAudio).catch(() => {
-      });
       return _iframePlay.call(myVid).then(() => _iframePlay.call(mkAudio).catch(() => {
       })).catch(() => {
       });
     };
     const mvPause = () => {
       _userPaused = true;
-      if (!_wcVideo) myVid.pause();
+      myVid.pause();
       mkAudio.pause();
     };
     const togglePlayPause = () => {
-      if (_wcVideo ? mkAudio.paused : myVid.paused) mvPlay();
+      if (myVid.paused) mvPlay();
       else mvPause();
     };
     if (nativeVidEl) {
       nativeVidEl.play = function() {
         if (!_avStarted) return Promise.resolve();
-        if (_wcVideo ? mkAudio?.paused : myVid?.paused) mvPlay();
+        if (myVid?.paused) mvPlay();
         return Promise.resolve();
       };
       nativeVidEl.pause = function() {
@@ -1929,7 +2058,7 @@
     const _resizeScrim = () => {
       const cw = mvContainer.offsetWidth || window.innerWidth;
       const ch = mvContainer.offsetHeight || window.innerHeight;
-      const vw = _wcVW || myVid.videoWidth, vh2 = _wcVH || myVid.videoHeight;
+      const vw = myVid.videoWidth, vh2 = myVid.videoHeight;
       let lv = 0, lh = 0;
       if (vw && vh2) {
         const vr = vw / vh2, cr = cw / ch;
@@ -2254,13 +2383,9 @@
       rangeInput.addEventListener("input", () => {
         const t = parseFloat(rangeInput.value);
         if (!isNaN(t)) {
-          if (_wcVideo || _nativeVideo) {
-            if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
-          } else {
-            myVid.currentTime = t;
-            mkAudio.currentTime = t;
-            _updateProgress();
-          }
+          myVid.currentTime = t;
+          mkAudio.currentTime = t;
+          _updateProgress();
         }
         _showControls();
       }, true);
@@ -2271,12 +2396,6 @@
         if (isNaN(t)) return;
         if (Math.abs(t - _lastCommit) < 0.25) return;
         _lastCommit = t;
-        if (_wcVideo) {
-          mkAudio.currentTime = t;
-        } else if (_nativeVideo && _nativeSeekRef) {
-          console.log(`[Adam MV native] commit seek \u2192 ${t.toFixed(2)}s`);
-          _nativeSeekRef(t);
-        }
       };
       const _cancelScrub = () => {
         _userScrubbing = false;
@@ -2285,12 +2404,8 @@
       rangeInput.addEventListener("touchend", _commitScrub, true);
       rangeInput.addEventListener("change", _commitScrub, true);
       rangeInput.addEventListener("pointercancel", _cancelScrub, true);
-      const _durEl = _wcVideo ? mkAudio : myVid;
+      const _durEl = myVid;
       const _setRangeMax = () => {
-        if (_nativeVideo && _durationSec > 0) {
-          rangeInput.max = String(_durationSec);
-          return;
-        }
         if (_durEl.duration && isFinite(_durEl.duration)) rangeInput.max = String(_durEl.duration);
         else if (_durationSec > 0) rangeInput.max = String(_durationSec);
       };
@@ -2329,7 +2444,7 @@
       togglePlayPause();
       _showControls();
     }, true);
-    const _playStateEl = _wcVideo ? mkAudio : myVid;
+    const _playStateEl = myVid;
     const _syncPlayIcon = () => {
       _mvPlayBtn.innerHTML = _playStateEl.paused ? _svgPlay : _svgPause;
       _mvPlayBtn.setAttribute("aria-label", _playStateEl.paused ? "Play" : "Pause");
@@ -2338,18 +2453,11 @@
     _playStateEl.addEventListener("pause", _syncPlayIcon);
     _playStateEl.addEventListener("playing", _syncPlayIcon);
     _syncPlayIcon();
-    const _mvCurTime = () => (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0;
+    const _mvCurTime = () => myVid.currentTime || 0;
     const _mvSeekTo = (sec) => {
-      if (_wcVideo) {
-        const dur = mkAudio.duration || _durationSec || 1e9;
-        mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
-      } else if (_nativeVideo && _nativeSeekRef) {
-        _nativeSeekRef(Math.max(0, Math.min(_durationSec || 1e9, sec)));
-      } else {
-        const dur = _durationSec || myVid.duration || 1e9;
-        myVid.currentTime = Math.max(0, Math.min(dur, sec));
-        mkAudio.currentTime = myVid.currentTime;
-      }
+      const dur = _durationSec || myVid.duration || 1e9;
+      myVid.currentTime = Math.max(0, Math.min(dur, sec));
+      mkAudio.currentTime = myVid.currentTime;
     };
     const _skipFwd = avp?.querySelector("amp-playback-controls-skip-forward") ?? avp?.querySelector('[aria-label*="forward" i]') ?? avp?.querySelector('[aria-label*="10" i]');
     const _insertTarget = playCtrl ?? _skipFwd;
@@ -2511,38 +2619,17 @@
     const _updateProgress = () => {
       if (!rangeInput) return;
       if (_userScrubbing) return;
-      if (_wcStallPaused && _wcVideo) {
-        const t2 = mkAudio.currentTime;
-        const max2 = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
-        rangeInput.value = String(t2);
-        const frac2 = max2 > 0 ? Math.min(1, Math.max(0, t2 / max2)) : 0;
-        rangeInput.style.setProperty("--progress", _fillPct(frac2).toFixed(2) + "%");
-        if (timeElapsed) timeElapsed.textContent = _fmtTime(t2);
-        return;
-      }
-      const t = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
+      const t = myVid.currentTime;
       const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
       rangeInput.value = String(t);
       const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
       const pct2 = _fillPct(frac).toFixed(2) + "%";
       rangeInput.style.setProperty("--progress", pct2);
-      if (!_wcVideo && !_nativeVideo) rangeInput.style.setProperty("--width", pct2);
+      rangeInput.style.setProperty("--width", pct2);
       if (max > 0) {
         let bFrac = 0;
-        if (_wcVideo) {
-          bFrac = Math.min(1, Math.max(0, _wcParsedSec / max));
-        } else if (_vsegVideo) {
-          if (_vsegSb?.buffered.length > 0)
-            bFrac = Math.min(1, Math.max(0, _vsegSb.buffered.end(_vsegSb.buffered.length - 1) / max));
-        } else if (_nativeVideo) {
-          const nBuf = myVid.buffered;
-          if (nBuf && nBuf.length > 0)
-            bFrac = Math.min(1, Math.max(0, nBuf.end(nBuf.length - 1) / max));
-        } else {
-          const vBuf = videoSb?.buffered;
-          if (vBuf && vBuf.length > 0)
-            bFrac = Math.min(1, Math.max(0, vBuf.end(vBuf.length - 1) / max));
-        }
+        if (_vsegSb?.buffered.length > 0)
+          bFrac = Math.min(1, Math.max(0, _vsegSb.buffered.end(_vsegSb.buffered.length - 1) / max));
         rangeInput.style.setProperty("--adam-buffer", _fillPct(bFrac).toFixed(2) + "%");
       }
       if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
@@ -2588,6 +2675,7 @@
     let _bufPaused = false;
     let _userPaused = false;
     let _bufWaitStart = 0;
+    const videoEl = myVid;
     const _getVidLead = () => {
       const ct = videoEl.currentTime;
       for (let i = 0; i < videoEl.buffered.length; i++) {
@@ -2597,7 +2685,6 @@
       return 0;
     };
     const _startDynBuf = () => {
-      if (_nativeVideo) return;
       if (_dynBufTimer) return;
       _dynBufTimer = setInterval(() => {
         if (!_avStarted || _abortCtrl?.signal.aborted) {
@@ -2701,18 +2788,7 @@
       mvContainer.style.removeProperty("cursor");
       if (exitBtn) exitBtn.style.removeProperty("pointer-events");
       _mvGateOpen = true;
-      if (_vsegVideo || _wcVideo || _nativeVideo) {
-        _iframePlay.call(mkAudio).catch((e) => console.warn("[Adam MV] audio play rejected:", e.message));
-        return;
-      }
-      const audCt = mkAudio.currentTime;
-      const vidCt = videoEl.currentTime;
-      const vidBufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
-      const canSyncToAudio = Math.abs(vidCt - audCt) > 0.05 && audCt <= vidBufEnd + 1;
-      console.log(`[Adam MV buf:gate] A/V gate open audio=${audCt.toFixed(2)} video=${vidCt.toFixed(2)} vidBufEnd=${vidBufEnd.toFixed(2)} canSyncToAudio=${canSyncToAudio}`);
-      if (canSyncToAudio) videoEl.currentTime = audCt;
-      _iframePlay.call(videoEl).catch((e) => console.warn("[Adam MV] av-gate play rejected:", e.message));
-      _startDynBuf();
+      _iframePlay.call(mkAudio).catch((e) => console.warn("[Adam MV] audio play rejected:", e.message));
     };
     mkAudio.addEventListener("canplay", () => {
       _audioCanPlay = true;
@@ -2912,628 +2988,18 @@
       } catch (_) {
       }
     }
-    const rawVideoCodec = _videoCodec || "";
-    const videoCodecStr = rawVideoCodec.split(",").map((c) => c.trim()).find((c) => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? "avc1.640028";
-    const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
-    if (!_wcVideo && !_mp4Video && !MediaSource.isTypeSupported(videoMime)) {
-      console.error(`[Adam MV] video codec not supported: ${videoMime} \u2014 skipping track`);
-      _audioPipeCtrl.abort();
-      mkAudio.pause();
-      mkAudio.src = "";
-      if (audioMs.readyState === "open") {
-        try {
-          audioMs.endOfStream();
-        } catch (_) {
-        }
-      }
-      if (ms.readyState === "open") {
-        try {
-          ms.endOfStream();
-        } catch (_) {
-        }
-      }
-      if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
-      _adamNextRef?.().catch(() => {
-      });
-      return;
-    }
-    console.log(`[Adam MV] video codec="${videoCodecStr}"`);
-    let videoSb = _wcVideo || _mp4Video || _nativeVideo ? null : ms.addSourceBuffer(videoMime);
-    const videoEl = myVid;
-    let pipeCtrl = new AbortController();
-    let _pipeRestarted = false;
-    const videoUrl = `${ENGINE}/api/v1/playback/${_sessionId}/video`;
-    const BUF_MAX_AHEAD = 50;
-    const BUF_BACK_KEEP = 15;
-    const _waitVidIdle = () => new Promise((res, rej) => {
-      if (!videoSb.updating) return res();
-      const onEnd = () => {
-        videoSb.removeEventListener("error", onErr);
-        res();
-      };
-      const onErr = () => {
-        videoSb.removeEventListener("updateend", onEnd);
-        setTimeout(() => {
-          const buf = videoSb.buffered?.length ? `${videoSb.buffered.start(0).toFixed(1)}-${videoSb.buffered.end(videoSb.buffered.length - 1).toFixed(1)}` : "empty";
-          const veCode = videoEl.error?.code ?? "none";
-          const veMsg = videoEl.error?.message ?? "";
-          rej(new Error(`SB error buffered=${buf} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState} veCode=${veCode} veMsg="${veMsg}"`));
-        }, 50);
-      };
-      videoSb.addEventListener("updateend", onEnd, { once: true });
-      videoSb.addEventListener("error", onErr, { once: true });
-    });
-    const _boxName = (chunk) => {
-      if (!chunk || chunk.byteLength < 8) return "?";
-      const v = new DataView(chunk.buffer, chunk.byteOffset, Math.min(chunk.byteLength, 8));
-      return String.fromCharCode(v.getUint8(4), v.getUint8(5), v.getUint8(6), v.getUint8(7));
-    };
-    const _bufRanges = (sb) => {
-      const r = [];
-      for (let i = 0; i < sb.buffered.length; i++) r.push(`${sb.buffered.start(i).toFixed(2)}-${sb.buffered.end(i).toFixed(2)}`);
-      return r.join(",") || "(empty)";
-    };
-    const _leadAhead = () => {
-      const b = videoSb.buffered;
-      if (!b || b.length === 0) return 0;
-      return Math.max(0, b.end(b.length - 1) - videoEl.currentTime);
-    };
-    const _evictBackBuffer = async (keepSec, signal) => {
-      const b = videoSb.buffered;
-      if (!b || b.length === 0) return false;
-      const cutoff = videoEl.currentTime - keepSec;
-      const start = b.start(0);
-      if (cutoff <= start + 0.1) return false;
-      await _waitVidIdle();
-      if (signal.aborted || ms.readyState !== "open") return false;
-      try {
-        videoSb.remove(start, cutoff);
-      } catch (_) {
-        return false;
-      }
-      await _waitVidIdle();
-      console.log(`[Adam MV-pipe] evicted ${start.toFixed(1)}-${cutoff.toFixed(1)}s (ct=${videoEl.currentTime.toFixed(1)}) buf=${_bufRanges(videoSb)}`);
-      return true;
-    };
-    const _awaitBufferHeadroom = (signal) => new Promise((resolve) => {
-      if (signal.aborted || ms.readyState !== "open") return resolve();
-      if (_leadAhead() < BUF_MAX_AHEAD) return resolve();
-      console.log(`[Adam MV-pipe] backpressure: lead=${_leadAhead().toFixed(1)}s >= ${BUF_MAX_AHEAD}s \u2014 pausing fetch`);
-      let tick = 0;
-      const onAbort = () => {
-        clearInterval(tick);
-        resolve();
-      };
-      tick = setInterval(() => {
-        if (signal.aborted || ms.readyState !== "open" || _leadAhead() < BUF_MAX_AHEAD) {
-          clearInterval(tick);
-          signal.removeEventListener("abort", onAbort);
-          resolve();
-        }
-      }, BUF_POLL_MS);
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
-    const _appendWithQuota = async (chunk, signal) => {
-      for (let attempt = 0; attempt < 4; attempt++) {
-        if (signal.aborted || ms.readyState !== "open") return false;
-        try {
-          videoSb.appendBuffer(chunk);
-          return true;
-        } catch (e) {
-          if (e.name === "QuotaExceededError") {
-            const keep = [BUF_BACK_KEEP, 8, 2][Math.min(attempt, 2)];
-            console.warn(`[Adam MV-pipe] quota exceeded size=${chunk.byteLength} attempt=${attempt + 1} \u2014 evicting to ${keep}s back buffer`);
-            const freed = await _evictBackBuffer(keep, signal);
-            if (!freed && attempt >= 1) {
-              throw new Error(`MSE quota exhausted, nothing to evict (buf=${_bufRanges(videoSb)} ct=${videoEl.currentTime.toFixed(2)})`);
-            }
-          } else if (e.name === "InvalidStateError") {
-            await _waitVidIdle();
-          } else {
-            throw e;
-          }
-        }
-      }
-      if (signal.aborted || ms.readyState !== "open") return false;
-      throw new Error(`appendBuffer failed after retries size=${chunk.byteLength} buf=${_bufRanges(videoSb)}`);
-    };
-    const runVideoPipe = async (url, signal) => {
-      console.log(`[Adam MV-pipe] start url=${url.split("?")[1] || "base"} signal.aborted=${signal.aborted}`);
-      const resp = await fetch(url, { signal });
-      if (!resp.ok) throw new Error(`video ${resp.status}`);
-      const reader = resp.body.getReader();
-      let chunkN = 0;
-      try {
-        while (true) {
-          await _awaitBufferHeadroom(signal);
-          if (signal.aborted || ms.readyState !== "open") break;
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (signal.aborted || ms.readyState !== "open") break;
-          await _waitVidIdle();
-          if (signal.aborted || ms.readyState !== "open") break;
-          if (!await _appendWithQuota(value, signal)) break;
-          chunkN++;
-        }
-      } finally {
-        reader.cancel().catch(() => {
-        });
-      }
-      await _waitVidIdle().catch(() => {
-      });
-      if (!signal.aborted && ms.readyState !== "open" && videoEl.error?.code === 3) {
-        const buf = videoSb.buffered?.length ? `${videoSb.buffered.start(0).toFixed(2)}-${videoSb.buffered.end(videoSb.buffered.length - 1).toFixed(2)}` : "empty";
-        throw new Error(`SB error buffered=${buf} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState} veCode=3 veMsg="${videoEl.error?.message ?? ""}"`);
-      }
-      if (!signal.aborted && ms.readyState === "open") ms.endOfStream();
-    };
-    const _startVideoPipe = (url = videoUrl) => {
-      const mySignal = pipeCtrl.signal;
-      runVideoPipe(url, mySignal).catch(async (e) => {
-        const aborted = mySignal.aborted;
-        console.log(`[Adam MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
-        if (!aborted && _decodeRetryCount < 3 && e.message.includes("veCode=3")) {
-          _decodeRetryCount++;
-          _bufWaitStart = Date.now();
-          const ct = videoEl.currentTime;
-          const badEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : ct;
-          const skipTo = _decodeRetryCount === 1 ? ct + 0.5 : Math.max(ct + 0.5, badEnd + 3);
-          console.warn(`[Adam MV-pipe] veCode=3 retry #${_decodeRetryCount} (${_decodeRetryCount === 1 ? "recover-in-place" : "skip-past"}) \u2014 clearing SB, seeking to ${skipTo.toFixed(1)}s`);
-          try {
-            _mvVidSeeking = true;
-            if (videoSb.updating) {
-              await new Promise((res) => videoSb.addEventListener("updateend", res, { once: true }));
-            }
-            if (!_abortCtrl.signal.aborted && ms.readyState === "open") {
-              videoSb.remove(0, Infinity);
-              await new Promise((res) => videoSb.addEventListener("updateend", res, { once: true }));
-            } else if (!_abortCtrl.signal.aborted && ms.readyState !== "open") {
-              try {
-                URL.revokeObjectURL(msBlobUrl);
-              } catch (_) {
-              }
-              ms = new MediaSource();
-              msBlobUrl = URL.createObjectURL(ms);
-              myVid.src = msBlobUrl;
-              await new Promise((res, rej) => {
-                const sig = _abortCtrl.signal;
-                sig.addEventListener("abort", () => rej(new Error("aborted")), { once: true });
-                ms.addEventListener("sourceopen", res, { once: true });
-              });
-              if (_durationSec > 0) {
-                try {
-                  ms.duration = _durationSec;
-                } catch (_) {
-                }
-              }
-              videoSb = ms.addSourceBuffer(videoMime);
-              console.log(`[Adam MV-pipe] rebuilt MediaSource for retry (was ended)`);
-            }
-            _ignoreSeekUntil = Date.now() + 2e3;
-            videoEl.currentTime = skipTo;
-            await Promise.race([
-              new Promise((res) => videoEl.addEventListener("seeked", res, { once: true })),
-              new Promise((res) => setTimeout(res, 500))
-            ]);
-          } catch (_) {
-          } finally {
-            _mvVidSeeking = false;
-          }
-          if (!_abortCtrl.signal.aborted) {
-            pipeCtrl = new AbortController();
-            _startVideoPipe(`${videoUrl}?t=${skipTo.toFixed(3)}`);
-          }
-          return;
-        }
-        if (!aborted) {
-          console.error(`[Adam MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
-          _abortMV(`video-pipe-error`);
-          _adamNextRef?.().catch(() => {
-          });
-          setTimeout(() => exitBtn?.click(), 200);
-        }
-      });
-    };
-    const _setupWebCodecsVideo = () => {
-      _wcAudioHold = true;
-      try {
-        HTMLMediaElement.prototype.pause.call(mkAudio);
-      } catch (_) {
-      }
-      const canvas = document.createElement("canvas");
-      canvas.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:2;pointer-events:none;background:#000;";
-      mvContainer.insertAdjacentElement("afterbegin", canvas);
-      if (myVid) myVid.style.display = "none";
-      const cctx = canvas.getContext("2d", { alpha: false });
-      if (!document.getElementById("_wcSpinStyle")) {
-        const s = document.createElement("style");
-        s.id = "_wcSpinStyle";
-        s.textContent = "@keyframes _wcSpin{from{transform:translate(-50%,-50%) rotate(0deg)}to{transform:translate(-50%,-50%) rotate(360deg)}}";
-        document.head.appendChild(s);
-      }
-      const _wcSpinner = document.createElement("div");
-      _wcSpinner.style.cssText = [
-        "position:absolute;top:50%;left:50%",
-        "transform:translate(-50%,-50%)",
-        "width:44px;height:44px;border-radius:50%",
-        "border:3px solid rgba(255,255,255,0.25)",
-        "border-top-color:rgba(255,255,255,0.9)",
-        "animation:_wcSpin 0.75s linear infinite",
-        "pointer-events:none;z-index:3;display:none"
-      ].join(";");
-      mvContainer.appendChild(_wcSpinner);
-      let dec = null;
-      let fetchCtrl = null;
-      let raf = 0;
-      let firstFrame = false;
-      let _wcRebuffering = false;
-      let _wcDecErrCount = 0;
-      let _wcRebufStart = 0;
-      const queue = [];
-      const QUEUE_MAX = 24;
-      const MAX_DECODE_QUEUE = QUEUE_MAX;
-      const DECODE_AHEAD_SEC = 15;
-      const MAX_RENDER_QUEUE = 600;
-      let _wcDiscarded = 0;
-      const aborted = () => _abortCtrl?.signal.aborted;
-      let gen = 0;
-      let currentSeekSec = 0;
-      let wcFramesOpened = 0, wcFramesClosed = 0, wcObsoletePaints = 0, wcObsoleteState = 0;
-      const closeWcFrame = (f) => {
-        if (!f) return;
-        wcFramesClosed++;
-        try {
-          f.close();
-        } catch (_) {
-        }
-      };
-      const driftSamples = [];
-      const DRIFT_WINDOW = 10;
-      const addDrift = (d) => {
-        driftSamples.push(d);
-        if (driftSamples.length > DRIFT_WINDOW) driftSamples.shift();
-      };
-      const medianDrift = () => {
-        if (!driftSamples.length) return 0;
-        const s = [...driftSamples].sort((a, b) => a - b);
-        return s[Math.floor(s.length / 2)];
-      };
-      let lastCt = null;
-      let _metricN = 0;
-      const _queueLengthMs = () => queue.length >= 2 ? Math.max(0, (queue[queue.length - 1].tUs - queue[0].tUs) / 1e3) : 0;
-      window._wcFrameStats = () => ({ opened: wcFramesOpened, closed: wcFramesClosed, outstanding: wcFramesOpened - wcFramesClosed });
-      window._wcStats = () => ({
-        gen,
-        outstanding: wcFramesOpened - wcFramesClosed,
-        obsoletePaints: wcObsoletePaints,
-        obsoleteState: wcObsoleteState,
-        medianDriftMs: +(medianDrift() * 1e3).toFixed(1),
-        bufferedSec: +(_wcBufferedSec || 0).toFixed(2),
-        queued: queue.length,
-        discarded: _wcDiscarded,
-        queueLengthMs: +_queueLengthMs().toFixed(0)
-      });
-      let wakeProducer = null;
-      const wakeProd = () => {
-        const w = wakeProducer;
-        if (w) {
-          wakeProducer = null;
-          w();
-        }
-      };
-      const _wcDispatchWaiting = () => {
-        nativeVidEl?.dispatchEvent(new Event("waiting", { bubbles: false }));
-        getMKAudio()?.dispatchEvent(new Event("waiting", { bubbles: false }));
-      };
-      const _wcDispatchPlaying = () => {
-        nativeVidEl?.dispatchEvent(new Event("playing", { bubbles: false }));
-        getMKAudio()?.dispatchEvent(new Event("playing", { bubbles: false }));
-      };
-      const render = () => {
-        if (aborted()) return;
-        const ct = mkAudio.currentTime;
-        const clockRegressed = lastCt != null && ct + 1e-3 < lastCt;
-        const clockFrozen = lastCt != null && Math.abs(ct - lastCt) < 5e-4 && !mkAudio.paused && !_wcRebuffering;
-        const clockUsable = !(clockRegressed || clockFrozen);
-        lastCt = ct;
-        const nowUs = ct * 1e6;
-        while (queue.length && queue[0].tUs <= nowUs) {
-          const f = queue.shift();
-          if (queue.length && queue[0].tUs <= nowUs) {
-            closeWcFrame(f.frame);
-            continue;
-          }
-          if (f.g !== gen) wcObsoletePaints++;
-          if (canvas.width !== f.frame.displayWidth) {
-            canvas.width = f.frame.displayWidth;
-            canvas.height = f.frame.displayHeight;
-          }
-          cctx.drawImage(f.frame, 0, 0, canvas.width, canvas.height);
-          if (clockUsable) addDrift(f.tUs / 1e6 - ct);
-          closeWcFrame(f.frame);
-        }
-        wakeProd();
-        if (firstFrame && !_wcRebuffering) {
-          if (!_wcStallPaused && !_msePaused && queue.length === 0 && !mkAudio.paused) {
-            _wcStallPaused = true;
-            mkAudio.pause();
-            _wcSpinner.style.display = "block";
-            _wcDispatchWaiting();
-            console.log(`[Adam MV-WC] video underrun \u2014 stalling audio ct=${ct.toFixed(2)}`);
-          } else if (_wcStallPaused && queue.length > 0) {
-            _wcStallPaused = false;
-            _wcSpinner.style.display = "none";
-            _iframePlay.call(mkAudio).catch(() => {
-            });
-            _wcDispatchPlaying();
-            console.log(`[Adam MV-WC] rebuffered \u2014 resuming audio ct=${ct.toFixed(2)} queued=${queue.length}`);
-          }
-        }
-        if (++_metricN % 30 === 0) {
-          const dms = medianDrift() * 1e3;
-          console.log(`[wc-metric] drift=${dms.toFixed(1)}ms buffered=${(_wcBufferedSec || 0).toFixed(2)} q=${queue.length} gen=${gen} outstanding=${wcFramesOpened - wcFramesClosed}`);
-        }
-        if (_wcRebuffering && _wcRebufStart > 0 && Date.now() - _wcRebufStart > 8e3) {
-          console.warn(`[Adam MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1e3).toFixed(1)}s \u2014 restarting ct=${ct.toFixed(2)}`);
-          _wcRebufStart = 0;
-          requestRestart("hang");
-        }
-        raf = requestAnimationFrame(render);
-      };
-      const start = async (seekSec = 0) => {
-        const myGen = gen;
-        fetchCtrl = new AbortController();
-        const sig = fetchCtrl.signal;
-        const live = () => myGen === gen && !sig.aborted && !aborted();
-        const myDec = dec = new VideoDecoder({
-          output: (frame) => {
-            wcFramesOpened++;
-            if (!live()) {
-              if (myGen !== gen) wcObsoleteState++;
-              closeWcFrame(frame);
-              return;
-            }
-            while (queue.length >= MAX_RENDER_QUEUE) {
-              closeWcFrame(queue.shift().frame);
-              _wcDiscarded++;
-            }
-            queue.push({ frame, tUs: frame.timestamp, g: myGen });
-            const fSec = frame.timestamp / 1e6;
-            if (fSec > _wcBufferedSec) _wcBufferedSec = fSec;
-            _wcRebuffering = false;
-            if (!firstFrame) {
-              firstFrame = true;
-              _videoCanPlay = true;
-              _wcAudioHold = false;
-              _wcVW = frame.displayWidth;
-              _wcVH = frame.displayHeight;
-              console.log(`[Adam MV-WC] first frame decoded ${_wcVW}x${_wcVH} \u2014 opening A/V gate`);
-              _resizeScrim();
-              tryStart();
-              if (!raf) raf = requestAnimationFrame(render);
-            }
-          },
-          error: (e) => {
-            if (myGen !== gen) return;
-            console.error(`[Adam MV-WC] decode error (attempt ${_wcDecErrCount + 1}/3): ${e.message}`);
-            if (_wcDecErrCount++ < 3 && live()) requestRestart("decode-error");
-          }
-        });
-        myDec.addEventListener("dequeue", wakeProd);
-        let buf = new Uint8Array(0);
-        const td = new TextDecoder();
-        let state = "magic", codec = "", waitingForKeyframe = true;
-        const drain = () => {
-          for (; ; ) {
-            if (myGen !== gen) return;
-            if (state === "magic") {
-              if (buf.length < 4) return;
-              if (td.decode(buf.slice(0, 4)) !== "AME1") {
-                console.error("[Adam MV-WC] bad ES magic");
-                fetchCtrl.abort();
-                return;
-              }
-              buf = buf.slice(4);
-              state = "codec";
-            } else if (state === "codec") {
-              if (buf.length < 2) return;
-              const l = buf[0] << 8 | buf[1];
-              if (buf.length < 2 + l) return;
-              codec = td.decode(buf.slice(2, 2 + l));
-              buf = buf.slice(2 + l);
-              state = "avcc";
-            } else if (state === "avcc") {
-              if (buf.length < 2) return;
-              const l = buf[0] << 8 | buf[1];
-              if (buf.length < 2 + l) return;
-              const avcC = buf.slice(2, 2 + l);
-              buf = buf.slice(2 + l);
-              state = "samples";
-              try {
-                myDec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
-              } catch (e) {
-                console.error(`[Adam MV-WC] configure failed: ${e.message}`);
-                fetchCtrl.abort();
-                return;
-              }
-              waitingForKeyframe = true;
-              console.log(`[Adam MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
-            } else {
-              if (buf.length < 17) return;
-              const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
-              const len = dv.getUint32(13);
-              if (buf.length < 17 + len) return;
-              if (myDec.decodeQueueSize >= MAX_DECODE_QUEUE) return;
-              const lead = queue.length ? queue[queue.length - 1].tUs / 1e6 - mkAudio.currentTime : 0;
-              if (lead >= DECODE_AHEAD_SEC) return;
-              const key = (buf[0] & 1) === 1;
-              const tUs = Number(dv.getBigInt64(1));
-              const durUs = dv.getUint32(9);
-              const data = buf.slice(17, 17 + len);
-              buf = buf.slice(17 + len);
-              const fParsedSec = tUs / 1e6;
-              if (fParsedSec > _wcParsedSec) _wcParsedSec = fParsedSec;
-              if (!key && waitingForKeyframe) continue;
-              waitingForKeyframe = false;
-              try {
-                myDec.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: tUs, duration: durUs, data }));
-              } catch (e) {
-                console.error(`[Adam MV-WC] decode() threw: ${e.message}`);
-              }
-            }
-          }
-        };
-        console.log(`[Adam MV-WC] start gen=${myGen} seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
-        try {
-          const esUrl = `${videoUrl}-es${seekSec > 0 ? `?t=${seekSec.toFixed(3)}` : ""}`;
-          const resp = await fetch(esUrl, { signal: sig });
-          if (!live()) {
-            resp.body?.cancel().catch(() => {
-            });
-            return;
-          }
-          if (!resp.ok) {
-            console.error(`[Adam MV-WC] /video-es ${resp.status} seekSec=${seekSec.toFixed(2)}`);
-            return;
-          }
-          console.log(`[Adam MV-WC] /video-es ok gen=${myGen} ct=${mkAudio.currentTime.toFixed(2)}`);
-          const reader = resp.body.getReader();
-          let chunkN = 0, done = false;
-          for (; ; ) {
-            if (!live()) break;
-            drain();
-            if (!live()) break;
-            const full = myDec.decodeQueueSize >= MAX_DECODE_QUEUE;
-            const ahead = queue.length ? queue[queue.length - 1].tUs / 1e6 - mkAudio.currentTime >= DECODE_AHEAD_SEC : false;
-            if (full || ahead) {
-              await new Promise((res) => {
-                wakeProducer = res;
-              });
-              continue;
-            }
-            if (done) break;
-            const r = await reader.read();
-            if (r.done) {
-              done = true;
-              continue;
-            }
-            if (!live()) break;
-            chunkN++;
-            const nb = new Uint8Array(buf.length + r.value.length);
-            nb.set(buf);
-            nb.set(r.value, buf.length);
-            buf = nb;
-          }
-          if (myGen === gen && myDec.state === "configured") await myDec.flush().catch(() => {
-          });
-        } catch (e) {
-          if (live()) console.error(`[Adam MV-WC] stream error: ${e.message}`);
-        }
-      };
-      let _wcSeekTimer = null;
-      const requestRestart = (reason, seekSec = currentSeekSec) => {
-        gen++;
-        try {
-          fetchCtrl?.abort();
-        } catch (_) {
-        }
-        wakeProd();
-        clearTimeout(_wcSeekTimer);
-        _wcSeekTimer = setTimeout(() => {
-          _wcSeekTimer = null;
-          _commitWcSeek(seekSec, reason);
-        }, 50);
-      };
-      const _commitWcSeek = (seekSec, reason) => {
-        if (aborted()) return;
-        const t = typeof seekSec === "number" ? seekSec : mkAudio.currentTime;
-        currentSeekSec = t;
-        console.log(`[Adam MV-WC] commit restart (${reason}) gen=${gen} \u2192 ${t.toFixed(2)}s queued=${queue.length}`);
-        gen++;
-        try {
-          if (dec && dec.state !== "closed") dec.close();
-        } catch (_) {
-        }
-        while (queue.length) closeWcFrame(queue.shift().frame);
-        firstFrame = _avStarted;
-        if (_avStarted) {
-          _wcStallPaused = true;
-          try {
-            HTMLMediaElement.prototype.pause.call(mkAudio);
-          } catch (_) {
-          }
-          _wcSpinner.style.display = "block";
-        } else {
-          _wcStallPaused = false;
-        }
-        _wcRebuffering = true;
-        _wcRebufStart = Date.now();
-        _wcDecErrCount = 0;
-        _wcBufferedSec = t;
-        _wcParsedSec = t;
-        start(t).catch(() => {
-        });
-      };
-      const onWcSeek = () => {
-        if (aborted()) return;
-        const t = mkAudio.currentTime;
-        const qFirst = queue.length ? queue[0].tUs / 1e6 : -1;
-        if (qFirst >= 0 && t >= qFirst - 0.5 && t <= _wcBufferedSec + 1) return;
-        requestRestart("seek", t);
-      };
-      mkAudio.addEventListener("seeking", onWcSeek);
-      _wcCleanup = () => {
-        gen++;
-        _wcStallPaused = false;
-        _wcAudioHold = false;
-        _wcRebuffering = false;
-        try {
-          mkAudio.removeEventListener("seeking", onWcSeek);
-        } catch (_) {
-        }
-        clearTimeout(_wcSeekTimer);
-        try {
-          fetchCtrl?.abort();
-        } catch (_) {
-        }
-        wakeProd();
-        if (raf) cancelAnimationFrame(raf);
-        while (queue.length) closeWcFrame(queue.shift().frame);
-        try {
-          if (dec && dec.state !== "closed") dec.close();
-        } catch (_) {
-        }
-        try {
-          canvas.remove();
-        } catch (_) {
-        }
-        try {
-          _wcSpinner.remove();
-        } catch (_) {
-        }
-        try {
-          delete window._wcFrameStats;
-          delete window._wcStats;
-        } catch (_) {
-        }
-      };
-      _wcRebuffering = true;
-      _wcRebufStart = Date.now();
-      start(0).catch((e) => console.error("[Adam MV-WC] start error:", e.message));
-    };
     _activeMvControls = {
       play: mvPlay,
       pause: mvPause,
       seekTo: _mvSeekTo,
       get currentTime() {
-        return (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0;
+        return myVid.currentTime || 0;
       },
       get duration() {
-        if (_nativeVideo) return _durationSec || myVid.duration || 0;
-        return (_wcVideo ? mkAudio.duration : myVid.duration) || _durationSec || 0;
+        return myVid.duration || _durationSec || 0;
       },
       get paused() {
-        return _wcVideo ? mkAudio.paused : myVid.paused;
+        return myVid.paused;
       },
       get volume() {
         return mkAudio.volume;
@@ -3547,336 +3013,6 @@
       set muted(m) {
         mkAudio.muted = m;
       }
-    };
-    const _setupMP4BoxVideo = () => {
-      console.log("[Adam MV-MP4] starting direct fMP4\u2192MSE path");
-      if (!MediaSource.isTypeSupported(videoMime)) {
-        console.error("[Adam MV-MP4] codec not supported:", videoMime, "\u2014 falling back to WebCodecs");
-        _setupWebCodecsVideo();
-        return;
-      }
-      const fetchCtrl = new AbortController();
-      const mp4Sb = ms.addSourceBuffer(videoMime);
-      videoSb = mp4Sb;
-      mp4Sb.mode = "segments";
-      let pending = new Uint8Array(0);
-      let initDone = false;
-      let initBuf = new Uint8Array(0);
-      let pendingMoof = null;
-      let timescale = 9e4;
-      let tsOffsetSet = false;
-      const cat = (a, b) => {
-        const r = new Uint8Array(a.length + b.length);
-        r.set(a);
-        r.set(b, a.length);
-        return r;
-      };
-      const toAB = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-      const u32 = (b, i) => (b[i] << 24 | b[i + 1] << 16 | b[i + 2] << 8 | b[i + 3]) >>> 0;
-      const findBox = (buf, type) => {
-        const t0 = type.charCodeAt(0), t1 = type.charCodeAt(1), t2 = type.charCodeAt(2), t3 = type.charCodeAt(3);
-        for (let i = 0; i + 8 <= buf.length; ) {
-          const sz = u32(buf, i);
-          if (sz < 8) break;
-          if (buf[i + 4] === t0 && buf[i + 5] === t1 && buf[i + 6] === t2 && buf[i + 7] === t3) return buf.subarray(i, i + sz);
-          i += sz;
-        }
-        return null;
-      };
-      const moovTimescale = (moovBox) => {
-        const trak = findBox(moovBox.subarray(8), "trak");
-        if (!trak) return 9e4;
-        const mdia = findBox(trak.subarray(8), "mdia");
-        if (!mdia) return 9e4;
-        const mdhd = findBox(mdia.subarray(8), "mdhd");
-        if (!mdhd || mdhd.length < 24) return 9e4;
-        const off = mdhd[8] === 1 ? 28 : 20;
-        return mdhd.length >= off + 4 ? u32(mdhd, off) : 9e4;
-      };
-      const moofTFDT = (moofBox) => {
-        const traf = findBox(moofBox.subarray(8), "traf");
-        if (!traf) return 0;
-        const tfdt = findBox(traf.subarray(8), "tfdt");
-        if (!tfdt || tfdt.length < 16) return 0;
-        if (tfdt[8] === 1 && tfdt.length >= 20) return u32(tfdt, 12) * 4294967296 + u32(tfdt, 16);
-        return u32(tfdt, 12);
-      };
-      let _segN = 0;
-      const _logBuf = (label) => {
-        if (!mp4Sb || !mp4Sb.buffered || mp4Sb.buffered.length === 0) {
-          console.log(`[Adam MV-MP4] ${label} buf=(empty) tsOff=${mp4Sb?.timestampOffset?.toFixed(3)}`);
-          return;
-        }
-        const b = mp4Sb.buffered;
-        const ranges = Array.from({ length: b.length }, (_, i) => `${b.start(i).toFixed(2)}-${b.end(i).toFixed(2)}`).join(" ");
-        console.log(`[Adam MV-MP4] ${label} buf=[${ranges}] tsOff=${mp4Sb.timestampOffset.toFixed(3)}`);
-      };
-      const appendWhenReady = (ab, beforeAppend) => {
-        const try_ = () => {
-          if (mp4Sb.updating) {
-            mp4Sb.addEventListener("updateend", try_, { once: true });
-            return;
-          }
-          if (beforeAppend) beforeAppend();
-          try {
-            mp4Sb.appendBuffer(ab);
-            mp4Sb.addEventListener("updateend", () => _logBuf(`seg#${_segN}`), { once: true });
-          } catch (e) {
-            console.warn("[Adam MV-MP4] append:", e.message);
-          }
-        };
-        try_();
-      };
-      const drain = () => {
-        for (; ; ) {
-          if (pending.length < 8) return;
-          const size = u32(pending, 0);
-          if (size < 8 || pending.length < size) return;
-          const type = String.fromCharCode(pending[4], pending[5], pending[6], pending[7]);
-          const box = pending.slice(0, size);
-          pending = pending.slice(size);
-          if (!initDone) {
-            initBuf = cat(initBuf, box);
-            if (type === "moov") {
-              initDone = true;
-              timescale = moovTimescale(box);
-              const trak = findBox(box.subarray(8), "trak");
-              const mdia = trak ? findBox(trak.subarray(8), "mdia") : null;
-              const mdhd = mdia ? findBox(mdia.subarray(8), "mdhd") : null;
-              const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map((v) => v.toString(16).padStart(2, "0")).join(" ") : "null";
-              console.log(`[Adam MV-MP4] MOOV raw: size=${box.length}B trak=${trak?.length} mdia=${mdia?.length} mdhd=${mdhd?.length}`);
-              console.log(`[Adam MV-MP4] mdhd hex: ${hex(mdhd, mdhd?.length || 0)}`);
-              console.log(`[Adam MV-MP4] init ${initBuf.length}B timescale=${timescale}`);
-              _segN = 0;
-              appendWhenReady(toAB(initBuf));
-            }
-          } else if (type === "moof") {
-            pendingMoof = box;
-          } else if (type === "mdat" && pendingMoof) {
-            const moofBox = pendingMoof;
-            pendingMoof = null;
-            _segN++;
-            const seg = toAB(cat(moofBox, box));
-            if (!tsOffsetSet) {
-              tsOffsetSet = true;
-              const tfdt = moofTFDT(moofBox);
-              const traf = findBox(moofBox.subarray(8), "traf");
-              const tfdtBox = traf ? findBox(traf.subarray(8), "tfdt") : null;
-              const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map((v) => v.toString(16).padStart(2, "0")).join(" ") : "null";
-              console.log(`[Adam MV-MP4] MOOF#1 raw: moofSize=${moofBox.length} traf=${traf?.length} tfdt=${tfdtBox?.length}`);
-              console.log(`[Adam MV-MP4] tfdt hex: ${hex(tfdtBox, tfdtBox?.length || 0)}`);
-              appendWhenReady(seg, () => {
-                const offset = -(tfdt / timescale);
-                mp4Sb.timestampOffset = offset;
-                console.log(`[Adam MV-MP4] seg#1 TFDT=${tfdt} timescale=${timescale} \u2192 tsOff=${offset.toFixed(3)}s`);
-              });
-            } else {
-              appendWhenReady(seg);
-            }
-          }
-        }
-      };
-      fetch(`${ENGINE}/api/v1/playback/${_sessionId}/video-raw`, { signal: fetchCtrl.signal }).then(async (resp) => {
-        if (!resp.ok) {
-          console.error("[Adam MV-MP4] fetch", resp.status);
-          return;
-        }
-        const reader = resp.body.getReader();
-        try {
-          for (; ; ) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            pending = pending.length ? cat(pending, value) : value;
-            drain();
-          }
-          mp4Sb.addEventListener("updateend", () => {
-            if (!mp4Sb.updating && ms.readyState === "open") {
-              try {
-                ms.endOfStream();
-              } catch (_) {
-              }
-            }
-          }, { once: true });
-        } catch (e) {
-          if (e.name !== "AbortError") console.error("[Adam MV-MP4] read:", e.message);
-        }
-      }).catch((e) => {
-        if (e.name !== "AbortError") console.error("[Adam MV-MP4] fetch:", e.message);
-      });
-      _wcCleanup = () => fetchCtrl.abort();
-    };
-    const _setupNativeVideo = () => {
-      const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
-      const dlUrl = `${ENGINE_HTTPS}${enginePath}`;
-      const infoUrl = `${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`;
-      const _NET = ["EMPTY", "IDLE", "LOADING", "NO_SOURCE"];
-      const _RS = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"];
-      const _nlog = (ev) => console.log(`%c[Adam MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : "-"}`, "color:#bf5af2;font-weight:bold", "color:inherit");
-      ["loadstart", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
-      const _startPoll = () => {
-        _bufSpinner.style.display = "block";
-        const _poll = async () => {
-          if (_abortCtrl?.signal.aborted) return;
-          try {
-            const info = await fetch(infoUrl).then((r) => r.json());
-            if (info.cached) {
-              const _src = info.cdnProxy ? "CDN proxy (instant)" : "faststart cache";
-              console.log(`%c[Adam MV native]%c ${_src} ready \u2014 loading`, "color:#30d158;font-weight:bold", "color:inherit");
-              _bufSpinner.style.display = "none";
-              myVid.src = "";
-              myVid.load();
-              myVid.src = dlUrl;
-              myVid.load();
-              return;
-            }
-            console.log(`%c[Adam MV native]%c cache building (preparing=${info.preparing}) \u2014 retry in 2s`, "color:#ff9f0a;font-weight:bold", "color:inherit");
-          } catch (_e) {
-            console.warn("[Adam MV native] poll error", _e);
-          }
-          setTimeout(_poll, 2e3);
-        };
-        setTimeout(_poll, 2e3);
-      };
-      myVid.addEventListener("error", () => {
-        const e = myVid.error;
-        console.error(`%c[Adam MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, "color:#ff453a;font-weight:bold", "color:inherit");
-        if ((e?.code === 2 || e?.code === 3) && !_abortCtrl?.signal.aborted) {
-          console.log("%c[Adam MV native]%c transient error \u2014 polling for cache", "color:#ff9f0a;font-weight:bold", "color:inherit");
-          _startPoll();
-          return;
-        }
-        _abortMV(`video-error-${e?.code ?? "?"}`);
-        _adamNextRef?.().catch(() => {
-        });
-        setTimeout(() => exitBtn?.click(), 200);
-      });
-      let _lastNudge = 0;
-      myVid.addEventListener("timeupdate", () => {
-        if (!_avStarted) return;
-        const drift = mkAudio.currentTime - myVid.currentTime;
-        const now = performance.now();
-        if (Math.abs(drift) > 0.35 && now - _lastNudge > 500) {
-          _lastNudge = now;
-          mkAudio.currentTime = myVid.currentTime;
-        }
-      });
-      const _dispatchNative = (type) => {
-        nativeVidEl?.dispatchEvent(new Event(type, { bubbles: false }));
-        const mka = getMKAudio();
-        if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
-      };
-      mkAudio.addEventListener("play", () => {
-        if (myVid.paused) _iframePlay.call(myVid).catch(() => {
-        });
-      });
-      mkAudio.addEventListener("pause", () => {
-        if (!myVid.paused) myVid.pause();
-      });
-      myVid.addEventListener("play", () => {
-        if (mkAudio.paused) _iframePlay.call(mkAudio).catch(() => {
-        });
-        _dispatchNative("playing");
-      });
-      myVid.addEventListener("pause", () => {
-        if (!mkAudio.paused) mkAudio.pause();
-        _dispatchNative("pause");
-      });
-      myVid.addEventListener("waiting", () => {
-        _nlog("waiting");
-        if (_avStarted && !_videoStalled && !_bufPaused) {
-          _videoStalled = true;
-          _mvGateOpen = false;
-          mkAudio.muted = true;
-          _bufSpinner.style.display = "block";
-        }
-      });
-      myVid.addEventListener("playing", () => {
-        _nlog("playing");
-        _dispatchNative("playing");
-        if (_videoStalled) {
-          _videoStalled = false;
-          _mvGateOpen = _avStarted;
-          _bufSpinner.style.display = "none";
-          if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.05) mkAudio.currentTime = myVid.currentTime;
-          mkAudio.muted = false;
-        }
-      });
-      let _reseeking = false;
-      const _nativeSeek = (target) => {
-        if (_reseeking) return;
-        target = Math.max(0, Math.min(_durationSec || target, target));
-        for (let i = 0; i < myVid.buffered.length; i++) {
-          if (target >= myVid.buffered.start(i) && target <= myVid.buffered.end(i)) {
-            try {
-              myVid.currentTime = target;
-            } catch (_) {
-            }
-            try {
-              mkAudio.currentTime = target;
-            } catch (_) {
-            }
-            return;
-          }
-        }
-        console.log(`%c[Adam MV native]%c seek ${target.toFixed(2)}s via Range`, "color:#bf5af2;font-weight:bold", "color:#30d158");
-        _bufSpinner.style.display = "block";
-        _reseeking = true;
-        try {
-          myVid.currentTime = target;
-        } catch (_) {
-        }
-        try {
-          mkAudio.currentTime = target;
-        } catch (_) {
-        }
-        myVid.addEventListener("seeked", () => {
-          _reseeking = false;
-          _bufSpinner.style.display = "none";
-          if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.1) mkAudio.currentTime = myVid.currentTime;
-        }, { once: true });
-      };
-      _nativeSeekRef = _nativeSeek;
-      myVid.addEventListener("seeked", () => {
-        if (_reseeking) return;
-        _nlog("seeked");
-        if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.3) mkAudio.currentTime = myVid.currentTime;
-      });
-      myVid.addEventListener("ended", () => {
-        if (_abortCtrl?.signal.aborted) return;
-        console.log(`[Adam MV native] ended ct=${myVid.currentTime.toFixed(2)} \u2192 next`);
-        _abortMV("track-ended");
-        _adamNextRef?.().catch(() => {
-        });
-        setTimeout(() => exitBtn?.click(), 200);
-      });
-      myVid.addEventListener("canplay", () => {
-        _nlog("canplay");
-        _bufSpinner.style.display = "none";
-        _dispatchNative("canplay");
-        _videoCanPlay = true;
-        tryStart();
-      }, { once: true });
-      myVid.muted = true;
-      (async () => {
-        try {
-          const info = await fetch(infoUrl).then((r) => r.json());
-          if (info.cached) {
-            console.log("%c[Adam MV native]%c cache hit \u2014 loading", "color:#30d158;font-weight:bold", "color:inherit");
-            _bufSpinner.style.display = "block";
-            myVid.src = dlUrl;
-            try {
-              myVid.load();
-            } catch (e) {
-              console.error(`[Adam MV native] load() threw: ${e.message}`);
-            }
-            return;
-          }
-        } catch (_e) {
-          console.warn("[Adam MV native] info preflight error", _e);
-        }
-        console.log("%c[Adam MV native]%c cache miss \u2014 waiting for HLS decrypt + faststart", "color:#ff9f0a;font-weight:bold", "color:inherit");
-        _startPoll();
-      })();
     };
     const _setupVsegVideo = () => {
       const base = `${ENGINE}/api/v1/playback/${_sessionId}/vseg`;
@@ -4232,11 +3368,7 @@
       }, { once: true });
       console.log("[Adam vseg] setup done, waiting for sourceopen");
     };
-    if (_vsegVideo) _setupVsegVideo();
-    else if (_nativeVideo) _setupNativeVideo();
-    else if (_mp4Video) _setupMP4BoxVideo();
-    else if (_wcVideo) _setupWebCodecsVideo();
-    else _startVideoPipe();
+    _setupVsegVideo();
     let _mvVidSeeking = false;
     let _ignoreSeekUntil = 0;
     let _seekSnapCanvas = null;
@@ -4264,57 +3396,6 @@
       }
       _seekSnapCanvas = null;
     };
-    const _mvVideoSeek = async (seekSec) => {
-      if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== "open") return;
-      for (let i = 0; i < videoSb.buffered.length; i++) {
-        if (seekSec >= videoSb.buffered.start(i) - 0.5 && seekSec < videoSb.buffered.end(i)) return;
-      }
-      _mvVidSeeking = true;
-      _showSeekSnap();
-      try {
-        if (typeof _wcCleanup === "function") {
-          try {
-            _wcCleanup();
-          } catch (_) {
-          }
-          _wcCleanup = null;
-        }
-        const prev = pipeCtrl;
-        pipeCtrl = new AbortController();
-        prev.abort();
-        const sig = pipeCtrl.signal;
-        try {
-          await _waitVidIdle();
-        } catch (_) {
-        }
-        if (videoSb.buffered.length > 0) {
-          videoSb.remove(0, Infinity);
-          try {
-            await _waitVidIdle();
-          } catch (_) {
-          }
-        }
-        if (sig.aborted || ms.readyState !== "open") {
-          _hideSeekSnap();
-          return;
-        }
-        videoSb.timestampOffset = 0;
-        _ignoreSeekUntil = Date.now() + 8e3;
-        console.log(`[Adam MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
-        if (seekSec < (_durationSec || 1e9) - 1) {
-          _startVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`);
-        }
-      } finally {
-        _mvVidSeeking = false;
-      }
-    };
-    videoEl.addEventListener("seeking", () => {
-      if (_wcVideo) return;
-      if (_nativeVideo) return;
-      if (Date.now() < _ignoreSeekUntil) return;
-      _mvVideoSeek(videoEl.currentTime).catch(() => {
-      });
-    });
     let _playMirrorBusy = false;
     const onVideoPlay = () => {
       console.log(`[Adam MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
@@ -4365,7 +3446,7 @@
     };
     const onEnded = (ev) => {
       if (_abortCtrl?.signal.aborted) return;
-      const src = _wcVideo ? "audio" : ev?.target === videoEl ? "video" : "audio";
+      const src = ev?.target === videoEl ? "video" : "audio";
       console.log(`[Adam MV] ${src} ended ct=${(videoEl.currentTime || mkAudio.currentTime)?.toFixed(2)}`);
       try {
         delete mkAudio.load;
@@ -4411,45 +3492,33 @@
         console.warn(`[Adam MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
       }
     };
-    if (!_wcVideo && !_nativeVideo) {
-      videoEl.addEventListener("play", onVideoPlay);
-      videoEl.addEventListener("playing", onVideoPlaying);
-      videoEl.addEventListener("pause", onVideoPause);
-      videoEl.addEventListener("seeked", onVideoSeek);
-      videoEl.addEventListener("error", onVideoError);
-      videoEl.addEventListener("stalled", onVideoStall);
-      videoEl.addEventListener("waiting", onVideoWait);
-      videoEl.addEventListener("ended", onEnded);
-      videoEl.addEventListener("canplay", () => {
+    videoEl.addEventListener("play", onVideoPlay);
+    videoEl.addEventListener("playing", onVideoPlaying);
+    videoEl.addEventListener("pause", onVideoPause);
+    videoEl.addEventListener("seeked", onVideoSeek);
+    videoEl.addEventListener("error", onVideoError);
+    videoEl.addEventListener("stalled", onVideoStall);
+    videoEl.addEventListener("waiting", onVideoWait);
+    videoEl.addEventListener("ended", onEnded);
+    videoEl.addEventListener("canplay", () => {
+      if (_abortCtrl?.signal.aborted) return;
+      console.log(`[Adam MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
+      const checkBuf = () => {
         if (_abortCtrl?.signal.aborted) return;
-        console.log(`[Adam MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
-        const checkBuf = () => {
-          if (_abortCtrl?.signal.aborted) return;
-          const b = videoEl.buffered;
-          const lead = b.length > 0 ? b.end(b.length - 1) : 0;
-          if (lead >= MV_START_LEAD) {
-            console.log(`[Adam MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
-            _videoCanPlay = true;
-            tryStart();
-          } else {
-            console.log(`[Adam MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need ${MV_START_LEAD}s)`);
-            videoEl.addEventListener("progress", checkBuf, { once: true });
-          }
-        };
-        checkBuf();
-      }, { once: true });
-    }
-    mkAudio.addEventListener("ended", onEnded);
-    if (_wcVideo) {
-      const _wcDispatch = (type) => {
-        nativeVidEl?.dispatchEvent(new Event(type, { bubbles: false }));
-        const mka = getMKAudio();
-        if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
+        const b = videoEl.buffered;
+        const lead = b.length > 0 ? b.end(b.length - 1) : 0;
+        if (lead >= MV_START_LEAD) {
+          console.log(`[Adam MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
+          _videoCanPlay = true;
+          tryStart();
+        } else {
+          console.log(`[Adam MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need ${MV_START_LEAD}s)`);
+          videoEl.addEventListener("progress", checkBuf, { once: true });
+        }
       };
-      mkAudio.addEventListener("playing", () => _wcDispatch("playing"));
-      mkAudio.addEventListener("play", () => _wcDispatch("playing"));
-      mkAudio.addEventListener("pause", () => _wcDispatch("pause"));
-    }
+      checkBuf();
+    }, { once: true });
+    mkAudio.addEventListener("ended", onEnded);
     const cleanupScrimStyles = () => {
       if (scrimEl) {
         ["opacity", "visibility", "transition", "cursor"].forEach((p) => scrimEl.style.removeProperty(p));
@@ -4487,13 +3556,6 @@
     };
     const cleanup = () => {
       console.log(`[Adam MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
-      if (_wcCleanup) {
-        try {
-          _wcCleanup();
-        } catch (_) {
-        }
-        _wcCleanup = null;
-      }
       _hideSeekSnap();
       _activeMvControls = null;
       try {
@@ -4605,6 +3667,7 @@
       if (delta !== null && delta < -5e3 && _seekBurstLog > 10 && _sessionId && !_vlcSeekFrozen) {
         _seekBurstLog = 0;
         const reloadMs = _vlcSeekTargetMs;
+        const seekRevision = _vlcSeekRevision;
         console.warn(`[Adam VLC seek] rewind detected \u0394=${delta}ms \u2014 SeekReload fallback to ${reloadMs}ms`);
         _vlcSeekFrozen = true;
         _vlcPosMs = reloadMs;
@@ -4613,55 +3676,57 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: reloadMs })
         }).then(() => {
+          if (seekRevision !== _vlcSeekRevision) return;
           _vlcSeekFrozen = false;
           _seekBurstLog = 20;
           _vlcPrevState = null;
         }).catch(() => {
-          _vlcSeekFrozen = false;
+          if (seekRevision === _vlcSeekRevision) _vlcSeekFrozen = false;
         });
       }
     } else if (_vlcTickCount % 20 === 0) {
       console.log(`[Adam VLC] pos=${posMs}ms state=${state}`);
     }
   }
-  function _vlcHandleEnded(posMs, mkAudio) {
+  function _vlcRetryFrom(posMs, mkAudio, delay) {
+    const sessionId = _sessionId;
+    const assetId = _currentAssetId;
+    setTimeout(async () => {
+      if (_sessionId !== sessionId || !_vlcMode) return;
+      try {
+        const response = await fetch(`${ENGINE}/api/v1/vlc/load`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, assetId, startMs: posMs }),
+          signal: AbortSignal.timeout(15e3)
+        });
+        if (!response.ok) throw new Error(`VLC reload: HTTP ${response.status}`);
+        if (_sessionId !== sessionId) return;
+        _vlcPosMs = posMs;
+        _vlcLoading = true;
+      } catch (error) {
+        if (_sessionId === sessionId) console.warn("[Adam VLC] recovery failed:", error.message);
+      } finally {
+        if (_sessionId === sessionId && _vlcMode) startVLCPoll(mkAudio);
+      }
+    }, delay);
+  }
+  function _vlcHandleEnded(posMs, mkAudio, reason = "ended") {
     stopVLCPoll();
-    if (posMs > 2e3) {
-      _vlcPosMs = Math.round(_durationSec * 1e3);
-      mkAudio.dispatchEvent(new Event("timeupdate"));
-    }
     if (posMs < 2e3 && _durationSec > 5 && _vlcRetryCount < 2) {
       _vlcRetryCount++;
       _vlcSeekOffsetMs = 0;
       console.log(`[Adam VLC] premature end at posMs=${posMs} \u2014 reload attempt ${_vlcRetryCount}`);
-      setTimeout(() => {
-        if (!_sessionId) return;
-        fetch(`${ENGINE}/api/v1/vlc/load`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: 0 })
-        }).then(() => startVLCPoll(mkAudio)).catch(() => {
-        });
-      }, 1500);
+      _vlcRetryFrom(0, mkAudio, 1500);
       return;
     }
     const trackEndMs = Math.round(_durationSec * 1e3);
-    if (posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - 3e3 && _vlcRetryCount < 2) {
+    const endWindowMs = reason === "error" ? 3e3 : Math.min(1e4, trackEndMs * 0.1);
+    if (posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - endWindowMs && _vlcRetryCount < 2) {
       _vlcRetryCount++;
       const resumeMs = posMs;
-      console.warn(`[Adam VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
-      setTimeout(() => {
-        if (!_sessionId) return;
-        fetch(`${ENGINE}/api/v1/vlc/seek`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ posMs: resumeMs, sessionId: _sessionId })
-        }).then(() => {
-          _vlcPosMs = resumeMs;
-          startVLCPoll(mkAudio);
-        }).catch(() => {
-        });
-      }, 500);
+      console.warn(`[Adam VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 reloading to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
+      _vlcRetryFrom(resumeMs, mkAudio, 500);
       return;
     }
     if (_allowCDNTransition) {
@@ -4689,19 +3754,22 @@
         _startLyricsFreeze(mkAudio);
       }
     }
-    if (state === "ended" || state === "stopped" && (prev === "playing" || prev === "ended")) {
-      _vlcHandleEnded(posMs, mkAudio);
+    if (state === "error" || state === "ended" || state === "stopped" && (prev === "playing" || prev === "ended")) {
+      _vlcHandleEnded(Math.max(posMs, _vlcPosMs), mkAudio, state);
     }
   }
-  async function _vlcPollTick(mkAudio, mySession) {
-    if (_vlcFetching) return;
+  async function _vlcPollTick(mkAudio, mySession, generation = _vlcPollGeneration) {
+    if (_vlcFetching || generation !== _vlcPollGeneration) return;
     _vlcFetching = true;
+    const transportRevision = _vlcTransport.revision;
     try {
-      const r = await fetch(`${ENGINE}/api/v1/vlc/time`);
-      if (!r.ok || _sessionId !== mySession) return;
+      const r = await fetch(`${ENGINE}/api/v1/vlc/time`, { signal: AbortSignal.timeout(4e3) });
+      if (!r.ok) throw new Error(`VLC status: HTTP ${r.status}`);
+      if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
       _vlcErrCount = 0;
-      const { posMs, lengthMs, state } = await r.json();
-      if (_sessionId !== mySession) return;
+      const { posMs, lengthMs, state, volume, muted } = await r.json();
+      if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return;
+      _vlcSyncVolume?.(volume, muted);
       _vlcHandleLength(lengthMs, mkAudio);
       _vlcUpdatePosition(posMs, state, mkAudio);
       if (state === _vlcPrevState) return;
@@ -4711,9 +3779,10 @@
       if (_vlcSeekFrozen) return;
       _vlcHandleStateChange(state, prev, posMs, mkAudio);
     } catch (_) {
-      if (++_vlcErrCount >= 5) stopVLCPoll();
+      if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
+      if (++_vlcErrCount === 5) mkAudio.dispatchEvent(new Event("waiting"));
     } finally {
-      _vlcFetching = false;
+      if (generation === _vlcPollGeneration) _vlcFetching = false;
     }
   }
   function startVLCPoll(mkAudio) {
@@ -4724,7 +3793,8 @@
     _vlcLengthSet = false;
     _vlcFetching = false;
     const mySession = _sessionId;
-    _vlcPollTimer = setInterval(() => _vlcPollTick(mkAudio, mySession), T().poll);
+    const generation = _vlcPollGeneration;
+    _vlcPollTimer = setInterval(() => _vlcPollTick(mkAudio, mySession, generation), T().poll);
   }
   function waitForLossless(timeoutMs) {
     if (_streamingQuality === "high-quality") return Promise.resolve();
@@ -5067,6 +4137,7 @@
     }
     _vlcMode = false;
     window._adamVlcMode = false;
+    _syncVLCControls();
     _vlcPosMs = 0;
     _vlcPaused = false;
     _stopLyricsFreeze();
@@ -5079,6 +4150,7 @@
     _vlcPostSeek = false;
     _vlcWasPlaying = false;
     _vlcSeekTargetMs = 0;
+    _vlcSyncVolume = null;
     _scVlcReapply = null;
     _nextAlacTried = false;
     _nextAlacRetries = 0;
@@ -5146,8 +4218,8 @@
     if (!sessResp.ok) throw new Error(`Session ${sessResp.status}: ${await sessResp.text()}`);
     return sessResp.json();
   }
-  async function _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl, durationSec, t0) {
-    if (pipeCtrl.signal.aborted) return;
+  async function _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl2, durationSec, t0) {
+    if (pipeCtrl2.signal.aborted) return;
     const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
     console.warn("[Adam MSE] pipe error \u2014 recovering from", bufEnd.toFixed(1) + "s:", err.message);
     if (ms.readyState === "closed") {
@@ -5157,14 +4229,14 @@
     if (ms.readyState === "ended") console.warn("[Adam MSE] ms=ended (Chrome decode-error path) \u2014 attempting resume");
     try {
       const resumeUrl = bufEnd > 1 ? `${myStreamBase}&t=${bufEnd.toFixed(3)}` : myStreamBase;
-      const resp = await fetch(resumeUrl, { signal: pipeCtrl.signal });
-      if (!resp.ok || pipeCtrl.signal.aborted) {
+      const resp = await fetch(resumeUrl, { signal: pipeCtrl2.signal });
+      if (!resp.ok || pipeCtrl2.signal.aborted) {
         resp?.body?.cancel();
         return;
       }
-      await pipeToSourceBuffer(sb, mkAudio, resp, pipeCtrl.signal, ms, durationSec, t0);
+      await pipeToSourceBuffer(sb, mkAudio, resp, pipeCtrl2.signal, ms, durationSec, t0);
     } catch (e2) {
-      if (!pipeCtrl.signal.aborted) {
+      if (!pipeCtrl2.signal.aborted) {
         console.error("[Adam MSE] recovery failed:", e2.message);
         if (ms.readyState === "open") try {
           ms.endOfStream();
@@ -5172,42 +4244,6 @@
         }
       }
     }
-  }
-  function _traceMediaSource(ms, sb, audio) {
-    const t0 = performance.now();
-    const at = () => "+" + ((performance.now() - t0) / 1e3).toFixed(2) + "s";
-    const stack = () => {
-      const l = Error.stackTraceLimit;
-      Error.stackTraceLimit = 30;
-      const st = (new Error().stack || "").split("\n").slice(2, 20).join("\n");
-      Error.stackTraceLimit = l;
-      return st;
-    };
-    const eos = ms.endOfStream.bind(ms);
-    ms.endOfStream = function(...a) {
-      console.warn("[Adam MSE] " + at() + " endOfStream(" + a.join(",") + ") ms=" + ms.readyState + " updating=" + sb.updating + " caller:\n" + stack());
-      return eos(...a);
-    };
-    for (const ev of ["sourceended", "sourceclose", "sourceopen"]) {
-      ms.addEventListener(ev, () => console.warn("[Adam MSE] " + at() + " MediaSource " + ev + " readyState=" + ms.readyState));
-    }
-    let n = 0, bytes = 0;
-    const app = sb.appendBuffer.bind(sb);
-    const cap = window.__aacCapture = { chunks: [], at: Date.now() };
-    sb.appendBuffer = function(d) {
-      n++;
-      bytes += d.byteLength;
-      try {
-        cap.chunks.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d.slice(0)));
-      } catch (_) {
-      }
-      if (ms.readyState !== "open") console.warn("[Adam MSE] " + at() + " append #" + n + " (" + d.byteLength + " B, total " + bytes + ") while ms=" + ms.readyState + " updating=" + sb.updating + " audio.error=" + (audio.error ? audio.error.code + " " + audio.error.message : "none"));
-      const r = app(d);
-      if (!sb.updating && ms.readyState === "open") console.warn("[Adam MSE] " + at() + " append #" + n + " (" + d.byteLength + " B) was DROPPED: the SourceBuffer rejected it and the guard swallowed the error");
-      return r;
-    };
-    sb.addEventListener("error", () => console.warn("[Adam MSE] " + at() + " SourceBuffer error after append #" + n + " (" + bytes + " B) ms=" + ms.readyState));
-    audio.addEventListener("error", () => console.warn("[Adam MSE] " + at() + " audio error " + (audio.error ? audio.error.code + " " + audio.error.message : "none") + " ms=" + ms.readyState), { once: true });
   }
   async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     _seekable = sess.capabilities?.seekable ?? false;
@@ -5237,7 +4273,6 @@
       }
     }
     const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-    _traceMediaSource(ms, sb, mkAudio);
     sb.addEventListener("error", () => {
       console.error("[Adam MSE] SourceBuffer error \u2014 audio.error=" + (mkAudio.error ? mkAudio.error.code + " " + mkAudio.error.message : "none") + " src=" + (mkAudio.currentSrc ? mkAudio.currentSrc.slice(0, 24) : "(empty)") + " ms=" + ms.readyState + " updating=" + sb.updating + " buf=" + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + "-" + sb.buffered.end(sb.buffered.length - 1).toFixed(1) + "s" : "empty"));
     });
@@ -5268,7 +4303,7 @@
       }
     }, { once: true });
     _pipeCtrl = new AbortController();
-    const pipeCtrl = _pipeCtrl;
+    const pipeCtrl2 = _pipeCtrl;
     const myStreamBase = streamBase;
     let pipeInput = streamBase;
     if (_nextAacStreamResp?.sessionId === _sessionId) {
@@ -5278,7 +4313,7 @@
     } else if (_nextAacStreamResp) {
       _discardNextAacStream();
     }
-    pipeToSourceBuffer(sb, mkAudio, pipeInput, pipeCtrl.signal, ms, _durationSec, t0).catch((err) => _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl, _durationSec, t0));
+    pipeToSourceBuffer(sb, mkAudio, pipeInput, pipeCtrl2.signal, ms, _durationSec, t0).catch((err) => _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl2, _durationSec, t0));
     const onXfVol = () => _xfTrackUserVolume(mkAudio);
     mkAudio.addEventListener("volumechange", onXfVol);
     ctrl.signal.addEventListener(
@@ -5373,8 +4408,10 @@
     console.log(`[Adam MSE] AAC stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
   }
   async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
+    _vlcTransport.reset(false);
     _vlcMode = true;
     window._adamVlcMode = true;
+    _syncVLCControls();
     _allowCDNTransition = false;
     const _silentMs = new MediaSource();
     const _silentUrl = URL.createObjectURL(_silentMs);
@@ -5386,6 +4423,7 @@
     mkAudio.load = () => {
     };
     _vlcPaused = false;
+    _syncVLCControls();
     Object.defineProperty(mkAudio, "paused", {
       get: () => _vlcPaused,
       configurable: true
@@ -5401,12 +4439,13 @@
     let _vlcMuted = false;
     let _vlcPreMuteVol = _vlcVolume;
     let _vlcVolSetting = false;
-    const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
+    let _vlcVolPostedAt = 0;
+    const _postVlcVol = (vol) => (_vlcVolPostedAt = performance.now(), fetch(`${ENGINE}/api/v1/vlc/volume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ volume: Math.round(vol * _scFactor) })
     }).catch(() => {
-    });
+    }));
     _scVlcReapply = () => _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
     const _dispatchVolChange = () => {
       if (_vlcVolSetting) return;
@@ -5416,6 +4455,16 @@
       } finally {
         _vlcVolSetting = false;
       }
+    };
+    _vlcSyncVolume = (volume, muted) => {
+      if (!Number.isFinite(volume)) return;
+      if (performance.now() - _vlcVolPostedAt < 1500) return;
+      if (Math.round(_vlcVolume * _scFactor) === volume && _vlcMuted === !!muted) return;
+      const requested = Math.round(volume / (_scFactor || 1));
+      _vlcVolume = requested;
+      _vlcVolPersist = requested;
+      _vlcMuted = !!muted;
+      _dispatchVolChange();
     };
     Object.defineProperty(mkAudio, "volume", {
       get: () => _vlcVolume / 100,
@@ -5448,12 +4497,11 @@
       configurable: true
     });
     mkAudio.pause = () => {
+      if (_vlcTransport.desired !== true) return;
       console.log(`[Adam VLC] pause() \u2192 pause`);
       _vlcPaused = true;
       mkAudio.dispatchEvent(new Event("pause"));
       _startLyricsFreeze(mkAudio);
-      fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
-      });
     };
     _vlcLoading = true;
     const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
@@ -5463,7 +4511,6 @@
       signal: ctrl.signal
     });
     if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
-    _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
     if (ctrl.signal.aborted) return;
     mkAudio.addEventListener("canplay", () => {
       if (!ctrl.signal.aborted) {
@@ -5473,6 +4520,12 @@
       }
     }, { once: true });
     mkAudio.dispatchEvent(new Event("canplay"));
+    if (_pendingVLCIntent !== null) {
+      const paused = _pendingVLCIntent;
+      _pendingVLCIntent = null;
+      await _requestVLCTransport(paused);
+      if (paused) mkAudio.dispatchEvent(new Event("pause"));
+    }
     startVLCPoll(mkAudio);
     console.log(`[Adam Engine] VLC playing +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
     ctrl.signal.addEventListener("abort", () => {
@@ -6031,6 +5084,23 @@
     } catch (e) {
       console.error("[Adam DeepLink] navigation error:", e.message);
     }
+  }
+  function _authStateSetup(mk) {
+    const report = async () => {
+      const signedIn = mk.authorizationStatus === 3;
+      window.adamBridge?.authState?.(signedIn);
+      let mode = "blur";
+      if (signedIn) {
+        try {
+          mode = (await window.adamBridge?.getPrefs?.())?.themeMode || "accent";
+        } catch (_) {
+          mode = "accent";
+        }
+      }
+      document.body?.setAttribute("data-adam-mode", mode);
+    };
+    report();
+    mk.addEventListener("authorizationStatusDidChange", report);
   }
   function _deepLinkSetup(mk) {
     window.adamBridge?.onOpenUrl?.((intent) => {
@@ -7017,13 +6087,11 @@
     setTimeout(_maybeAutoSync, 2e3);
     const _origMKPlay = mk.play.bind(mk);
     const _origMKPause = mk.pause.bind(mk);
-    mk.play = function() {
+    mk.play = async function() {
       if (_vlcMode) {
         if (_vlcPaused) {
           console.log("[Adam VLC] mk.play() \u2192 resume");
-          _vlcPaused = false;
-          fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
-          });
+          _requestVLCTransport(false);
         }
       } else if (_activeMvControls) {
         _msePaused = false;
@@ -7037,10 +6105,8 @@
     mk.pause = function() {
       if (_vlcMode) {
         console.log("[Adam VLC] mk.pause() \u2192 pause");
-        _vlcPaused = true;
+        _requestVLCTransport(true);
         getMKAudio()?.dispatchEvent(new Event("pause"));
-        fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
-        });
       } else if (_activeMvControls) {
         _msePaused = true;
         _activeMvControls.pause();
@@ -7051,6 +6117,29 @@
       return _origMKPause();
     };
     installMKSeekInterceptor(mk);
+    const transportControls = installTransportControls({
+      state: () => {
+        const ci = _sessionContainerIdx;
+        const ii = _sessionItemIdx;
+        const cur = _sessionContainers[ci];
+        return {
+          active: _vlcLive,
+          paused: _pendingVLCIntent ?? _vlcPaused,
+          canPrevious: !!cur,
+          canNext: !!cur && ((mk.repeatMode ?? 0) !== 0 || ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length || mk.queue?.playbackMode === 1)
+        };
+      },
+      command: (action) => {
+        if (!_vlcMode && (action === "play" || action === "pause")) {
+          _pendingVLCIntent = action === "pause";
+          _syncVLCControls();
+          return;
+        }
+        const result = action === "play" ? mk.play() : action === "pause" ? mk.pause() : action === "next" ? _adamNextRef?.(true) : _adamPrevRef?.();
+        Promise.resolve(result).catch((error) => console.warn("[Adam] transport control:", error.message));
+      }
+    });
+    _syncVLCControls = transportControls.sync;
     let _adamAdvancing = false;
     let _adamAdvancingTimer = null;
     let _adamGotoTarget = null;
@@ -7221,6 +6310,7 @@
     mk.skipToNextItem = () => _adamNext(true);
     mk.skipToPreviousItem = _adamPrev;
     _adamNextRef = _adamNext;
+    _adamPrevRef = _adamPrev;
     function _ownedGoto(ids, startId, label, closeGate) {
       const items = ids.slice();
       const target = startId && items.includes(startId) ? startId : items[0];
@@ -8111,6 +7201,7 @@
     _discordSetup(mk);
     _scrobbleSetup();
     _deepLinkSetup(mk);
+    _authStateSetup(mk);
     _scSetup();
     _xfSetup();
     _hotkeysSetup();
@@ -8696,7 +7787,7 @@
       if (!document.body) return;
       enabled = p?.artTheme !== false;
       if (p?.artThemeMode) window.adamBridge.setTweak("artThemeMode", null);
-      const startupMode = p?.themeMode || "accent";
+      const startupMode = p?.signedIn ? p?.themeMode || "accent" : "blur";
       document.body.setAttribute("data-adam-mode", startupMode);
       sync();
     }).catch(() => {
@@ -8885,173 +7976,6 @@
       const r = await fetch(`${ENGINE}/api/v1/drm/status`);
       return r.json();
     }
-    const checkDRMStatus = (status, msgEl, t, onDone, onChallenge) => {
-      const auth = status.state?.authentication;
-      const session = status.state?.session;
-      if (session === "valid" || auth === "logged_in" || status.state?.fairplay === "ready" || status.capabilities?.cbcs === true) {
-        clearInterval(t);
-        onDone();
-        return;
-      }
-      if (auth === "challenging") {
-        clearInterval(t);
-        onChallenge();
-        return;
-      }
-      if (auth === "failed") {
-        clearInterval(t);
-        msgEl.textContent = status.message || "Authentication failed.";
-      }
-    };
-    function buildAccountSection(drm, onRefresh) {
-      const { wrap, body } = makeSection("Engine Account");
-      const drmState = drm?.state ?? drm ?? {};
-      const managerOk = drmState?.manager === "ready";
-      const processOk = drmState?.process === "running";
-      const authOk = drmState?.authentication === "logged_in";
-      const fairplayOk = drmState?.fairplay === "ready";
-      const sessionOk = drmState?.session === "valid";
-      const cbcsOk = drm?.capabilities?.cbcs === true;
-      const isSignedIn = cbcsOk || fairplayOk || authOk && processOk;
-      function renderState() {
-        body.innerHTML = "";
-        const row = document.createElement("div");
-        row.style.cssText = "display:flex;align-items:center;gap:10px;padding:11px 0;";
-        row.appendChild(dot(isSignedIn));
-        const text = document.createElement("div");
-        text.style.cssText = "flex:1;";
-        const main = document.createElement("div");
-        main.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.85);";
-        main.textContent = isSignedIn ? "Signed in" : "Not signed in";
-        text.appendChild(main);
-        if (!isSignedIn) {
-          const sub = document.createElement("div");
-          sub.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;";
-          if (!managerOk) {
-            sub.textContent = "DRM engine not ready. Check engine logs.";
-          } else if (!processOk) {
-            sub.textContent = "DRM backend not loaded. Restart the app.";
-          } else {
-            sub.textContent = "Sign in to enable lossless and hi-res playback";
-          }
-          text.appendChild(sub);
-        }
-        row.appendChild(text);
-        const btn = makeBtn(isSignedIn ? "Sign Out" : "Sign In\u2026");
-        btn.onclick = isSignedIn ? async () => {
-          btn.disabled = true;
-          btn.textContent = "Signing out\u2026";
-          await fetch(`${ENGINE}/api/v1/drm/logout`, { method: "POST" }).catch(() => {
-          });
-          onRefresh();
-        } : renderSignIn;
-        row.appendChild(btn);
-        body.appendChild(row);
-      }
-      function renderSignIn() {
-        body.innerHTML = "";
-        const emailInp = makeInput("email", "Apple ID (email)");
-        const passInp = makeInput("password", "Password");
-        const msgEl = document.createElement("div");
-        msgEl.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.5);padding:4px 0;min-height:16px;";
-        const btnRow = document.createElement("div");
-        btnRow.style.cssText = "display:flex;gap:8px;padding:10px 0 4px;";
-        const cancelBtn = makeBtn("Cancel");
-        const goBtn = makeBtn("Sign In");
-        goBtn.style.cssText += "background:#fc3c44;color:#fff;";
-        btnRow.appendChild(cancelBtn);
-        btnRow.appendChild(goBtn);
-        body.appendChild(emailInp);
-        body.appendChild(passInp);
-        body.appendChild(msgEl);
-        body.appendChild(btnRow);
-        cancelBtn.onclick = renderState;
-        goBtn.onclick = async () => {
-          const email = emailInp.value.trim();
-          const password = passInp.value;
-          if (!email || !password) {
-            msgEl.textContent = "Email and password required.";
-            return;
-          }
-          goBtn.disabled = true;
-          goBtn.textContent = "Signing in\u2026";
-          msgEl.textContent = "";
-          const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, password })
-          }).catch((e) => {
-            msgEl.textContent = e.message;
-          });
-          if (!r) {
-            goBtn.disabled = false;
-            goBtn.textContent = "Sign In";
-            return;
-          }
-          if (!r.ok) {
-            msgEl.textContent = await r.text().catch(() => `HTTP ${r.status}`);
-            goBtn.disabled = false;
-            goBtn.textContent = "Sign In";
-            return;
-          }
-          msgEl.textContent = "Contacting Apple servers\u2026";
-          pollForAuth(msgEl);
-        };
-      }
-      function pollForAuth(msgEl) {
-        let n = 0;
-        const t = setInterval(async () => {
-          if (++n > 60) {
-            clearInterval(t);
-            msgEl.textContent = "Timed out. Refresh to check status.";
-            return;
-          }
-          const status = await fetchDRM().catch(() => null);
-          if (!status) return;
-          checkDRMStatus(status, msgEl, t, onRefresh, renderChallenge);
-        }, 1e3);
-      }
-      function renderChallenge() {
-        body.innerHTML = "";
-        const note = document.createElement("div");
-        note.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.85);padding:10px 0 4px;";
-        note.textContent = "Two-factor authentication \u2014 enter the code sent to your device.";
-        const codeInp = makeInput("text", "6-digit code");
-        codeInp.maxLength = 8;
-        const errEl = document.createElement("div");
-        errEl.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.5);padding:4px 0;min-height:16px;";
-        const submitBtn = makeBtn("Submit");
-        submitBtn.style.cssText += "margin-top:6px;";
-        body.appendChild(note);
-        body.appendChild(codeInp);
-        body.appendChild(errEl);
-        body.appendChild(submitBtn);
-        submitBtn.onclick = async () => {
-          const reply = codeInp.value.trim();
-          if (!reply) return;
-          submitBtn.disabled = true;
-          const r = await fetch(`${ENGINE}api/v1/drm/challenge`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reply })
-          }).catch((e) => {
-            errEl.textContent = e.message;
-          });
-          if (!r) {
-            submitBtn.disabled = false;
-            return;
-          }
-          if (!r.ok) {
-            errEl.textContent = await r.text().catch(() => `HTTP ${r.status}`);
-            submitBtn.disabled = false;
-            return;
-          }
-          pollForAuth(errEl);
-        };
-      }
-      renderState();
-      return wrap;
-    }
     function getDialog() {
       let dlg = document.getElementById("adam-settings-dialog");
       if (dlg) return dlg;
@@ -9225,24 +8149,6 @@
       });
       return { wrap, setValue: (v) => setOption(v, false) };
     }
-    function _adamGenPalette(hex, appearance) {
-      hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : "#fc3c44";
-      const r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2;
-      const d = mx - mn, s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
-      let h = 0;
-      if (d) {
-        if (mx === r) h = ((g - b) / d + 6) % 6;
-        else if (mx === g) h = (b - r) / d + 2;
-        else h = (r - g) / d + 4;
-        h *= 60;
-      }
-      const hi = Math.round(h), si = Math.round(s * 100);
-      if (appearance === "light") {
-        return { accent: hex, bgColor: `hsla(${hi},${Math.round(si * 0.25)}%,96%,1)`, navBg: `hsla(${hi},${Math.round(si * 0.3)}%,91%,0.95)`, navBorder: `hsla(${hi},${Math.round(si * 0.6)}%,30%,0.15)`, accentActive: `hsla(${hi},${si}%,45%,0.15)` };
-      }
-      return { accent: hex, bgColor: `hsla(${hi},${Math.round(si * 0.5)}%,10%,1)`, navBg: `hsla(${hi},${Math.round(si * 0.8)}%,14%,0.72)`, navBorder: `hsla(${hi},${Math.round(si * 0.7)}%,50%,0.25)`, accentActive: `hsla(${hi},${Math.round(si * 0.9)}%,60%,0.28)` };
-    }
     function _adamCssColorToHex(str) {
       if (/^#[0-9a-fA-F]{6}$/.test(str)) return str;
       const m = str.match(/hsla?\((\d+),\s*([\d.]+)%,\s*([\d.]+)%/);
@@ -9256,7 +8162,7 @@
     }
     function _adamRenderPaletteEditor(container, thInfo, st) {
       container.innerHTML = "";
-      const pal = st.curPalette || _adamGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
+      const pal = st.curPalette || thInfo.defaultPalette || {};
       const paletteKeys = [
         { key: "bgColor", label: "Background" },
         { key: "accent", label: "Accent" },
@@ -9290,7 +8196,7 @@
         grid.appendChild(cell);
       });
       container.appendChild(grid);
-      const resetBtn = makeBtn("Reset to system accent");
+      const resetBtn = makeBtn("Reset to Apple Music");
       resetBtn.style.cssText += "margin:10px 0;display:block;";
       resetBtn.onclick = async () => {
         const newPal = await window.adamBridge.resetThemePalette();
@@ -9639,7 +8545,7 @@
             text: sessText,
             subtitle: "Authentication lease with Apple servers"
           },
-          { label: "Backend", text: d.backend?.selected ?? "embedded", noDot: true }
+          { label: "Backend", text: ((n) => n ? n[0].toUpperCase() + n.slice(1) : "Unknown")(d.backend?.selected), noDot: true }
         ];
       }
       function applyStatusRow(v, { ok, loading, text, noDot }) {
@@ -9673,6 +8579,11 @@
           const d = await fetchDRM().catch(() => null);
           if (!d) return;
           renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
+          if (accountSignedIn(d) !== accountSignedIn(drm)) {
+            clearInterval(poll);
+            openSettings();
+            return;
+          }
           if (isResolved(d)) clearInterval(poll);
         }, 2e3);
       }
@@ -9788,6 +8699,16 @@
         window.adamBridge.setZoom(1);
       }));
       dBody.appendChild(makeRow("Zoom", zoomR, null, false));
+      const motionToggle = _adamIOSToggle(
+        prefs.reduceMotion === true,
+        (v) => window.adamBridge.setTweak("reduceMotion", v)
+      );
+      dBody.appendChild(makeRow(
+        "Reduce animations",
+        motionToggle,
+        "Use still artwork and fewer transitions. Restart required.",
+        false
+      ));
       const toggle = _adamIOSToggle(
         prefs.hideUpsell !== false,
         (v) => window.adamBridge.setTweak("hideUpsell", v)
@@ -9802,13 +8723,12 @@
     }
     async function _buildThemeSection(prefs) {
       const { wrap, body: thBody } = makeSection("Theme");
-      const thInfo = await window.adamBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: "accent", themePalette: null, themePresets: [], customCssPath: null, systemAccent: "#fc3c44", themeAppearance: "dark" }));
+      const thInfo = await window.adamBridge.getThemeInfo().catch(() => ({ blurAvailable: true, themeMode: "accent", themePalette: null, defaultPalette: null, themePresets: [], customCssPath: null }));
       const blurAvail = !!thInfo.blurAvailable;
       const st = {
         curMode: thInfo.themeMode || (blurAvail ? "blur" : "accent"),
         curPalette: thInfo.themePalette,
-        thPresets: thInfo.themePresets || [],
-        curAppearance: thInfo.themeAppearance || "dark"
+        thPresets: thInfo.themePresets || []
       };
       document.body.setAttribute("data-adam-mode", st.curMode);
       function renderCustomCss(container) {
@@ -9847,10 +8767,10 @@
         if (mode === "blur") {
           const info = document.createElement("div");
           info.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;";
-          info.textContent = blurAvail ? "Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above." : "Blur is only available on Hyprland and KDE. Your current desktop does not support it.";
+          info.textContent = "Your wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.";
           thContentArea.appendChild(info);
         } else if (mode === "accent") {
-          if (!st.curPalette) st.curPalette = _adamGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
+          if (!st.curPalette) st.curPalette = thInfo.defaultPalette || {};
           _adamRenderPaletteEditor(thContentArea, thInfo, st);
         } else {
           renderCustomCss(thContentArea);
@@ -9861,7 +8781,7 @@
       const modeSeg = document.createElement("div");
       modeSeg.style.cssText = "display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;";
       const thModes = [
-        { label: "Blur", value: "blur", disabled: !blurAvail, tip: blurAvail ? "" : "Only on Hyprland / KDE" },
+        { label: "Blur", value: "blur", disabled: false, tip: "" },
         { label: "Accent", value: "accent", disabled: false, tip: "" },
         { label: "Custom CSS", value: "custom", disabled: false, tip: "" }
       ];
@@ -9984,7 +8904,7 @@
       const sqRow = makeRow(
         "Streaming",
         sqInner,
-        drmSignedIn ? null : "Sign in to Engine Account to change streaming quality",
+        drmSignedIn ? null : "Streaming quality is available once the DRM session is ready",
         true
       );
       let _onLosslessChange = null;
@@ -10004,12 +8924,12 @@
       if (!drmSignedIn) {
         losslessToggle.style.opacity = "0.38";
         losslessToggle.style.pointerEvents = "none";
-        losslessToggle.title = "Sign in to Engine Account to enable lossless";
+        losslessToggle.title = "Lossless is available once the DRM session is ready";
       }
       aqBody.appendChild(makeRow(
         "Lossless Audio",
         losslessToggle,
-        drmSignedIn ? "Stream lossless audio (ALAC) when available" : "Sign in to Engine Account to enable lossless",
+        drmSignedIn ? "Stream lossless audio (ALAC) when available" : "Lossless is available once the DRM session is ready",
         false
       ));
       aqBody.appendChild(sqRow);
@@ -10419,7 +9339,7 @@
       dlBody.appendChild(makeRow(
         "Quality",
         dlQInner,
-        !drmSignedIn ? "Sign in to Engine Account to unlock lossless downloads" : null,
+        !drmSignedIn ? "Lossless downloads are available once the DRM session is ready" : null,
         true
       ));
       const ffmpegAvail = tools?.ffmpeg?.available === true;
@@ -10483,7 +9403,7 @@
       dlBody.appendChild(makeRow(
         "Resolution",
         mvResDd,
-        drmSignedIn ? null : "Sign in to Engine Account to enable MV downloads",
+        drmSignedIn ? null : "Music video downloads are available once the DRM session is ready",
         false
       ));
       const ART_OPTS = [
@@ -10636,6 +9556,40 @@
         "Show the current track on your Discord profile (requires a client ID in main.mjs)",
         false
       ));
+      return { wrap };
+    }
+    function _buildLinksSection() {
+      const { wrap, body } = makeSection("Links");
+      const intro = document.createElement("div");
+      intro.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.42);line-height:1.5;padding:2px 0 10px;";
+      intro.textContent = `Choose which links open in Adam. adam:// links always work. Turning a scheme on makes Adam the app your system uses for it, replacing Apple's Music app or another player for those links. Plain https://music.apple.com links open in your browser; turn on music:// and use the "Open in Music" button on the website to send them here.`;
+      body.appendChild(intro);
+      const rows = document.createElement("div");
+      body.appendChild(rows);
+      const render = (list) => {
+        rows.textContent = "";
+        let group = null;
+        for (const s of list) {
+          if (s.group !== group) {
+            group = s.group;
+            const h = document.createElement("div");
+            h.textContent = s.groupTitle;
+            h.style.cssText = FF + "font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);padding:12px 0 2px;";
+            rows.appendChild(h);
+          }
+          const toggle = _adamIOSToggle(s.enabled, async (v) => {
+            try {
+              render(await window.adamBridge.linksSet(s.scheme, v));
+            } catch (e) {
+              console.warn("[Adam Links] could not change", s.scheme, e?.message || e);
+            }
+          });
+          const status = !s.enabled ? "" : s.active ? " \xB7 active" : " \xB7 not active yet: check your system default apps";
+          rows.appendChild(makeRow(s.scheme + "://", toggle, s.note + status, false));
+        }
+      };
+      window.adamBridge?.linksGet?.().then(render).catch(() => {
+      });
       return { wrap };
     }
     function _buildShortcutsSection() {
@@ -10937,7 +9891,10 @@
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("adam-opening"), { once: true });
       }
-      const [drm, tools, prefs] = await (_settingsPreload ?? _warmSettingsCache());
+      const [drm, [, tools, prefs]] = await Promise.all([
+        fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+        _settingsPreload ?? _warmSettingsCache()
+      ]);
       _warmSettingsCache();
       if (myGen !== _settingsGen) {
         _restoreProxy();
@@ -10957,7 +9914,6 @@
         _restoreProxy();
         return;
       }
-      dlg.appendChild(buildAccountSection(drm, openSettings));
       dlg.appendChild(_buildEngineStatusSection(drm));
       dlg.appendChild(_buildDisplaySection(prefs));
       dlg.appendChild(themeWrap);
@@ -10969,6 +9925,7 @@
       onLosslessChange(applyDlLossless);
       dlg.appendChild(playbackWrap);
       dlg.appendChild(_buildShortcutsSection().wrap);
+      dlg.appendChild(_buildLinksSection().wrap);
       dlg.appendChild(scrobbleWrap);
       dlg.appendChild(historyWrap);
       dlg.appendChild(libraryWrap);

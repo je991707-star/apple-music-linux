@@ -55,10 +55,23 @@
       "category": "AudioVideo",
       "description": "Adam, an Apple Music desktop client for Linux and Windows",
       "executableName": "adam",
-      "artifactName": "adam.AppImage",
+      "artifactName": "Adam-${version}-x86_64.AppImage",
       "syncDesktopName": true,
       "mimeTypes": [
-        "x-scheme-handler/adam"
+        "x-scheme-handler/adam",
+        "x-scheme-handler/music",
+        "x-scheme-handler/musics",
+        "x-scheme-handler/itms",
+        "x-scheme-handler/itmss",
+        "x-scheme-handler/itunes",
+        "x-scheme-handler/itals",
+        "x-scheme-handler/italss",
+        "x-scheme-handler/itvls",
+        "x-scheme-handler/itvlss",
+        "x-scheme-handler/itsradio",
+        "x-scheme-handler/itunesradio",
+        "x-scheme-handler/daap",
+        "x-scheme-handler/itpc"
       ],
       "extraResources": [
         {

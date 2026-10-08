@@ -160,3 +160,29 @@ test('migrateStoreKeys renames aml_ keys without clobbering', () => {
     assert.deepEqual(st, { adam_resume_state: { t: 1 }, adam_play_counts: { b: 2 }, other: 3 });
     assert.equal(migrateStoreKeys(st), false);
 });
+
+import { resolveThemeMode } from '../theme-mode.mjs';
+
+test('signed-out users always get the plain blur theme, whatever was saved', () => {
+    for (const themeMode of [undefined, 'accent', 'blur', 'custom']) {
+        for (const isHyprland of [true, false]) {
+            assert.equal(resolveThemeMode({ signedIn: false, themeMode, isHyprland }), 'blur', `${themeMode}/${isHyprland}`);
+        }
+    }
+});
+
+test('signed-in users get their saved theme, with the existing defaults and fallbacks', () => {
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'accent', isHyprland: true }), 'accent');
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'custom', isHyprland: false }), 'custom');
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: undefined, isHyprland: false }), 'accent');
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: undefined, isHyprland: true }), 'blur');
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'blur', isHyprland: true }), 'blur');
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'blur', isHyprland: false }), 'blur', 'blur works on every desktop');
+});
+
+test('liquid glass overrides every other theme mode, signed in or out', () => {
+    for (const signedIn of [true, false]) for (const themeMode of [undefined, 'accent', 'blur', 'custom']) {
+        assert.equal(resolveThemeMode({ signedIn, themeMode, isHyprland: false, glass: true }), 'glass');
+    }
+    assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'accent', isHyprland: false, glass: false }), 'accent');
+});

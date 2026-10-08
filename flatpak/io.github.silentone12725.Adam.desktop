@@ -7,5 +7,5 @@ Icon=io.github.silentone12725.Adam
 Type=Application
 Categories=AudioVideo;Music;Network;
 StartupWMClass=Adam
-MimeType=x-scheme-handler/adam;x-scheme-handler/ame;
+MimeType=x-scheme-handler/adam;x-scheme-handler/music;x-scheme-handler/musics;x-scheme-handler/itms;x-scheme-handler/itmss;x-scheme-handler/itunes;x-scheme-handler/itals;x-scheme-handler/italss;x-scheme-handler/itvls;x-scheme-handler/itvlss;x-scheme-handler/itsradio;x-scheme-handler/itunesradio;x-scheme-handler/daap;x-scheme-handler/itpc;x-scheme-handler/ame;
 Keywords=music;apple;streaming;

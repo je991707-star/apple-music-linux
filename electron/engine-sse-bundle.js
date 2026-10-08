@@ -39,15 +39,16 @@ var _adamSSEMod = (() => {
      */
     waitFor(type, timeoutMs = 1e4) {
       return new Promise((resolve, reject) => {
+        const handler = (data) => {
+          clearTimeout(timer);
+          this.off(type, handler);
+          resolve(data);
+        };
         const timer = setTimeout(() => {
           this.off(type, handler);
           reject(new Error(`SSE waitFor('${type}') timed out after ${timeoutMs}ms`));
         }, timeoutMs);
-        const handler = (data) => {
-          clearTimeout(timer);
-          resolve(data);
-        };
-        this.once(type, handler);
+        this.on(type, handler);
       });
     }
     // ── Internals ──────────────────────────────────────────────────────────────
@@ -64,9 +65,15 @@ var _adamSSEMod = (() => {
         }
       });
     }
+    // Back off again unless the stream stayed up long enough to count as healthy; resetting on mere
+    // connect made a server that accepts and immediately drops us a one-second reconnect loop.
+    _noteStreamEnded(livedMs) {
+      if (livedMs >= 1e4) this._retryDelay = 1e3;
+    }
     async _connect() {
       if (this._ctrl) this._ctrl.abort();
       this._ctrl = new AbortController();
+      let connectedAt = 0;
       try {
         const headers = { Accept: "text/event-stream", "Cache-Control": "no-cache" };
         if (this._lastEventId) headers["Last-Event-ID"] = this._lastEventId;
@@ -76,7 +83,7 @@ var _adamSSEMod = (() => {
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         this._connected = true;
-        this._retryDelay = 1e3;
+        connectedAt = Date.now();
         console.log("[Adam SSE] Connected");
         this._dispatch("sse.open", {});
         await this._parseStream(resp.body);
@@ -84,6 +91,7 @@ var _adamSSEMod = (() => {
         if (e.name === "AbortError") return;
         console.warn("[Adam SSE] Disconnected:", e.message);
       }
+      if (connectedAt) this._noteStreamEnded(Date.now() - connectedAt);
       this._connected = false;
       this._scheduleReconnect();
     }

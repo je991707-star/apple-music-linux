@@ -3,6 +3,7 @@
   var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
   var PLAY_COUNTS_KEY = "adam_play_counts";
   var MAX_STORED_TRACKS = 200;
+  var MAX_CONTEXT_TRACKS = 200;
   function parseContentUrl(url) {
     const path = new URL(url, "https://music.apple.com").pathname;
     let m;
@@ -46,6 +47,7 @@
   var SmartCache = class {
     constructor() {
       this._jobs = {};
+      this._seq = {};
       this._counts = loadPlayCounts();
       const clearSlot = (ev) => {
         const jobId = ev.payload?.jobId;
@@ -62,6 +64,7 @@
     }
     // ── Context emission ───────────────────────────────────────────────────────
     async sendContext({ type, id, reason, slot, tracks, currentIndex, mk }) {
+      const mine = this._seq[slot] = (this._seq[slot] ?? 0) + 1;
       const prevJobId = this._jobs[slot];
       if (prevJobId) {
         fetch(`${ENGINE}/api/v1/jobs/${prevJobId}`, { method: "DELETE" }).catch(() => {
@@ -70,11 +73,13 @@
       }
       if (!tracks || tracks.length === 0) return;
       const sf = mk?.storefrontId ?? "us";
+      const start = tracks.length > MAX_CONTEXT_TRACKS ? Math.max(0, Math.min((currentIndex ?? 0) - 10, tracks.length - MAX_CONTEXT_TRACKS)) : 0;
       const payload = {
         context: { type, id: id ?? null, reason },
         currentIndex: currentIndex ?? -1,
         lossless: window._adamLossless ?? false,
-        tracks: tracks.map((t, i) => {
+        tracks: tracks.slice(start, start + MAX_CONTEXT_TRACKS).map((t, k) => {
+          const i = start + k;
           const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
           if (!assetId) return null;
           const entry = this._counts[assetId] ?? {};
@@ -102,6 +107,11 @@
         });
         if (resp.ok) {
           const { jobId } = await resp.json();
+          if (this._seq[slot] !== mine) {
+            if (jobId) fetch(`${ENGINE}/api/v1/jobs/${jobId}`, { method: "DELETE" }).catch(() => {
+            });
+            return;
+          }
           this._jobs[slot] = jobId;
           console.log(`[Adam Cache] ${reason} \u2192 jobId=${jobId} slot=${slot} tracks=${payload.tracks.length}`);
         }
@@ -115,7 +125,7 @@
     async onAlbumOpen(id, mk) {
       const sf = mk?.storefrontId ?? "us";
       try {
-        const r = await fetch(`${ENGINE}/api/v1/catalog/albums/${id}?sf=${sf}`);
+        const r = await fetch(`${ENGINE}/api/v1/catalog/albums/${encodeURIComponent(id)}?sf=${encodeURIComponent(sf)}`);
         if (!r.ok) return;
         const data = await r.json();
         const tracks = data?.data?.[0]?.relationships?.tracks?.data ?? data?.tracks ?? [];
@@ -136,7 +146,7 @@
     async onPlaylistOpen(id, mk) {
       const sf = mk?.storefrontId ?? "us";
       try {
-        const r = await fetch(`${ENGINE}/api/v1/catalog/playlists/${id}?sf=${sf}`);
+        const r = await fetch(`${ENGINE}/api/v1/catalog/playlists/${encodeURIComponent(id)}?sf=${encodeURIComponent(sf)}`);
         if (!r.ok) return;
         const data = await r.json();
         const tracks = data?.data?.[0]?.relationships?.tracks?.data ?? data?.tracks ?? [];
@@ -184,9 +194,10 @@
       return Object.entries(this._counts).sort(([, a], [, b]) => b.count - a.count).slice(0, n).map(([id]) => id);
     }
     // ── Startup warm ───────────────────────────────────────────────────────────
-    // Warms top-10 most-played tracks immediately on app startup.
+    // Warms a small set of most-played tracks on idle startup. Active playback already warms its queue.
     async warmOnStartup(mk) {
-      const ids = this.topPlayed(10);
+      if (mk?.nowPlayingItem) return;
+      const ids = this.topPlayed(3);
       if (ids.length === 0) return;
       const tracks = ids.map((id) => ({ id }));
       await this.sendContext({
@@ -208,6 +219,9 @@
       const onNavigate = (url) => {
         const parsed = parseContentUrl(url);
         if (!parsed) return;
+        const key = `${parsed.type}:${parsed.id}`;
+        if (key === this._lastNavKey) return;
+        this._lastNavKey = key;
         const mk = getMk();
         if (!mk) return;
         if (parsed.type === "album") {
