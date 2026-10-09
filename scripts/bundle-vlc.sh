@@ -82,6 +82,12 @@ for need in access/libimem_plugin.so demux/libmp4_plugin.so audio_output/libpuls
     fi
 done
 
+# FFmpeg libraries matching this VLC's plugins, when third_party/ffmpeg (FFmpeg 9) does not: built by
+# scripts/build-vlc-ffmpeg.sh. They go next to libvlc, which LD_LIBRARY_PATH already covers.
+if [ -n "${ADAM_VLC_FFMPEG_LIBDIR:-}" ]; then
+    cp -a "$ADAM_VLC_FFMPEG_LIBDIR"/lib*.so.* "$DEST/"
+fi
+
 # Libraries the plugins link that other distros (and the Flatpak runtime) do not provide. The
 # FFmpeg libraries are not among them: they ship in third_party/ffmpeg (a minimal build whose
 # sonames match these plugins) and reach VLC through LD_LIBRARY_PATH.
@@ -114,9 +120,10 @@ for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P
 done
 [ "$bad" = 0 ] || exit 1
 
-# Nothing bundled may need a newer glibc than the other packaged binaries (2.38): a library copied
-# from a rolling distro can require symbols that older systems and the Flatpak runtime lack.
-MAX_GLIBC="2.38"
+# Nothing bundled may need a newer glibc than the other packaged binaries (2.38 by default; release builds
+# on Ubuntu 22.04 set ADAM_MAX_GLIBC=2.35): a library copied from a rolling distro can require symbols that
+# older systems and the Flatpak runtime lack.
+MAX_GLIBC="${ADAM_MAX_GLIBC:-2.38}"
 over=0
 while IFS= read -r f; do
     v="$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"

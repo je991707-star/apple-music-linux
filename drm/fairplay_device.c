@@ -82,8 +82,10 @@ static fp_error_t fp_device_secure_delete(const char *file_path) {
                 size_t chunk_size = file_size - offset < 4096 ? 
                                     (size_t)(file_size - offset) : 4096;
                 fp_device_secure_zero(buf, chunk_size);
-                lseek(fd, offset, SEEK_SET);
-                write(fd, buf, chunk_size);
+                /* Best effort: if the overwrite fails there is nothing more to wipe, and the file is unlinked next. */
+                if (lseek(fd, offset, SEEK_SET) < 0 || write(fd, buf, chunk_size) != (ssize_t)chunk_size) {
+                    break;
+                }
             }
             free(buf);
         }
@@ -467,11 +469,12 @@ fp_error_t fairplay_device_id_save(const char *storage_path, const fp_device_id_
         return FP_ERR_DEVICE_ID_STORAGE_FAILED;
     }
     
-    ssize_t written = write(fd, device_id->string, strlen(device_id->string));
-    write(fd, "\n", 1);
+    size_t id_len = strlen(device_id->string);
+    ssize_t written = write(fd, device_id->string, id_len);
+    ssize_t newline = (written == (ssize_t)id_len) ? write(fd, "\n", 1) : -1;
     close(fd);
     
-    if (written != (ssize_t)strlen(device_id->string)) {
+    if (written != (ssize_t)id_len || newline != 1) {
         return FP_ERR_DEVICE_ID_STORAGE_FAILED;
     }
     
