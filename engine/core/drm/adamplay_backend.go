@@ -82,7 +82,7 @@ type adamplayBackend struct {
 	stateHandle     cgo.Handle
 	stateBox        unsafe.Pointer     // C-allocated cell holding stateHandle; the pointer handed to C
 	accountFallback func() AccountInfo // web-session token when no credential files exist (guarded by mu)
-	cachedDevTok    string             // MusicKit developer JWT, fetched once on Start
+	devTok          devTokenCache      // MusicKit developer JWT: fetched on Start, retried at use if that failed
 
 	// In-flight accounting for calls into the C library (guarded by mu). Stop must not
 	// tear the library down under a running call, and key contexts handed out by one
@@ -205,7 +205,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	// Authorization header). This token is embedded in the web player JS and
 	// does not require user credentials — it is safe to fetch on every Start.
 	if tok, err := ampapi.GetToken(); err == nil && tok != "" {
-		b.cachedDevTok = tok
+		b.devTok.set(tok)
 		log.Printf("[drm] native: dev token fetched (%d bytes)", len(tok))
 	} else {
 		log.Printf("[drm] native: dev token fetch failed: %v", err)
@@ -543,10 +543,7 @@ func (b *adamplayBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 				} else {
 					// Fetch license using aacstream's AcquireKey.
 					// token = developer JWT (Authorization: Bearer), mutoken = user music token.
-					devTok := b.cachedDevTok
-					if devTok == "" {
-						devTok = account.DevToken
-					}
+					devTok := b.devTok.get(account.DevToken, ampapi.GetToken)
 					fetchedKey, err = aacstream.AcquireKey(ctx, adamID, kidBase64, uriPrefix, devTok, account.MusicToken, false)
 					if err != nil {
 						log.Printf("[drm] DialCBCS: failed to fetch license: %v", err)
