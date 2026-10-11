@@ -16,7 +16,8 @@ CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -Wno-format-trunc
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lcurl -Wl,-z,relro,-z,now
 SRCS = drm_client.c drm_linux.c fairplay.c fairplay_device.c \
        fp_spc_builder.c fp_ckc_parser.c fp_key_unwrapper.c \
-       fp_http_client.c fp_license_exchange.c
+       fp_http_client.c fp_license_exchange.c fp_ckc_acquire.c \
+       libcorefp_wrapper.c
 TARGET = libdrm_client.so
 endif
 LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
@@ -25,7 +26,8 @@ OBJS = $(SRCS:.c=.o)
 # Headers
 HEADERS = drm_client.h drm_types.h fairplay.h fairplay_device.h \
           fp_spc_builder.h fp_ckc_parser.h fp_key_unwrapper.h \
-          fp_http_client.h fp_license_exchange.h
+          fp_http_client.h fp_license_exchange.h fp_ckc_acquisition.h \
+          libcorefp.h libcorefp_wrapper.h
 
 # Linux shim compilation rule
 drm_linux.o: drm_linux.c drm_types.h
@@ -40,10 +42,21 @@ TEST_EXCHANGE_SRC = tests/test_fp_exchange.c
 TEST_EXCHANGE_TARGET = tests/test_fp_exchange
 TEST_LIVE_SRC = tests/test_live_exchange.c
 TEST_LIVE_TARGET = tests/test_live_exchange
+TEST_COMPREHENSIVE_SRC = tests/test_drm_comprehensive.c
+TEST_COMPREHENSIVE_TARGET = tests/test_drm_comprehensive
+TEST_REGRESSION_SRC = tests/test_drm_regression.c
+TEST_REGRESSION_TARGET = tests/test_drm_regression
 LDFLAGS_REAL = -lpthread -lcrypto -lcurl -fno-stack-protector
 
 # Default target (live test excluded — requires real credentials)
-all: $(TARGET) $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
+all: $(TARGET) $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET) corefp_helper
+
+# ── corefp_helper Wine subprocess ────────────────────────────────────────────
+
+corefp_helper: corefp_helper/corefp_helper.c
+	$(MAKE) -C corefp_helper
+
+.PHONY: corefp_helper
 
 # ── Library link ─────────────────────────────────────────────────────────────
 
@@ -72,10 +85,17 @@ $(TEST_EXCHANGE_TARGET): $(TEST_EXCHANGE_SRC) $(TARGET)
 $(TEST_LIVE_TARGET): $(TEST_LIVE_SRC) $(TARGET)
 	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_REAL)
 
+$(TEST_COMPREHENSIVE_TARGET): $(TEST_COMPREHENSIVE_SRC) $(TARGET)
+	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_REAL)
+
+$(TEST_REGRESSION_TARGET): $(TEST_REGRESSION_SRC) $(TARGET)
+	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_REAL)
+
 # ── Utility targets ───────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(OBJS) $(TEST_TARGET) $(TEST_REAL_TARGET) $(TEST_EXCHANGE_TARGET) $(TARGET)
+	rm -f $(OBJS) $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET) $(TEST_LIVE_TARGET) $(TEST_COMPREHENSIVE_TARGET) $(TEST_REGRESSION_TARGET) $(TARGET)
+	$(MAKE) -C corefp_helper clean 2>/dev/null || true
 
 release: $(TARGET)
 	rm -f $(OBJS)
@@ -107,7 +127,15 @@ test-live: $(TEST_LIVE_TARGET)
 	@echo "Running live FPS license server test..."
 	@LD_LIBRARY_PATH=. $(TEST_LIVE_TARGET) files/
 
-test-all: $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
+test-comprehensive: $(TEST_COMPREHENSIVE_TARGET)
+	@echo "Running comprehensive DRM tests..."
+	@LD_LIBRARY_PATH=. $(TEST_COMPREHENSIVE_TARGET); exit $$?
+
+test-regression: $(TEST_REGRESSION_TARGET)
+	@echo "Running DRM regression tests..."
+	@LD_LIBRARY_PATH=. $(TEST_REGRESSION_TARGET); exit $$?
+
+test-all: $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET) $(TEST_REGRESSION_TARGET)
 	@echo "========================================"
 	@echo "Running ALL Tests"
 	@echo "========================================"
@@ -121,7 +149,12 @@ test-all: $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
 	echo "========================================" && \
 	echo "Running Exchange Tests" && \
 	echo "========================================" && \
-	LD_LIBRARY_PATH=. $(TEST_EXCHANGE_TARGET)
+	LD_LIBRARY_PATH=. $(TEST_EXCHANGE_TARGET) && \
+	echo "" && \
+	echo "========================================" && \
+	echo "Running Regression Tests" && \
+	echo "========================================" && \
+	LD_LIBRARY_PATH=. $(TEST_REGRESSION_TARGET)
 
 analyze:
 	clang-analyze $(CFLAGS) -c $(SRCS)
@@ -157,6 +190,13 @@ fp_http_client.o: fp_http_client.c fp_http_client.h fairplay.h
 
 fp_license_exchange.o: fp_license_exchange.c fp_license_exchange.h \
     fp_spc_builder.h fp_ckc_parser.h fp_http_client.h fp_key_unwrapper.h fairplay.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+fp_ckc_acquire.o: fp_ckc_acquire.c fp_ckc_acquisition.h \
+    fp_ckc_parser.h fp_http_client.h fairplay.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+libcorefp_wrapper.o: libcorefp_wrapper.c libcorefp_wrapper.h libcorefp.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 .PHONY: all clean release install uninstall test test-device test-exchange test-live \

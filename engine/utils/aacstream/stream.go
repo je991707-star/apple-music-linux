@@ -292,7 +292,7 @@ func logInterceptDecryptResult(fragNum int, decErr error, frag *mp4.Fragment) {
 	}
 }
 
-func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writer) error {
+func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, iv []byte, w io.Writer) error {
 	br := bufio.NewReaderSize(r, 1<<20) // 1 MiB read-ahead
 
 	init, offset, err := readInitSegment(br)

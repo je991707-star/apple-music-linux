@@ -3,12 +3,14 @@ package fairplay
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/itouakirai/mp4ff/mp4"
@@ -236,7 +238,8 @@ type cbcsSource struct {
 	dialer     CBCSDialer
 	fileURL    string
 	keyURIs    []string
-	durationMs int // 0 = leave moov duration unchanged
+	kidBase64  string // KID from playlist for license acquisition
+	durationMs int    // 0 = leave moov duration unchanged
 }
 
 // Stream implements pipeline.Source.  It wraps streamAttempt in a retry loop
@@ -334,6 +337,7 @@ func (s *cbcsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
 		dialer:     s.dialer,
 		fileURL:    s.media.FileURL,
 		keyURIs:    s.media.KeyURIs,
+		kidBase64:  s.media.KIDBase64,
 		durationMs: s.durationMs,
 	}
 	err := src.Stream(ctx, w)
@@ -374,6 +378,7 @@ func (s *cbcsSeekableSource) SourceFrom(startSec float64) (pipeline.Source, floa
 		dialer:     s.dialer,
 		fileURL:    s.media.FileURL,
 		keyURIs:    s.media.KeyURIs,
+		kidBase64:  s.media.KIDBase64,
 		durationMs: s.durationMs,
 		startFrag:  startFrag,
 		startKey:   startKey,
@@ -389,6 +394,7 @@ type cbcsSkipSource struct {
 	dialer     CBCSDialer
 	fileURL    string
 	keyURIs    []string
+	kidBase64  string // KID from playlist for license acquisition
 	durationMs int
 	startFrag  int
 	startKey   string
@@ -555,10 +561,19 @@ func (s *cbcsSkipSource) sendSeekFragKey(i int, rw *bufio.ReadWriter) error {
 	if err := alacstream.SwitchKeys(rw); err != nil {
 		return fmt.Errorf("cbcs seek: switch keys at %d: %w", i, err)
 	}
+	// Use the real KID from the playlist if available
+	keyURI := s.keyURIs[i]
+	if s.kidBase64 != "" {
+		if idx := strings.LastIndex(keyURI, ","); idx >= 0 {
+			keyURI = keyURI[:idx+1] + s.kidBase64
+		} else {
+			keyURI = keyURI + "," + s.kidBase64
+		}
+	}
 	if err := alacstream.SendString(rw, keyAdamID(s.adamID, s.keyURIs[i])); err != nil {
 		return fmt.Errorf("cbcs seek: send adamID %d: %w", i, err)
 	}
-	if err := alacstream.SendString(rw, s.keyURIs[i]); err != nil {
+	if err := alacstream.SendString(rw, keyURI); err != nil {
 		return fmt.Errorf("cbcs seek: send key %d: %w", i, err)
 	}
 	return nil
@@ -574,8 +589,20 @@ func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
 	if i != 0 {
 		alacstream.SwitchKeys(rw)
 	}
+	// Use the real KID from the playlist if available, otherwise use the key URI as-is
+	keyURI := s.keyURIs[i]
+	if s.kidBase64 != "" {
+		// Replace the placeholder KID in the key URI with the real one
+		// Format: skd://itunes.apple.com/pXXXX/cN,kidBase64
+		if idx := strings.LastIndex(keyURI, ","); idx >= 0 {
+			keyURI = keyURI[:idx+1] + s.kidBase64
+		} else {
+			keyURI = keyURI + "," + s.kidBase64
+		}
+		log.Printf("[cbcs] sendFragKey: using real KID: %s", s.kidBase64)
+	}
 	alacstream.SendString(rw, keyAdamID(s.adamID, s.keyURIs[i]))
-	alacstream.SendString(rw, s.keyURIs[i])
+	alacstream.SendString(rw, keyURI)
 }
 
 // effectiveKeyURI returns the key in force at fragment i: the last non-empty
@@ -612,6 +639,15 @@ func sendKeyHandshake(rw *bufio.ReadWriter, adamID, uri string) error {
 		return fmt.Errorf("cbcs: send key: %w", err)
 	}
 	return nil
+}
+
+func getKIDBase64(tracks map[uint32]mp4.DecryptTrackInfo) string {
+	for _, ti := range tracks {
+		if ti.Sinf != nil && ti.Sinf.Schi != nil && ti.Sinf.Schi.Tenc != nil && len(ti.Sinf.Schi.Tenc.DefaultKID) > 0 {
+			return strings.TrimRight(base64.StdEncoding.EncodeToString(ti.Sinf.Schi.Tenc.DefaultKID), "=")
+		}
+	}
+	return ""
 }
 
 // skipStartFragments reads and discards startFrag fragments, accumulating
@@ -679,6 +715,17 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	}
 	if err := alacstream.SanitizeInit(init); err != nil {
 		log.Printf("cbcs seek: warning: sanitize init: %v", err)
+	}
+
+	if kidB64 := getKIDBase64(tracks); kidB64 != "" {
+		for i, uri := range s.keyURIs {
+			if uri != "" && !strings.Contains(uri, ",") {
+				s.keyURIs[i] = uri + "," + kidB64
+			}
+		}
+		if s.startKey != "" && !strings.Contains(s.startKey, ",") {
+			s.startKey = s.startKey + "," + kidB64
+		}
 	}
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
@@ -817,6 +864,15 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	if err := alacstream.SanitizeInit(init); err != nil {
 		log.Printf("cbcs: warning: sanitize init: %v", err)
 	}
+
+	if kidB64 := getKIDBase64(tracks); kidB64 != "" {
+		for i, uri := range s.keyURIs {
+			if uri != "" && !strings.Contains(uri, ",") {
+				s.keyURIs[i] = uri + "," + kidB64
+			}
+		}
+	}
+
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
 		return fmt.Errorf("cbcs: encode init: %w", err)

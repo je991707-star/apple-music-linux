@@ -68,6 +68,11 @@ typedef struct {
     uint8_t encrypted_key[FP_CKC_MAX_ENCRYPTED_KEY_SIZE];  /**< RSA-encrypted key */
     size_t encrypted_key_size;              /**< Size of encrypted key */
     
+    /* Initialization Vector (REQ-001) */
+    uint8_t iv[FP_IV_SIZE];                 /**< Base IV for sample decryption */
+    bool has_iv;                            /**< Whether IV was present in CKC */
+    bool iv_encrypted;                      /**< Whether IV needs unwrapping */
+    
     /* Lease information */
     uint64_t expires_at;                    /**< Expiration timestamp (Unix) */
     uint32_t lease_duration;                /**< Lease duration in seconds */

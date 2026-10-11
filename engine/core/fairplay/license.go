@@ -64,13 +64,13 @@ func (p *fpLicenseProvider) Open(ctx context.Context, req LicenseRequest) (pipel
 func (p *fpLicenseProvider) open(ctx context.Context, req LicenseRequest, forceRefresh bool) (pipeline.Decryptor, error) {
 	tr := tracer.FromContext(ctx)
 	tr.RecordLicenseStart()
-	keyBytes, err := aacstream.AcquireKey(ctx,
+	keyAndIV, err := aacstream.AcquireKey(ctx,
 		req.AssetID, req.KIDBase64, req.URIPrefix, req.Token, req.MediaUserToken, forceRefresh)
 	tr.RecordLicenseEnd()
 	if err != nil {
 		return nil, fmt.Errorf("fairplay licence: %w", err)
 	}
-	return &fairplayDecryptor{key: keyBytes, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
+	return &fairplayDecryptor{key: keyAndIV.Key, iv: keyAndIV.IV, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
 }
 
 // InvalidateKey evicts a cached content key identified by kidBase64 and
@@ -82,12 +82,13 @@ func InvalidateKey(kidBase64, uriPrefix string) { aacstream.InvalidateKey(kidBas
 // It is unexported; callers receive it only through the pipeline.Decryptor interface.
 type fairplayDecryptor struct {
 	key       []byte
+	iv        []byte // Initialization vector from CKC
 	kid       string // kidBase64 — for cache invalidation on decrypt error
 	uriPrefix string
 }
 
 func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
-	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, w)
+	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, d.iv, w)
 	if d.kid != "" && shouldEvictKey(ctx, err) {
 		// Evict the stale cached key so the next session Open re-negotiates.
 		// Matches Android FootHillDecryptionKey.fetchKeyData(forceRefresh=true)

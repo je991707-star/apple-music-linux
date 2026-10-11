@@ -114,6 +114,8 @@ void fp_ckc_init(fp_ckc_t *ckc) {
     ckc->renewal_offset = 0;
     ckc->format_version = 0;
     ckc->flags = 0;
+    ckc->has_iv = false;
+    ckc->iv_encrypted = false;
     ckc->raw_data = NULL;
     ckc->raw_size = 0;
 }
@@ -185,6 +187,20 @@ fp_error_t fp_ckc_parse(
     memcpy(out_ckc->encrypted_key, ckc_data + offset, enc_key_len);
     out_ckc->encrypted_key_size = enc_key_len;
     offset += enc_key_len;
+    
+    /* Read IV (16 bytes) - REQ-001 */
+    /* IV typically follows the encrypted key in CKC binary format */
+    if (offset + 16 <= ckc_size) {
+        memcpy(out_ckc->iv, ckc_data + offset, 16);
+        out_ckc->has_iv = true;
+        out_ckc->iv_encrypted = (out_ckc->flags & FP_CKC_FLAG_ENCRYPTED_IV) != 0;
+        offset += 16;
+        fprintf(stderr, "[CKC-PARSER] INFO: IV extracted from CKC\n");
+    } else {
+        fprintf(stderr, "[CKC-PARSER] WARN: IV field not found in CKC (GAP-001)\n");
+        out_ckc->has_iv = false;
+        memset(out_ckc->iv, 0, 16);
+    }
     
     /* Read expiration timestamp (8 bytes) */
     err = read_be_value(ckc_data, ckc_size, offset, &out_ckc->expires_at, 8);
@@ -272,6 +288,7 @@ void fp_ckc_free(fp_ckc_t *ckc) {
     
     fairplay_secure_zero(ckc->kid, FP_CKC_KID_SIZE);
     fairplay_secure_zero(ckc->encrypted_key, ckc->encrypted_key_size);
+    fairplay_secure_zero(ckc->iv, FP_IV_SIZE);  /* Zero IV on free */
     
     fp_ckc_init(ckc);
 }

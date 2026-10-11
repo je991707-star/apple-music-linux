@@ -836,7 +836,23 @@ function createWindow() {
     }
 
     win.on('page-title-updated', (e) => e.preventDefault());
-    win.loadURL('https://music.apple.com').catch(e => console.error('[Adam] Apple Music load failed:', e.message));
+    let initialLoadRetried = false;
+    const loadAppleMusic = () => win.loadURL('https://music.apple.com').catch(async (e) => {
+        if (!initialLoadRetried && e?.message?.includes('ERR_FAILED')) {
+            initialLoadRetried = true;
+            console.warn('[Adam] Apple Music load hit a Chromium cache failure; clearing the session cache and retrying');
+            try {
+                await win.webContents.session.clearCache();
+                await win.loadURL('https://music.apple.com');
+                return;
+            } catch (retryError) {
+                console.error('[Adam] Apple Music retry failed:', retryError.message);
+                return;
+            }
+        }
+        console.error('[Adam] Apple Music load failed:', e.message);
+    });
+    loadAppleMusic();
 
     // KDE X11: set the blur atom before the window is mapped.
     // ready-to-show fires after Chromium's first paint but before win.show(),
@@ -2687,6 +2703,10 @@ function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
 }
 
 app.whenReady().then(() => {
+    // A second instance can reach whenReady before app.quit() finishes. Do not
+    // create windows or start services after failing to acquire the lock.
+    if (!_gotLock) return;
+
     // Defer MPRIS init by 1.5 s — Electron's D-Bus socket access isn't
     // reliable the instant app is ready; a short delay avoids the EPIPE
     // that fires when the auth handshake races the first property write.

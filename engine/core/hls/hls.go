@@ -602,6 +602,10 @@ type CBCSMedia struct {
 	// Empty string means no key change at that position.
 	KeyURIs []string
 
+	// KIDBase64 is the base64-encoded key ID extracted from the playlist's
+	// EXT-X-KEY line. This is the real KID used for license acquisition.
+	KIDBase64 string
+
 	// SegmentDurations holds the declared duration (seconds) of each segment,
 	// in playlist order. Used by CBCSSeekableSource to compute seek offsets.
 	SegmentDurations []float64
@@ -636,6 +640,15 @@ func OpenMediaCBCS(ctx context.Context, rawURL string) (*CBCSMedia, error) {
 
 	pl := from.(*m3u8.MediaPlaylist)
 	med := &CBCSMedia{}
+
+	// Extract KID from playlist-level EXT-X-KEY if present
+	if pl.Key != nil && pl.Key.URI != "" {
+		parts := strings.SplitN(pl.Key.URI, ",", 2)
+		if len(parts) == 2 {
+			med.KIDBase64 = parts[1]
+			log.Printf("[hls] OpenMediaCBCS: extracted KID from playlist: %s", med.KIDBase64)
+		}
+	}
 
 	for _, seg := range pl.Segments {
 		if seg == nil {

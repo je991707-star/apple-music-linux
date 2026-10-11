@@ -9282,7 +9282,7 @@ window.adamGetQueueInfo = function () {
 
     // ── Section builders ────────────────────────────────────────────────────
 
-    function _buildEngineStatusSection(drm) {
+    function _buildEngineStatusSection(drm, coreFP) {
         const { wrap, body: stBody } = makeSection('Engine Status');
         function spinner() {
             const s = document.createElement('span');
@@ -9314,13 +9314,21 @@ window.adamGetQueueInfo = function () {
             if (!noDot) v.appendChild(loading ? spinner() : dot(ok));
             v.appendChild(document.createTextNode(text));
         }
+        const hasCoreFP = coreFP !== undefined;
         const valEls = [];
         renderStatusRows(drm).forEach((row, i, arr) => {
+            const isLast = !hasCoreFP && i === arr.length - 1;
             const v = statusVal('', row.noDot ? undefined : row.ok);
             applyStatusRow(v, row);
             valEls.push({ el: v, noDot: !!row.noDot });
-            stBody.appendChild(makeRow(row.label, v, row.subtitle, i === arr.length - 1));
+            stBody.appendChild(makeRow(row.label, v, row.subtitle, isLast));
         });
+        if (hasCoreFP) {
+            const cfAvail = coreFP?.available === true;
+            const cfVal = statusVal(cfAvail ? 'detected' : 'not found', cfAvail);
+            const cfSub = cfAvail ? undefined : 'Place CoreFP.dll at ~/.config/Adam/LibCoreFP/';
+            stBody.appendChild(makeRow('CoreFP (FPS)', cfVal, cfSub, true));
+        }
         const refreshRow = document.createElement('div');
         refreshRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
         const refreshBtn = makeBtn('Refresh');
@@ -10443,6 +10451,7 @@ window.adamGetQueueInfo = function () {
             fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
             fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
             window.adamBridge.getPrefs().catch(() => ({})),
+            fetch(`${ENGINE}/api/v1/capabilities`).then(r => r.json()).catch(() => ({})),
         ]);
         return _settingsPreload;
     }
@@ -10514,7 +10523,7 @@ window.adamGetQueueInfo = function () {
         // then immediately start re-warming for the next open.
         // Account state must be current: a warmed snapshot can precede a login or a session restore.
         // Tools and preferences may come from the cache; authorization never does.
-        const [drm, [, tools, prefs]] = await Promise.all([
+        const [drm, [, tools, prefs, caps]] = await Promise.all([
             fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
             _settingsPreload ?? _warmSettingsCache(),
         ]);
@@ -10536,7 +10545,7 @@ window.adamGetQueueInfo = function () {
         ]);
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
-        dlg.appendChild(_buildEngineStatusSection(drm));
+        dlg.appendChild(_buildEngineStatusSection(drm, caps?.coreFP));
         dlg.appendChild(_buildDisplaySection(prefs));
         dlg.appendChild(themeWrap);
         const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);

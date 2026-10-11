@@ -8516,7 +8516,7 @@
       rowWrap.append(topRow, customWrap, exampleEl);
       return rowWrap;
     }
-    function _buildEngineStatusSection(drm) {
+    function _buildEngineStatusSection(drm, coreFP) {
       const { wrap, body: stBody } = makeSection("Engine Status");
       function spinner() {
         const s = document.createElement("span");
@@ -8553,13 +8553,21 @@
         if (!noDot) v.appendChild(loading ? spinner() : dot(ok));
         v.appendChild(document.createTextNode(text));
       }
+      const hasCoreFP = coreFP !== void 0;
       const valEls = [];
       renderStatusRows(drm).forEach((row, i, arr) => {
+        const isLast = !hasCoreFP && i === arr.length - 1;
         const v = statusVal("", row.noDot ? void 0 : row.ok);
         applyStatusRow(v, row);
         valEls.push({ el: v, noDot: !!row.noDot });
-        stBody.appendChild(makeRow(row.label, v, row.subtitle, i === arr.length - 1));
+        stBody.appendChild(makeRow(row.label, v, row.subtitle, isLast));
       });
+      if (hasCoreFP) {
+        const cfAvail = coreFP?.available === true;
+        const cfVal = statusVal(cfAvail ? "detected" : "not found", cfAvail);
+        const cfSub = cfAvail ? void 0 : "Place CoreFP.dll at ~/.config/Adam/LibCoreFP/";
+        stBody.appendChild(makeRow("CoreFP (FPS)", cfVal, cfSub, true));
+      }
       const refreshRow = document.createElement("div");
       refreshRow.style.cssText = "padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;";
       const refreshBtn = makeBtn("Refresh");
@@ -9818,7 +9826,8 @@
       _settingsPreload = Promise.all([
         fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
         fetch(`${ENGINE}/api/v1/tools`).then((r) => r.json()).catch(() => ({})),
-        window.adamBridge.getPrefs().catch(() => ({}))
+        window.adamBridge.getPrefs().catch(() => ({})),
+        fetch(`${ENGINE}/api/v1/capabilities`).then((r) => r.json()).catch(() => ({}))
       ]);
       return _settingsPreload;
     }
@@ -9879,7 +9888,7 @@
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("adam-opening"), { once: true });
       }
-      const [drm, [, tools, prefs]] = await Promise.all([
+      const [drm, [, tools, prefs, caps]] = await Promise.all([
         fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
         _settingsPreload ?? _warmSettingsCache()
       ]);
@@ -9902,7 +9911,7 @@
         _restoreProxy();
         return;
       }
-      dlg.appendChild(_buildEngineStatusSection(drm));
+      dlg.appendChild(_buildEngineStatusSection(drm, caps?.coreFP));
       dlg.appendChild(_buildDisplaySection(prefs));
       dlg.appendChild(themeWrap);
       const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);

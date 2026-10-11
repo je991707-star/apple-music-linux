@@ -533,9 +533,10 @@ func (b *adamplayBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 			}
 
 			// Fetch license if we have kid info
-			var fetchedKey []byte
+			// For CBCS (skd://...), the key URI is used directly with the Widevine endpoint
+			var fetchedKeyAndIV aacstream.KeyAndIV
 			if kidBase64 != "" && adamID != "0" {
-				log.Printf("[drm] DialCBCS: fetching license for adamID=%s kid=%s", adamID, kidBase64)
+				log.Printf("[drm] DialCBCS: fetching license for adamID=%s kid=%s uriPrefix=%s", adamID, kidBase64, uriPrefix)
 				// Get tokens from account info
 				account, accErr := b.GetAccount(ctx)
 				if accErr != nil {
@@ -544,11 +545,14 @@ func (b *adamplayBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 					// Fetch license using aacstream's AcquireKey.
 					// token = developer JWT (Authorization: Bearer), mutoken = user music token.
 					devTok := b.devTok.get(account.DevToken, ampapi.GetToken)
-					fetchedKey, err = aacstream.AcquireKey(ctx, adamID, kidBase64, uriPrefix, devTok, account.MusicToken, false)
+					fetchedKeyAndIV, err = aacstream.AcquireKey(ctx, adamID, kidBase64, uriPrefix, devTok, account.MusicToken, false)
 					if err != nil {
 						log.Printf("[drm] DialCBCS: failed to fetch license: %v", err)
 					} else {
-						log.Printf("[drm] DialCBCS: license fetched (%d-byte key)", len(fetchedKey))
+						log.Printf("[drm] DialCBCS: license fetched (%d-byte key, IV=%02x%02x%02x%02x..., KID=%02x%02x%02x%02x...)",
+							len(fetchedKeyAndIV.Key),
+							fetchedKeyAndIV.IV[0], fetchedKeyAndIV.IV[1], fetchedKeyAndIV.IV[2], fetchedKeyAndIV.IV[3],
+							fetchedKeyAndIV.KID[0], fetchedKeyAndIV.KID[1], fetchedKeyAndIV.KID[2], fetchedKeyAndIV.KID[3])
 					}
 				}
 			}
@@ -572,18 +576,21 @@ func (b *adamplayBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 			}
 			log.Printf("[drm] DialCBCS: key context opened successfully for adamID=%s", adamID)
 
-			// Set the fetched key if available. Without one (e.g. the ALAC default key URI)
-			// the context keeps its default key, exactly as before.
-			if len(fetchedKey) == 16 {
+			// Set the fetched key. If no key was fetched, the context remains uninitialized
+			// and decryption will fail — no default key fallback.
+			if len(fetchedKeyAndIV.Key) == 16 {
 				// The sample-derived IV path uses this as its base value.
-				zeroIV := make([]byte, 16)
-				cKey := (*C.uint8_t)(unsafe.Pointer(&fetchedKey[0]))
-				cIV := (*C.uint8_t)(unsafe.Pointer(&zeroIV[0]))
+				cKey := (*C.uint8_t)(unsafe.Pointer(&fetchedKeyAndIV.Key[0]))
+				cIV := (*C.uint8_t)(unsafe.Pointer(&fetchedKeyAndIV.IV[0]))
 				if ret := C.drm_set_key_context_key(kdCtx, cKey, cIV); ret != 0 {
 					log.Printf("[drm] DialCBCS: failed to set key context key: ret=%d", ret)
 				} else {
-					log.Printf("[drm] DialCBCS: key context key set successfully")
+					log.Printf("[drm] DialCBCS: key context key set successfully (IV=%02x%02x%02x%02x...)",
+						fetchedKeyAndIV.IV[0], fetchedKeyAndIV.IV[1], fetchedKeyAndIV.IV[2], fetchedKeyAndIV.IV[3])
 				}
+			} else if kidBase64 != "" {
+				// Key was expected but not fetched — log warning
+				log.Printf("[drm] DialCBCS: WARN: no key fetched for adamID=%s kid=%s", adamID, kidBase64)
 			}
 			cur = kdCtx
 			leave()

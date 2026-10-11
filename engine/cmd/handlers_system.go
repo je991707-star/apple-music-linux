@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"engine/core/corefp"
 	"engine/core/drm"
 )
 
@@ -113,7 +116,22 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"session":  snap.State.Session.String(),
 			"cbcs":     cap.CBCS,
 		},
+
+		// CoreFP.dll status (Windows FairPlay library, BYOL at ~/.config/adam/CoreFP.dll).
+		"coreFP": map[string]any{
+			"available": corefp.IsAvailable(),
+			"path":      corefpDLLHint(),
+		},
 	})
+}
+
+// corefpDLLHint returns the expected BYOL path for display in the Settings UI.
+func corefpDLLHint() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.config/Adam/LibCoreFP/CoreFP.dll"
+	}
+	return filepath.Join(home, ".config", "Adam", "LibCoreFP", "CoreFP.dll")
 }
 
 func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {

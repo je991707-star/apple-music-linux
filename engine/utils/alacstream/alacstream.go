@@ -4,14 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"engine/utils/config"
@@ -20,7 +23,6 @@ import (
 
 	"engine/internal/m3u8safe"
 	"github.com/itouakirai/mp4ff/mp4"
-	"log/slog"
 )
 
 // DialFunc opens a CBCS decryption connection.  In production, pass DRMManager.DialCBCS.
@@ -227,6 +229,23 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	if err != nil {
 		return err
 	}
+
+	// Append the KID (from the tenc box) to each playlist segment's key URI.
+	// DialCBCS splits on the first comma to get (uriPrefix, kidBase64), and
+	// uses kidBase64 to call AcquireKey. Without the KID the key context is
+	// opened with no key material and decryption produces garbage.
+	kidB64 := kidBase64FromTracks(tracks)
+	if kidB64 != "" {
+		for _, seg := range playlistSegments {
+			if seg != nil && seg.Key != nil && seg.Key.URI != "" && !strings.Contains(seg.Key.URI, ",") {
+				seg.Key.URI = seg.Key.URI + "," + kidB64
+			}
+		}
+		slog.Info("alac: injected KID into key URIs", "kid", kidB64)
+	} else {
+		slog.Warn("alac: no KID found in tenc box, decryption may fail")
+	}
+
 	err = SanitizeInit(init)
 	if err != nil {
 		// errors returned by sanitizeInit are non-fatal
@@ -271,6 +290,22 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		}
 	}
 	return flushDecryptedOutput(outBuf, outfile, &buffer, totalLen, MaxMemorySize)
+}
+
+// kidBase64FromTracks extracts the DefaultKID from the first encrypted track's
+// tenc box and returns it as a base64 string (no padding), or empty string if
+// not found. This KID must be appended to the skd:// key URI (separated by a
+// comma) so that DialCBCS can extract it and call AcquireKey.
+func kidBase64FromTracks(tracks map[uint32]mp4.DecryptTrackInfo) string {
+	for _, ti := range tracks {
+		if ti.Sinf != nil && ti.Sinf.Schi != nil && ti.Sinf.Schi.Tenc != nil {
+			kid := ti.Sinf.Schi.Tenc.DefaultKID
+			if len(kid) > 0 {
+				return strings.TrimRight(base64.StdEncoding.EncodeToString(kid), "=")
+			}
+		}
+	}
+	return ""
 }
 
 // SanitizeInit removes boxes in the init segment that are known to cause
