@@ -15,18 +15,21 @@
     "dist": "npm run build:drm && npm run build:go && npm run build:engine && npm run build:vlc && electron-builder --linux AppImage",
     "postdist": "rm -f dist/builder-debug.yml dist/builder-effective-config.yaml",
     "clean": "bash ../scripts/clean.sh",
-    "build:drm": "make -C ../drm libdrm_client.so",
+    "build:drm": "make -C ../drm libdrm_client.so android-stubs",
     "build:engine": "bash ../scripts/build-renderer.sh",
     "build:go": "bash ../scripts/build-engine.sh dist/resources -ldflags=\"-w -s\" -trimpath",
     "build:vlc": "bash ../scripts/bundle-vlc.sh",
-    "dist:win": "powershell -ExecutionPolicy Bypass -File ../scripts/build-windows.ps1"
+    "dist:win": "powershell -ExecutionPolicy Bypass -File ../scripts/build-windows.ps1",
+    "lint": "eslint ."
   },
   "desktopName": "adam.desktop",
   "devDependencies": {
+    "@eslint/js": "9.36.0",
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
-    "mp4box": "^2.4.1"
+    "eslint": "9.36.0",
+    "globals": "16.4.0"
   },
   "build": {
     "appId": "io.github.silentone12725.Adam",
@@ -47,6 +50,18 @@
       {
         "from": "icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "../scripts/fetch-fairplay-libs.sh",
+        "to": "fetch-fairplay-libs.sh"
+      },
+      {
+        "from": "../drm/fairplay-libs.lock",
+        "to": "fairplay-libs.lock"
+      },
+      {
+        "from": "../drm/stubs/out",
+        "to": "android-stubs"
       }
     ],
     "linux": {

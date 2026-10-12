@@ -12,23 +12,12 @@ import (
 
 // Compile-time assertions: the exported constructors satisfy the intended
 // engine interfaces. These do not hit the network.
-var (
-	_ pipeline.Source = HLSSource(nil)
-	_ LicenseProvider = New()
-)
+var _ LicenseProvider = New()
 
 func TestNew_ReturnsProvider(t *testing.T) {
 	t.Parallel()
 	if New() == nil {
 		t.Fatal("New() returned nil")
-	}
-}
-
-func TestHLSSource_ImplementsSource(t *testing.T) {
-	t.Parallel()
-	var s pipeline.Source = HLSSource([]string{"a", "b"})
-	if s == nil {
-		t.Fatal("HLSSource returned nil")
 	}
 }
 

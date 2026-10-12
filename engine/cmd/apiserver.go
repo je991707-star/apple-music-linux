@@ -34,12 +34,14 @@ package main
 //   GET    /api/v1/lyrics/{id}?sf=
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"engine/internal/appdir"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -120,6 +122,7 @@ type PlaybackRequest struct {
 	MUT          string `json:"mediaUserToken"`
 	Capabilities struct {
 		Lossless bool `json:"lossless"`
+		HiRes    bool `json:"hiRes"` // true = hi-res ALAC permitted; false = cap at 44100/16-bit
 		Video    bool `json:"video"`
 		Atmos    bool `json:"atmos"`
 	} `json:"capabilities"`
@@ -454,7 +457,6 @@ type APIServer struct {
 	// Per-instance playback bookkeeping. These used to be package-level maps, which made two
 	// servers in one process share state; they belong to the server that owns the sessions.
 	vsegStates  sync.Map // sessionID → *vsegState: segmented-video producers
-	mvPreparing sync.Map // assetID → struct{}: faststart caches being built, so the info endpoint can say "preparing" and duplicate jobs are avoided
 	mvEphemeral sync.Map // assetID → struct{}: mv-dl files written under "caching disabled", deleted on session release
 
 	srv         *http.Server
@@ -585,7 +587,11 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 				}
 				s.events.emit("drm", snap)
 			},
-			drm.BackendConfig{BaseDir: drmBaseDir, DisableHiRes: os.Getenv("ADAM_DISABLE_HIRES") == "1"},
+			drm.BackendConfig{
+				BaseDir:       drmBaseDir,
+				DisableHiRes:  os.Getenv("ADAM_DISABLE_HIRES") == "1",
+				GetMusicToken: s.musicUserToken,
+			},
 			drm.DefaultRestartPolicy,
 		)
 	} else {
@@ -596,6 +602,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	if s.dm != nil {
 		// The web player's token counts as the account: no separate DRM sign-in exists.
 		s.dm.SetWebSession(s.webSessionTokens)
+		// Supply the MUT source so NoteWebSession can write MUSIC_TOKEN and retry
+		// hybris FairPlay init when the backend started before the page loaded.
+		s.dm.SetMUTSource(s.musicUserToken)
 	}
 	s.sessionDir = drmBaseDir
 
@@ -650,6 +659,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		if dc, err := diskcache.New(filepath.Join(cacheBase, "playback")); err == nil {
 			s.diskCache = dc
 			s.alac = newALACGate()
+			invalidateALACCacheIfStale(filepath.Join(cacheBase, "playback"))
 			go func() {
 				t := time.NewTicker(time.Hour)
 				defer t.Stop()
@@ -873,6 +883,7 @@ func (s *APIServer) Start() error {
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
 		TLSConfig:         tlsCfg,
+		ErrorLog:          log.New(handshakeNoiseFilter{}, "", log.LstdFlags),
 	}
 	slog.Info("Apple Music API (TLS) ready", "addr", fmt.Sprintf("https://127.0.0.1:%d", s.port))
 	go s.tlsSrv.ServeTLS(l, "", "") //nolint:errcheck
@@ -1135,7 +1146,18 @@ func exportRoots() []string {
 // vanished, would otherwise leave its producers running and its cache file pinned.
 func (s *APIServer) installReleaseHook() {
 	s.pm.SetReleaseHook(func(id string) {
-		s.stopMVGrowing(id)
 		s.stopVsegSession(id)
 	})
+}
+
+// handshakeNoiseFilter drops "TLS handshake error ... EOF" lines: local clients
+// (reachability probes, aborted media requests) close mid-handshake all the
+// time. Every other server error is passed through to the normal log.
+type handshakeNoiseFilter struct{}
+
+func (handshakeNoiseFilter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) && bytes.HasSuffix(bytes.TrimSpace(p), []byte("EOF")) {
+		return len(p), nil
+	}
+	return log.Writer().Write(p)
 }

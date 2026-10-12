@@ -100,22 +100,15 @@ type DRMManager struct {
 	shutdownCtx  context.Context
 	shutdownStop context.CancelFunc
 
-	// recoveryGate is a channel that is CLOSED when the DRM backend is not in
-	// active lease recovery, and OPEN (not yet closed) while recovery is in
-	// progress. Decrypt() selects on it to pause until recovery completes rather
-	// than propagating a transient connection-refused error.
-	//
-	// Invariant (held under mu): gate is closed when Recovery ∉ {Scheduled, Refreshing}.
-	// ponytail: per-recovery chan, reset on each transition; upgrade to singleflight
-	//           if >1 concurrent Decrypt waiter becomes a concern.
-	recoveryGate chan struct{}
+	// getWebMUT, when set, returns the current Media-User-Token from the web
+	// player session. Called during NoteWebSession to give the backend a fresh
+	// token so it can write MUSIC_TOKEN and retry hybris FairPlay init.
+	getWebMUT func() string
 }
 
 // NewDRMManager creates a DRMManager with the given backend.
 // sink receives every DRMSnapshot and forwards it to SSE.
 func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, cfg BackendConfig, policy RestartPolicy) *DRMManager {
-	gate := make(chan struct{})
-	close(gate) // start closed: no recovery in progress
 	shutCtx, shutStop := context.WithCancel(context.Background())
 	m := &DRMManager{
 		backend:      backend,
@@ -123,7 +116,6 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 		cfg:          cfg,
 		policy:       policy,
 		sink:         sink,
-		recoveryGate: gate,
 		shutdownCtx:  shutCtx,
 		shutdownStop: shutStop,
 	}
@@ -132,6 +124,10 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 	})
 	backend.SetAuthSource(m.auth)
 	m.setManagerState(ManagerReady)
+	// Complete any interrupted logout before reading session state.
+	// A Ctrl+C between Stop() and ClearSession() leaves a logout-pending marker;
+	// this ensures the next startup doesn't show a stale "session=valid".
+	session.CompletePendingLogout()
 	// Reflect session state at startup so GET /api/v1/drm/status shows the
 	// correct state immediately — before any playback request fires ensureRunning.
 	if !backend.Running() {
@@ -150,44 +146,6 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 }
 
 // ── DRMProvider implementation ────────────────────────────────────────────────
-
-// recoveryActive reports whether lease recovery is in progress and returns the
-// current gate channel. Callers select on the gate to wake when recovery ends.
-func (m *DRMManager) recoveryActive() (bool, chan struct{}) {
-	m.mu.RLock()
-	s := m.snapshot.State.Recovery
-	gate := m.recoveryGate
-	m.mu.RUnlock()
-	return s == RecoveryRefreshing || s == RecoveryScheduled, gate
-}
-
-// Decrypt auto-starts the backend if a session exists, then decrypts.
-// If lease recovery is active when the backend call fails, Decrypt waits up
-// to 15 s for recovery to complete and retries once — so active MV playback
-// can buffer through a LEASE_END event without aborting.
-func (m *DRMManager) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
-	if err := m.ensureRunning(ctx); err != nil {
-		return DecryptResponse{}, err
-	}
-	resp, err := m.backend.Decrypt(ctx, req)
-	if err != nil {
-		if active, gate := m.recoveryActive(); active {
-			waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			select {
-			case <-gate:
-				// Recovery complete — retry the decrypt once.
-				resp, err = m.backend.Decrypt(waitCtx, req)
-			case <-waitCtx.Done():
-				err = fmt.Errorf("drm decrypt: timed out waiting for lease recovery: %w", waitCtx.Err())
-			}
-		}
-	}
-	if err == nil {
-		m.session.RecordSuccess()
-	}
-	return resp, err
-}
 
 // GetM3U8 auto-starts the backend if a session exists.
 func (m *DRMManager) GetM3U8(ctx context.Context, adamID uint64) (string, error) {
@@ -249,6 +207,13 @@ func (m *DRMManager) SetWebSession(fn func() (mut, storefront string)) {
 	}
 }
 
+// SetMUTSource registers a function that returns the current Media-User-Token
+// from the web player. Called once at startup from the APIServer so NoteWebSession
+// can give the backend a fresh token for the MUSIC_TOKEN fallback path.
+func (m *DRMManager) SetMUTSource(fn func() string) {
+	m.getWebMUT = fn
+}
+
 // NoteWebSession is called when the web player supplies or changes its token. It reports the session
 // as valid and, if the backend is not running yet, starts it in the background so FairPlay (and with it
 // lossless) becomes available without any separate sign-in.
@@ -265,7 +230,21 @@ func (m *DRMManager) NoteWebSession() {
 			Message: "web session",
 		})
 	}
-	if m.backend.Running() || !m.warming.CompareAndSwap(false, true) {
+	// If backend is already running but hybris FairPlay init failed previously
+	// (e.g. eager-start before the page loaded), retry with the fresh MUT now.
+	if m.backend.Running() {
+		if retrier, ok := m.backend.(interface{ RetryFairPlay(string) }); ok && m.getWebMUT != nil {
+			if mut := m.getWebMUT(); mut != "" {
+				go retrier.RetryFairPlay(mut)
+			}
+		}
+		if !m.warming.CompareAndSwap(false, true) {
+			return
+		}
+		m.warming.Store(false)
+		return
+	}
+	if !m.warming.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
@@ -283,6 +262,10 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 	if m.backend.Running() {
 		return nil
 	}
+	// Complete any logout that was interrupted by a process kill (e.g. Ctrl+C
+	// between Stop() and ClearSession()). Must run before HasSession() so a
+	// stale mpl_db from an incomplete logout doesn't trigger a bogus session reuse.
+	m.session.CompletePendingLogout()
 	if !m.session.HasSession() {
 		return ErrNotAuthenticated
 	}
@@ -345,12 +328,27 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 	authErr := m.backend.Start(loginCtx, loginCfg)
 	if authErr != nil {
 		m.setManagerState(ManagerFailed)
+		if creds.Email != "" {
+			// Fresh login failed — emit AuthFailed so the UI shows the error
+			// immediately instead of timing out after the poll interval expires.
+			m.mergeAndEmit(DRMSnapshot{
+				State:   DRMState{Authentication: AuthFailed},
+				Message: authErr.Error(),
+			})
+		}
 		return fmt.Errorf("authenticate: %w", authErr)
 	}
 	m.lastStart.Store(time.Now().UnixNano())
-	// If a session DB already exists the wrapper resumes it silently.
-	// Reflect that immediately so the UI shows the correct state.
-	if m.session.HasSession() {
+	if creds.Email != "" {
+		// Fresh login succeeded — credentials were verified by the backend;
+		// session files (mpl_db, MUSIC_TOKEN) are now on disk.
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			Message: "login successful",
+		})
+	} else if m.session.HasSession() {
+		// Session-reuse restart — reflect the existing session immediately so
+		// the UI shows the correct state without waiting for a backend event.
 		m.mergeAndEmit(DRMSnapshot{
 			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
 			Message: "session reuse — mpl_db present",
@@ -393,20 +391,9 @@ func (m *DRMManager) Logout(ctx context.Context) error {
 		Recovery:       RecoveryUnknown,
 	}
 	m.snapshot.Capabilities = CapabilityState{}
-	// Recovery is now Unknown: release any Decrypt waiters parked on the gate
-	// (mergeAndEmit only does this on a recovery→idle transition).
-	openGate := m.recoveryGate
-	closed := make(chan struct{})
-	close(closed)
-	m.recoveryGate = closed
 	snap := m.snapshot
 	m.mu.Unlock()
 
-	select {
-	case <-openGate:
-	default:
-		close(openGate)
-	}
 	if m.sink != nil {
 		m.sink(snap)
 	}
@@ -576,36 +563,9 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 		m.snapshot.Challenge = nil
 	}
 
-	// Recovery gate: manage the channel that Decrypt() waits on.
-	// RecoveryUnknown (0) is treated as "not recovering" so the gate stays closed.
-	prevRecovery := m.snapshot.State.Recovery
+	// RecoveryUnknown (0) means the update carries no recovery state.
 	if snap.State.Recovery != 0 {
 		m.snapshot.State.Recovery = snap.State.Recovery
-	}
-	newRecovery := m.snapshot.State.Recovery
-
-	var closeGate chan struct{}
-	if prevRecovery != newRecovery {
-		inRecovery := func(s RecoveryState) bool {
-			return s == RecoveryRefreshing || s == RecoveryScheduled
-		}
-		switch {
-		case !inRecovery(prevRecovery) && inRecovery(newRecovery):
-			// Recovery starting — open a new gate (block Decrypt waiters).
-			select {
-			case <-m.recoveryGate:
-				m.recoveryGate = make(chan struct{}) // prev was closed, open a fresh one
-			default:
-				// Gate already open; reuse it.
-			}
-		case inRecovery(prevRecovery) && !inRecovery(newRecovery):
-			// Recovery ending — capture gate to close after unlock (wake all waiters).
-			closeGate = m.recoveryGate
-			// Replace with a pre-closed gate for the next non-recovery period.
-			next := make(chan struct{})
-			close(next)
-			m.recoveryGate = next
-		}
 	}
 
 	if m.snapshot.State.FairPlay == FairPlayReady {
@@ -626,16 +586,6 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	m.snapshot.Message = snap.Message
 	out := m.snapshot
 	m.mu.Unlock()
-
-	// Close outside the lock so Decrypt waiters don't re-enter mu.
-	if closeGate != nil {
-		select {
-		case <-closeGate:
-			// Already closed (e.g., duplicate RUNNING event); nothing to do.
-		default:
-			close(closeGate)
-		}
-	}
 
 	if m.sink != nil {
 		m.sink(out)

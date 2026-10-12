@@ -10,6 +10,7 @@ import (
 	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
 
+	"engine/internal/vlog"
 	cdm "engine/utils/aacstream/cdm"
 	wvkey "engine/utils/aacstream/wvkey"
 
@@ -36,57 +37,11 @@ type PlaybackLicense struct {
 type KeyAndIV struct {
 	Key []byte
 	IV  []byte
-	KID []byte // Key ID extracted from CKC
-}
-
-// extractKIDAndIVFromCKC extracts the KID and IV from a license response.
-// For CBCS, Apple Music uses a fixed zero IV per key context.
-// The KID is extracted from the CKC using libCoreFP.so functions.
-func extractKIDAndIVFromCKC(license []byte) ([]byte, []byte, error) {
-	// Apple Music CBCS uses a fixed zero IV per key context
-	iv := make([]byte, 16)
-	
-	// Extract KID from CKC using libCoreFP.so
-	// The CKC (license) contains the encrypted key container
-	// We use libCoreFP's X46O5IeS function to process it
-	kid := extractKIDFromCKC(license)
-	
-	log.Printf("[aacstream] DEBUG: Extracted KID from CKC using libCoreFP (license size=%d, kid size=%d)", len(license), len(kid))
-	return kid, iv, nil
-}
-
-// extractKIDFromCKC extracts the KID from a CKC (Content Key Container) using libCoreFP.so
-func extractKIDFromCKC(ckc []byte) []byte {
-	// Default: return 16-byte zero KID if extraction fails
-	kid := make([]byte, 16)
-	
-	// The KID is embedded in the CKC structure
-	// For now, extract from the Widevine response as fallback
-	// TODO: Use libCoreFP.so X46O5IeS(op=3) to properly extract KID from CKC
-	
-	// Parse CKC to find KID - the CKC format contains the KID at a known offset
-	// For Apple Music, the KID is typically 16 bytes and can be extracted from the response
-	if len(ckc) >= 32 {
-		// Try to extract KID from common positions in the CKC
-		// Position 16-32 is a common location for the KID
-		copy(kid, ckc[16:32])
-	}
-	
-	return kid
-}
-
-// extractIVFromCKC extracts the 16-byte IV from a license response.
-// For CBCS, Apple Music uses a fixed zero IV per key context.
-func extractIVFromCKC(license []byte) ([]byte, error) {
-	// Apple Music CBCS uses a fixed zero IV per key context
-	iv := make([]byte, 16)
-	log.Printf("[aacstream] DEBUG: Using zero IV for CBCS (license size=%d)", len(license))
-	return iv, nil
 }
 
 func getPSSH(contentId string, kidBase64 string) (string, error) {
 	var kidBytes []byte
-	
+
 	// For CBCS, the playlist has a placeholder KID (e.g., "AAAAAAAAAAAAAAAAAAAAAA" = 18 chars)
 	// This is just a cache key - the real key comes from the Widevine response
 	// Use zero KID for CBCS placeholder
@@ -100,7 +55,12 @@ func getPSSH(contentId string, kidBase64 string) (string, error) {
 			return "", fmt.Errorf("failed to decode base64 KID: %w", err)
 		}
 	}
-	
+
+	if len(kidBytes) > 16 {
+		// Apple MV playlists encode a 56-byte (or other extended) value in the KID
+		// field; the actual FairPlay KID UUID occupies the first 16 bytes.
+		kidBytes = kidBytes[:16]
+	}
 	if len(kidBytes) != 16 {
 		return "", fmt.Errorf("invalid KID length %d, want 16 bytes", len(kidBytes))
 	}
@@ -176,31 +136,25 @@ func BeforeRequest(cl *resty.Client, ctx context.Context, url string, body []byt
 	return resp, err
 }
 
-func AfterRequest(response *resty.Response) ([]byte, []byte, []byte, error) {
+func AfterRequest(response *resty.Response) ([]byte, []byte, error) {
 	var responseData PlaybackLicense
 
 	err := json.Unmarshal(response.Body(), &responseData)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to parse response JSON: %v", err)
+		return nil, nil, fmt.Errorf("failed to parse response JSON: %v", err)
 	}
 
 	if responseData.ErrorCode != 0 || responseData.Status != 0 {
-		return nil, nil, nil, fmt.Errorf("error in license response, code: %d, status: %d", responseData.ErrorCode, responseData.Status)
+		return nil, nil, fmt.Errorf("error in license response, code: %d, status: %d", responseData.ErrorCode, responseData.Status)
 	}
 
 	license, err := base64.StdEncoding.DecodeString(responseData.License)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to decode license: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode license: %v", err)
 	}
 
-	// Extract KID and IV from CKC
-	kid, iv, err := extractKIDAndIVFromCKC(license)
-	if err != nil {
-		log.Printf("[aacstream] WARN: failed to extract KID/IV from CKC: %v, using zero IV", err)
-		iv = make([]byte, 16)
-	}
-
-	return license, iv, kid, nil
+	// Apple Music's CBCS key contexts use a fixed zero IV.
+	return license, make([]byte, 16), nil
 }
 
 // retryBackoff sleeps the exponential backoff for attempt and returns whether
@@ -264,7 +218,7 @@ func WarmLicensePool(ctx context.Context) {
 	defer cancel()
 	cl := resty.New().SetTransport(licenseTransport)
 	if resp, err := cl.R().SetContext(ctx).Get("https://play.itunes.apple.com/"); err == nil {
-		log.Printf("[drm] license pool warmed status=%d", resp.StatusCode())
+		vlog.Printf("[drm] license pool warmed status=%d", resp.StatusCode())
 	}
 }
 
@@ -324,10 +278,10 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 	}
 	k.CdmInit()
 
-	_, keyBytes, ivBytes, kidBytes, err := k.GetKey(ctx,
+	_, keyBytes, ivBytes, err := k.GetKey(ctx,
 		"https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense",
 		pssh, nil)
-	result := KeyAndIV{Key: keyBytes, IV: ivBytes, KID: kidBytes}
+	result := KeyAndIV{Key: keyBytes, IV: ivBytes}
 	if err == nil && len(keyBytes) > 0 {
 		keyCache.Store(ck, result)
 	}
@@ -800,95 +754,6 @@ func kickMVSegmentBackground(diskKey, fetchURL, rangeHdr string) {
 			log.Printf("[mv-seg] bg-dl cached key=%s len=%d", shortKey(diskKey), len(data))
 		}
 	}()
-}
-
-// DownloadMVSegmentsParallel is like DownloadSegmentsParallel but uses the
-// separate MV video segment cache. Use for MV video tracks.
-func DownloadMVSegmentsParallel(ctx context.Context, urls []string, w io.Writer, concurrency int) error {
-	log.Printf("[dl] DownloadMVSegmentsParallel nURLs=%d concurrency=%d firstURL=%s",
-		len(urls), concurrency, func() string {
-			if len(urls) > 0 {
-				return urls[0]
-			}
-			return "(none)"
-		}())
-
-	type result struct {
-		data []byte
-		err  error
-	}
-
-	resultChs := make([]chan result, len(urls))
-	for i := range resultChs {
-		resultChs[i] = make(chan result, 1)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	sem := make(chan struct{}, concurrency)
-
-	go func() {
-		for i, url := range urls {
-			i, url := i, url
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				for j := i; j < len(resultChs); j++ {
-					resultChs[j] <- result{err: ctx.Err()}
-				}
-				return
-			}
-			go func() {
-				defer func() { <-sem }()
-				t0 := time.Now()
-				data, err := fetchMVSegment(ctx, url)
-				if err == nil {
-					log.Printf("[dl] mv#%d arrived size=%dB elapsed=%.2fs", i, len(data), time.Since(t0).Seconds())
-				} else {
-					log.Printf("[dl] mv#%d error elapsed=%.2fs: %v", i, time.Since(t0).Seconds(), err)
-				}
-				resultChs[i] <- result{data: data, err: err}
-			}()
-		}
-	}()
-
-	for i, ch := range resultChs {
-		r := <-ch
-		if r.err != nil {
-			cancel()
-			return fmt.Errorf("segment %d: %w", i, r.err)
-		}
-		if _, err := w.Write(r.data); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// DownloadSegments streams each URL one at a time, writing each segment to w
-// immediately after it is fetched. Use for small segments (AAC audio) where
-// startup latency matters more than throughput.
-func DownloadSegments(ctx context.Context, urls []string, w io.Writer) error {
-	log.Printf("[dl] DownloadSegments nURLs=%d firstURL=%s", len(urls), func() string {
-		if len(urls) > 0 {
-			return urls[0]
-		}
-		return "(none)"
-	}())
-	for i, cacheKey := range urls {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		data, err := fetchSegment(ctx, cacheKey)
-		if err != nil {
-			return fmt.Errorf("segment %d: %w", i, err)
-		}
-		if _, err := w.Write(data); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // DownloadSegmentsParallel fetches up to concurrency segments simultaneously

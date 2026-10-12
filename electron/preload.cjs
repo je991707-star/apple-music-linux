@@ -122,6 +122,9 @@ if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('adamBridge', {
     discordClear:   ()        => ipcRenderer.send('discord:clear'),
     discordDisable: ()        => ipcRenderer.send('discord:disable'),
     // Last.fm scrobbling (auth + signing + session key handled in main; secret never reaches renderer)
+    // DRM credential persistence (safeStorage in main)
+    drmSaveCredentials:  (c)     => ipcRenderer.invoke('drm:save-credentials', c),
+    drmClearCredentials: ()      => ipcRenderer.invoke('drm:clear-credentials'),
     lastfmStatus:         ()      => ipcRenderer.invoke('lastfm:status'),
     lastfmSetCredentials: (c)     => ipcRenderer.invoke('lastfm:set-credentials', c),
     lastfmAuth:           ()      => ipcRenderer.invoke('lastfm:auth'),

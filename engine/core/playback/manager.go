@@ -28,6 +28,7 @@ import (
 
 	"engine/core/media"
 	"engine/core/pipeline"
+	"engine/internal/vlog"
 )
 
 const sessionTTL = 4 * time.Hour
@@ -44,6 +45,7 @@ type OpenRequest struct {
 	MUT               string
 	Language          string
 	Lossless          bool
+	HiRes             bool
 	Atmos             bool
 	Video             bool
 	MVMaxHeight       int
@@ -138,7 +140,7 @@ const (
 // playback is in flight. Background streams never make this true.
 func (m *Manager) IsStreaming() bool { return m.fgActive.Load() > 0 }
 
-// ActiveStreams returns the number of in-flight streams of every class (for metrics).
+// ActiveStreams returns the number of in-flight streams of every class.
 func (m *Manager) ActiveStreams() int { return int(m.activeStreams.Load()) }
 
 // ForegroundStats returns a snapshot of Foreground stream instrumentation:
@@ -221,7 +223,7 @@ func NewWithProvider(p media.Provider) *Manager {
 // openKey builds a deduplication key from the fields that determine whether
 // two Open calls would produce the same session type.
 func openKey(req OpenRequest) string {
-	flags := fmt.Sprintf("%v:%v:%v:%d", req.Lossless, req.Atmos, req.Video, req.MVMaxHeight)
+	flags := fmt.Sprintf("%v:%v:%v:%v:%d", req.Lossless, req.HiRes, req.Atmos, req.Video, req.MVMaxHeight)
 	return req.AssetID + ":" + req.Storefront + ":" + flags
 }
 
@@ -294,6 +296,7 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		MUT:               req.MUT,
 		Language:          req.Language,
 		Lossless:          req.Lossless,
+		HiRes:             req.HiRes,
 		Atmos:             req.Atmos,
 		Video:             req.Video,
 		MVMaxHeight:       req.MVMaxHeight,
@@ -411,7 +414,7 @@ func openTracks(ctx context.Context, assetID string, tracks []media.Track) ([]*p
 // Stream pipes the decrypted media for sessionID/kind to dst.
 // dst can be http.ResponseWriter, *os.File, io.PipeWriter, or anything.
 func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.StreamKind, dst io.Writer) error {
-	log.Printf("[playback] Stream START: session=%s kind=%s", sessionID, kind)
+	vlog.Printf("[playback] Stream START: session=%s kind=%s", sessionID, kind)
 	sess, pctx, ok := m.lookup(sessionID)
 	if !ok {
 		log.Printf("[playback] Stream lookup FAILED: session=%s", sessionID)
@@ -422,7 +425,7 @@ func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.St
 		log.Printf("[playback] Stream no stream: session=%s kind=%s", sessionID, kind)
 		return fmt.Errorf("session %s has no %s stream", sessionID, kind)
 	}
-	log.Printf("[playback] Stream found stream: session=%s kind=%s source=%T", sessionID, kind, stream.Source)
+	vlog.Printf("[playback] Stream found stream: session=%s kind=%s source=%T", sessionID, kind, stream.Source)
 	dst, end := m.beginStream(ctx, sess, kind, dst)
 	defer end()
 	err := pipeline.Run(ctx, stream, dst)
@@ -543,68 +546,6 @@ func (m *Manager) GetSegmentTimings(id string, kind pipeline.StreamKind) ([]floa
 		return nil, false
 	}
 	return ts.SegmentTimings(), true
-}
-
-// GetProgressiveURL returns the raw CDN URL for the video stream if its
-// underlying Source implements pipeline.URLSource (i.e. it is an mvod
-// progressive source). Returns ("", false) for HLS-based streams.
-func (m *Manager) GetProgressiveURL(id string, kind pipeline.StreamKind) (string, bool) {
-	_, pctx, ok := m.lookup(id)
-	if !ok {
-		return "", false
-	}
-	stream, ok := pctx.streams[kind]
-	if !ok {
-		return "", false
-	}
-	us, ok := stream.Source.(pipeline.URLSource)
-	if !ok {
-		return "", false
-	}
-	return us.SourceURL(), true
-}
-
-// GetMVProgressiveInfo returns the progressive CDN URL and downloadKey cookie
-// token for an MV session. Both are empty strings when unavailable.
-func (m *Manager) GetMVProgressiveInfo(id string) (url, key string, ok bool) {
-	_, pctx, found := m.lookup(id)
-	if !found {
-		return "", "", false
-	}
-	// Read under m.mu: UpdateMVProgressiveInfo writes these fields under it.
-	m.mu.RLock()
-	url, key = pctx.mvProgressiveURL, pctx.mvDownloadKey
-	m.mu.RUnlock()
-	return url, key, url != ""
-}
-
-// MVProgressiveAge returns how long ago the progressive URL/key were fetched.
-// Returns (0, false) if the session doesn't exist or has no progressive info.
-func (m *Manager) MVProgressiveAge(id string) (time.Duration, bool) {
-	_, pctx, ok := m.lookup(id)
-	if !ok {
-		return 0, false
-	}
-	m.mu.RLock()
-	url, fetchedAt := pctx.mvProgressiveURL, pctx.mvFetchedAt
-	m.mu.RUnlock()
-	if url == "" {
-		return 0, false
-	}
-	return time.Since(fetchedAt), true
-}
-
-// UpdateMVProgressiveInfo replaces the stored progressive CDN URL and
-// downloadKey for an existing session. Called by the handler layer when the
-// URL/key have expired and a fresh pair has been obtained from the DRM backend.
-func (m *Manager) UpdateMVProgressiveInfo(id, url, key string) {
-	m.mu.Lock()
-	if pctx, ok := m.contexts[id]; ok {
-		pctx.mvProgressiveURL = url
-		pctx.mvDownloadKey = key
-		pctx.mvFetchedAt = time.Now()
-	}
-	m.mu.Unlock()
 }
 
 // Release deletes a session and its private context.

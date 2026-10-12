@@ -4,6 +4,8 @@
 // 	protoc        v3.12.4
 // source: wv_proto2.proto
 
+//lint:file-ignore SA1019 protoc-gen-go v1.25 output uses MessageInfo.Exporter; regenerating with a current protoc-gen-go removes it.
+
 package wv
 
 import (

@@ -13,7 +13,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, createReadStream, readdirSync, cpSync } from 'fs';
-import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
+import { readFile as readFileAsync } from 'fs/promises';
 import os from 'os';
 import { isatty } from 'tty';
 import net from 'net';
@@ -29,7 +29,7 @@ import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
 import { parseByteRange } from './range.mjs';
 import { shouldShowOffline, offlineHash } from './load-failure.mjs';
 import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
-import { windowsWallpaperPath, gnomeWallpaperPath, imageMime } from './wallpaper.mjs';
+import { windowsWallpaperPath, gnomeWallpaperPath } from './wallpaper.mjs';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -373,21 +373,7 @@ const engineLifecycle = createEngineLifecycle({
     },
     killDelay: 3000, // allow normal VLC teardown before forced termination
     onOutput: data => console.log('[engine]', data.toString().trimEnd()),
-    onStderr: data => {
-        const line = data.toString().trimEnd();
-        console.error('[engine]', line);
-        // Unprivileged user namespaces disabled (Ubuntu 23.10+, Debian 12+ with AppArmor).
-        // The DRM binary needs clone(CLONE_NEWUSER|CLONE_NEWPID) — surface this clearly.
-        if (line.includes('operation not permitted') || line.includes('unshare') ||
-            line.includes('clone') || line.includes('user namespace')) {
-            dialog.showErrorBox(
-                'Kernel restriction detected',
-                'The FairPlay DRM binary requires unprivileged user namespaces, which are disabled on this system.\n\n' +
-                'To fix:\n  sudo sysctl -w kernel.unprivileged_userns_clone=1\n\n' +
-                'Or permanently in /etc/sysctl.d/99-userns.conf:\n  kernel.unprivileged_userns_clone = 1'
-            );
-        }
-    },
+    onStderr: data => console.error('[engine]', data.toString().trimEnd()),
     onError: error => {
         console.error('[Adam] Engine startup failed:', error.message);
         // A missing binary is not fatal: the renderer falls back to the Apple CDN without the engine.
@@ -397,6 +383,29 @@ const engineLifecycle = createEngineLifecycle({
 
 function startEngine() { return engineLifecycle.start(); }
 function stopEngine() { return engineLifecycle.stop(); }
+
+// Apple's FairPlay libraries cannot ship with Adam. The .run installer fetches them; this
+// covers the AppImage and system-wide installs (pinned + checksummed, fairplay-libs.lock).
+// The engine only loads them at startup, so it is reloaded once they arrive — right away
+// when nothing is playing, otherwise at the next pause so playback is never cut.
+const FAIRPLAY_LIB64 = path.join(CONFIG_DIR, 'drm', 'rootfs', 'system', 'lib64');
+let _reloadEngineOnPause = false;
+function ensureFairPlayLibs() {
+    if (!IS_LINUX || !app.isPackaged) return;
+    if (existsSync(path.join(FAIRPLAY_LIB64, 'libandroidappmusic.so'))) return;
+    const script = path.join(process.resourcesPath, 'fetch-fairplay-libs.sh');
+    if (!existsSync(script)) return;
+    console.log('[Adam] Downloading the FairPlay libraries for lossless playback...');
+    const proc = spawn('sh', [script, '--dest', FAIRPLAY_LIB64, '--quiet'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    proc.stderr.on('data', d => console.error('[Adam] fairplay:', String(d).trim()));
+    proc.on('error', e => console.error('[Adam] FairPlay download could not start:', e.message));
+    proc.on('close', code => {
+        if (code !== 0) return console.error('[Adam] FairPlay libraries unavailable; lossless stays off');
+        console.log('[Adam] FairPlay libraries ready; enabling lossless');
+        if (_lastMprisStatus === 'Playing') _reloadEngineOnPause = true;
+        else engineLifecycle.reload();
+    });
+}
 
 // ── Compositor / blur detection ───────────────────────────────────────────────
 const _isWayland = !!process.env.WAYLAND_DISPLAY;
@@ -733,12 +742,31 @@ async function refreshBlurBg() {
     if (url) _injectBlurLayer(win, url);
 }
 
+// Debug logs kept in CONFIG_DIR/logs; older ones are pruned.
+const DEBUG_LOGS_KEPT = 10;
+
+function pruneDebugLogs(logsDir) {
+    try {
+        const old = readdirSync(logsDir).filter(f => /^debug-.*\.log$/.test(f)).sort().reverse().slice(DEBUG_LOGS_KEPT);
+        for (const f of old) { try { unlinkSync(path.join(logsDir, f)); } catch {} }
+    } catch {}
+}
+
+// The page logs a lot (playback positions, MusicKit state). All of it goes to the debug log file;
+// the terminal only shows its warnings and errors unless ADAM_DEBUG=1.
+const PAGE_LEVELS = ['verbose', 'info', 'warning', 'error'];
+function pageLogLevel(event) {
+    const l = event.level;
+    return typeof l === 'number' ? PAGE_LEVELS[l] ?? 'info' : l || 'info';
+}
+
 function setupDebugLogging(win) {
     if (!DEBUG_OUTPUT && !process.env.ADAM_DEVTOOLS) return;
     const logsDir = path.join(CONFIG_DIR, 'logs');
     mkdirSync(logsDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`));
+    pruneDebugLogs(logsDir);
     const _write = (tag, args) => logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`);
     const origLog = console.log, origError = console.error, origWarn = console.warn;
     console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
@@ -747,9 +775,15 @@ function setupDebugLogging(win) {
     // A DevTools window is only opened on request (ADAM_DEVTOOLS); debug output alone must not
     // pop up a window every time the app is started from a terminal.
     if (process.env.ADAM_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
+    const verbosePage = process.env.ADAM_DEBUG === '1';
     win.webContents.on('console-message', (event) => {
         const msg = event.message ?? event;
-        if (typeof msg === 'string') console.log('[renderer]', msg);
+        if (typeof msg !== 'string') return;
+        const level = pageLogLevel(event);
+        _write(level === 'error' ? 'ERROR' : level === 'warning' ? 'WARN ' : 'PAGE ', ['[renderer]', msg]);
+        if (verbosePage) origLog('[renderer]', msg);
+        else if (level === 'error') origError('[renderer]', msg);
+        else if (level === 'warning') origWarn('[renderer]', msg);
     });
 }
 
@@ -948,10 +982,6 @@ function createWindow() {
     const cacheCode   = existsSync(cachePath)  ? readFileSync(cachePath,  'utf8') : '';
     const enginePath  = _resBundle('engine-bundle.js');
     const engineCode  = existsSync(enginePath) ? readFileSync(enginePath, 'utf8') : '';
-    // mp4box.js — optional; injected before engine so window.MP4Box is available.
-    // Only loaded if the bundle exists (not shipped by default — opt-in for mp4box MSE path).
-    const mp4boxPath  = _resBundle('mp4box-bundle.js');
-    const mp4boxCode  = existsSync(mp4boxPath) ? readFileSync(mp4boxPath, 'utf8') : '';
 
     // ── Early CSS via insertCSS — fires before first paint, no preload risk ──
     // webContents.insertCSS() is Electron's dedicated API for injecting CSS
@@ -1333,8 +1363,6 @@ function createWindow() {
             sseCode    ? `try{${sseCode}}catch(e){console.error('[Adam sse]',e.message)}`    : '',
             visionCode ? `try{${visionCode}}catch(e){console.error('[Adam vision]',e.message)}` : '',
             cacheCode  ? `try{${cacheCode}}catch(e){console.error('[Adam cache]',e.name,e.message,e.stack)}`  : '',
-            // mp4box before engine so window.MP4Box is set when _setupMP4BoxVideo runs.
-            mp4boxCode ? `try{${mp4boxCode};window.MP4Box=_adamMP4BoxMod;}catch(e){console.error('[Adam mp4box]',e.message)}` : '',
             engineCode ? `try{${engineCode}}catch(e){console.error('[Adam engine]',e.name,e.message,e.stack)}` : '',
         ].filter(Boolean).join(';');
 
@@ -1518,6 +1546,39 @@ function applyThemeMode() {
         _clearCustomCss();
     }
 }
+
+// Auto-authenticate on startup when saved credentials exist but no engine session.
+// Fires once per process after the UI is ready and the engine has had time to emit
+// its initial DRM state. Clears stored credentials if they are rejected.
+ipcMain.once('app:ui-ready', async () => {
+    try {
+        const store = await _storeLoad();
+        if (!store.drm_email || !store.drm_password) return;
+        // Give the engine a moment to load hybris and emit its initial DRM state.
+        await new Promise(r => setTimeout(r, 3500));
+        const https = await import('https');
+        const agent = new https.Agent({ rejectUnauthorized: false });
+        const statusRes = await fetch(`https://127.0.0.1:${ENGINE_PORT}/api/v1/drm/status`, { agent }).catch(() => null);
+        if (!statusRes?.ok) return;
+        const status = await statusRes.json().catch(() => null);
+        const fp = status?.state?.fairplay;
+        if (fp === 'ready') return; // already authenticated (session reuse succeeded)
+        console.log('[Adam] Auto-authenticating with saved DRM credentials');
+        const authRes = await fetch(`https://127.0.0.1:${ENGINE_PORT}/api/v1/drm/authenticate`, {
+            method: 'POST', agent,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: store.drm_email, password: store.drm_password }),
+        }).catch(() => null);
+        if (!authRes?.ok) {
+            console.warn('[Adam] Saved DRM credentials rejected — clearing');
+            const s = await _storeLoad();
+            delete s.drm_email; delete s.drm_password;
+            _storeDirty = true; _storeFlush();
+        }
+    } catch (e) {
+        console.warn('[Adam] DRM auto-auth error:', e.message);
+    }
+});
 
 ipcMain.on('app:auth-state', (_e, signedIn) => {
     const on = signedIn === true;
@@ -2055,6 +2116,10 @@ function replayMprisState() {
 ipcMain.on('mpris:update', (_, data) => {
     // Track each field independently so all survive across reconnects.
     if (data.status)           _lastMprisStatus   = data.status;
+    if (_reloadEngineOnPause && data.status && data.status !== 'Playing') {
+        _reloadEngineOnPause = false;
+        engineLifecycle.reload();
+    }
     if (data.metadata)         _lastMprisMetadata = data.metadata;
     if (data.position != null) _lastMprisPosition = data.position;
     if (data.shuffle != null)  _lastMprisShuffle  = data.shuffle;
@@ -2283,6 +2348,28 @@ ipcMain.handle('lastfm:set-credentials', async (_, c) => {
     // means "keep the saved secret".
     if (typeof c?.secret === 'string' && c.secret.trim() && c.secret.length <= 128) store.lastfm_secret = c.secret.trim();
     _storeDirty = true; _storeFlush();
+    return { ok: true };
+});
+
+ipcMain.handle('drm:save-credentials', async (_, c) => {
+    if (typeof c?.email !== 'string' || typeof c?.password !== 'string') return { ok: false };
+    if (c.email.length > 256 || c.password.length > 256) return { ok: false };
+    const store = await _storeLoad();
+    store.drm_email    = c.email.trim();
+    store.drm_password = c.password;
+    _storeDirty = true; _storeFlush();
+    return { ok: true };
+});
+
+ipcMain.handle('drm:clear-credentials', async () => {
+    const store = await _storeLoad();
+    delete store.drm_email;
+    delete store.drm_password;
+    _storeDirty = true; _storeFlush();
+    // Sign-out: Apple's FairPlay libraries stay loaded in the engine and keep the
+    // signed-out session's device trust in memory, so the next sign-in would skip
+    // 2FA. A fresh engine process makes every sign-in start as a new device.
+    engineLifecycle.reload();
     return { ok: true };
 });
 
@@ -2896,6 +2983,7 @@ app.whenReady().then(() => {
     // reachability at startup and silently falls back to the Apple CDN if the
     // engine isn't running, so a missing binary is not a hard failure.
     startEngine();
+    ensureFairPlayLibs();
 
     // Cold-start deep link: if Adam was launched with a URL argument (e.g. from
     // xdg-open or a browser "Open in Adam" prompt), dispatch it after the window

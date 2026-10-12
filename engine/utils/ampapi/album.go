@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 )
 
 func GetAlbumResp(storefront string, id string, language string, token string) (*AlbumResp, error) {
@@ -87,59 +86,6 @@ func GetAlbumRespContext(ctx context.Context, storefront, id, language, token st
 	obj := new(AlbumResp)
 	if err := json.NewDecoder(do.Body).Decode(obj); err != nil {
 		return nil, err
-	}
-	return obj, nil
-}
-
-func GetAlbumRespByHref(href string, language string, token string) (*AlbumResp, error) {
-	return GetAlbumRespByHrefContext(context.Background(), href, language, token)
-}
-
-func GetAlbumRespByHrefContext(ctx context.Context, href string, language string, token string) (*AlbumResp, error) {
-	var err error
-	if token == "" {
-		token, err = GetToken()
-		if err != nil {
-			return nil, err
-		}
-	}
-	href = strings.Split(href, "?")[0]
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com%s/albums", href), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Origin", "https://music.apple.com")
-	query := url.Values{}
-	query.Set("omit[resource]", "autos")
-	query.Set("include", "tracks,artists,record-labels")
-	query.Set("include[songs]", "artists")
-	query.Set("extend", "editorialVideo,extendedAssetUrls")
-	query.Set("l", language)
-	req.URL.RawQuery = query.Encode()
-	do, err := apiClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return nil, errors.New(do.Status)
-	}
-	obj := new(AlbumResp)
-	err = json.NewDecoder(do.Body).Decode(&obj)
-	if err != nil {
-		return nil, err
-	}
-	if len(obj.Data) == 0 {
-		return nil, fmt.Errorf("album: empty response")
-	}
-	if next := obj.Data[0].Relationships.Tracks.Next; next != "" {
-		more, err := fetchTrackPages(ctx, next, token, "")
-		if err != nil {
-			return nil, err
-		}
-		obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, more...)
 	}
 	return obj, nil
 }

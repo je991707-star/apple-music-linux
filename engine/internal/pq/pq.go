@@ -143,13 +143,6 @@ func (q *Queue[T]) Remove(id string) (T, bool) {
 	return e.item, true
 }
 
-// Len returns the number of queued items.
-func (q *Queue[T]) Len() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.h.Len()
-}
-
 // Snapshot returns the queued items in pop order. A heap is only ordered at
 // its root, so this copies the backing slice and sorts it explicitly.
 func (q *Queue[T]) Snapshot() []Entry[T] {
@@ -172,4 +165,11 @@ func (q *Queue[T]) Close() {
 	q.closed = true
 	q.cond.Broadcast()
 	q.mu.Unlock()
+}
+
+// Len returns the number of queued items.
+func (q *Queue[T]) Len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.h.Len()
 }

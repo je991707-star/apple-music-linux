@@ -27,6 +27,7 @@ type AuthCoordinator struct {
 	pending chan string // non-nil only while a challenge awaits a reply
 	mu      sync.Mutex
 	emitter func(DRMSnapshot) // set by DRMManager to emit snapshots to SSE
+	seq     uint64            // numbers each announced challenge (AuthChallenge.ID)
 }
 
 // NewAuthCoordinator creates an AuthCoordinator.
@@ -113,6 +114,8 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		return "", fmt.Errorf("authentication challenge already pending")
 	}
 	a.pending = replies
+	a.seq++
+	req.ID = a.seq
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
@@ -133,6 +136,11 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 	// Wait for the browser to call SubmitReply.
 	select {
 	case reply := <-replies:
+		// Answered: drop the challenge from the snapshot while Apple checks the
+		// reply, so a reloaded page does not ask for the same code again.
+		if a.emitter != nil {
+			a.emitter(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}})
+		}
 		return reply, nil
 	case <-ctx.Done():
 		return "", ctx.Err()

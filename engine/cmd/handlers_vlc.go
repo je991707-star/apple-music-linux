@@ -6,9 +6,43 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"engine/core/vlc"
+	"engine/internal/vlog"
 )
+
+// alacCacheVersion is bumped whenever a bug fix changes which bytes are written
+// to the ALAC disk cache. On mismatch, all *-alac.m4a files are deleted so VLC
+// never replays a fragment-0 that was written by the old, broken key path.
+const alacCacheVersion = "cbcs-fairplay-upstream-v9"
+
+// invalidateALACCacheIfStale deletes every committed ALAC cache file when the
+// on-disk version marker does not match alacCacheVersion. This is a one-time
+// migration on first startup after a decryption fix.
+func invalidateALACCacheIfStale(cacheDir string) {
+	verFile := filepath.Join(cacheDir, ".alac_ver")
+	if data, err := os.ReadFile(verFile); err == nil && strings.TrimSpace(string(data)) == alacCacheVersion {
+		return
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return
+	}
+	deleted := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), "-alac.m4a") {
+			if removeErr := os.Remove(filepath.Join(cacheDir, e.Name())); removeErr == nil {
+				deleted++
+			}
+		}
+	}
+	if deleted > 0 {
+		log.Printf("[vlc] invalidated %d stale ALAC cache file(s) (FairPlay key fix)", deleted)
+	}
+	_ = os.WriteFile(verFile, []byte(alacCacheVersion), 0o644)
+}
 
 func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 	if s.vlcPlayer == nil {
@@ -54,7 +88,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		s.alac.done(req.SessionID) // served over HTTP (no cache); nothing of ours to wait for
 	}
 	if src != nil {
-		log.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
+		vlog.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
 		err = s.vlcPlayer.LoadSource(src)
 	} else {
 		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)

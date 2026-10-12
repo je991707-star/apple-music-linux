@@ -21,7 +21,6 @@ package vlc
 import (
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"sort"
 	"testing"
@@ -158,84 +157,4 @@ done:
 		fmt.Println("  ✗ SetTime regularly blocks the goroutine — STUTTER LIKELY")
 		fmt.Println("    Do NOT use SetTime for drift correction. Use rate-based approach.")
 	}
-}
-
-// TestVLCRateCorrection tests the alternative: adjusting playback rate by ±1%
-// to gradually correct drift without seeking. Smooth if VLC applies rate changes
-// by scaling the clock rather than re-decoding.
-func TestVLCRateCorrection(t *testing.T) {
-	p, err := New()
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer p.Close()
-
-	p.SetVolume(0)
-
-	url := "file://" + testVLCFile(t)
-	if err := p.Load(url); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	t.Log("waiting for VLC to pre-roll...")
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		pos, _, state := p.Time()
-		if state == "playing" && pos > 0 {
-			t.Logf("VLC playing at pos=%dms", pos)
-			break
-		}
-	}
-	time.Sleep(2 * time.Second)
-
-	// Simulate a PID-like rate correction: alternate between fast (+1%) and
-	// slow (-1%) every 500ms to see if rate changes cause decoder judder.
-	const testDur = 15 * time.Second
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	stop := time.After(testDur)
-	fast := true
-
-	type rateSample struct {
-		rate    float64
-		callDur time.Duration
-	}
-	var samples []rateSample
-
-	log.Println("[rate-test] alternating ±1% rate every 500ms for 15s — watch for judder")
-
-	for {
-		select {
-		case <-stop:
-			goto done
-		case <-ticker.C:
-			rate := 0.99
-			if fast {
-				rate = 1.01
-			}
-			fast = !fast
-
-			start := time.Now()
-			p.SetRate(rate)
-			dur := time.Since(start)
-			samples = append(samples, rateSample{rate, dur})
-		}
-	}
-
-done:
-	durs := make([]float64, len(samples))
-	for i, s := range samples {
-		durs[i] = float64(s.callDur.Microseconds())
-	}
-	sort.Float64s(durs)
-	p50 := durs[len(durs)/2]
-	maxDur := durs[len(durs)-1]
-
-	_ = math.Pi // keep math import
-
-	fmt.Printf("\n=== Rate correction test (%d samples) ===\n", len(samples))
-	fmt.Printf("SetRate CGO latency: p50=%.0fµs  max=%.0fµs\n", p50, maxDur)
-	fmt.Println("\nIf the video above looked smooth during rate changes → rate correction is viable.")
-	fmt.Println("If it juddered during the 500ms alternation → rate changes cause re-clocking artifacts.")
 }

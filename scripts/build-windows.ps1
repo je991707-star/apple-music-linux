@@ -115,7 +115,7 @@ try {
     if (-not (Test-Path 'node_modules\electron\dist\electron.exe')) { node node_modules\electron\install.js }
     # The injected bundles are committed and rebuilt by scripts/build-renderer.sh (bash) on Linux,
     # where CI checks they are current. Here they only have to exist.
-    foreach ($b in 'engine-bundle.js', 'engine-sse-bundle.js', 'smart-cache-bundle.js', 'vision-bundle.js', 'mp4box-bundle.js') {
+    foreach ($b in 'engine-bundle.js', 'engine-sse-bundle.js', 'smart-cache-bundle.js', 'vision-bundle.js') {
         if (-not (Test-Path "$Electron\$b") -or (Get-Item "$Electron\$b").Length -eq 0) { throw "electron\$b is missing; run scripts/build-renderer.sh on Linux and commit it" }
     }
 

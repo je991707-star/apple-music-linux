@@ -23,6 +23,7 @@ import (
 	"github.com/grafov/m3u8"
 
 	"engine/internal/m3u8safe"
+	"engine/internal/vlog"
 )
 
 var (
@@ -115,15 +116,6 @@ func (m *Master) SelectAudioVariant(priorities []string) (string, error) {
 		return fallback, nil
 	}
 	return "", fmt.Errorf("no audio alternative matching priorities %v", priorities)
-}
-
-// SelectVideoVariant returns the highest-bandwidth video variant whose height
-// (from resolution WxH) does not exceed maxHeight.
-// Resolution is read from the RESOLUTION= m3u8 attribute first; the URL-path
-// pattern _WxH_ is used as a fallback for older playlist formats.
-func (m *Master) SelectVideoVariant(maxHeight int) (string, error) {
-	variantURL, _, _, err := m.SelectVideoVariantWithCodec(maxHeight)
-	return variantURL, err
 }
 
 // SelectVideoVariantWithCodec is like SelectVideoVariant but also returns the
@@ -570,7 +562,7 @@ func logMediaParsed(rawURL string, med *Media, pl *m3u8.MediaPlaylist) {
 	if pl.Key != nil {
 		keyMethod = pl.Key.Method
 	}
-	log.Printf("[hls] parseMedia url=%s nSegs=%d totalDur=%.2fs enc=%s method=%q initURL=%q first=%q last=%q",
+	vlog.Printf("[hls] parseMedia url=%s nSegs=%d totalDur=%.2fs enc=%s method=%q initURL=%q first=%q last=%q",
 		rawURL, len(med.SegmentURLs), totalDur, encInfo, keyMethod,
 		med.InitURL, firstSeg, lastSeg)
 }

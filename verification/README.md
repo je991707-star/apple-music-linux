@@ -26,16 +26,10 @@ verification/
 
 ### Wire traces (wire-traces/)
 
-```bash
-# Start transparent proxy on port 10021 → wrapper at 10020
-socat -x -v TCP-LISTEN:10021,fork TCP:127.0.0.1:10020 2>&1 | tee verification/wire-traces/alac-<adamID>-<date>.txt &
-
-# Point the downloader at port 10021 instead of 10020
-# (change Config.DecryptM3u8Port temporarily, or use a config override)
-
-# After download completes, parse the trace:
-go run ./cmd/protoinspect verification/wire-traces/alac-<adamID>-<date>.txt
-```
+The traces here were captured against the old out-of-process wrapper (TCP port 10020). The
+engine now speaks the same protocol over an in-process pipe (`core/drm/cbcs_serve.go`), so there
+is no socket to proxy; `core/fairplay/cbcs_pipeline_test.go` exercises it end to end against a
+fake FairPlay server instead.
 
 File naming: `<content-type>-<adamID>-<date>-<legacy|engine>.txt`
 

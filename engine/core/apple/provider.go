@@ -28,6 +28,7 @@ import (
 	"engine/core/media"
 	"engine/core/pipeline"
 	"engine/core/tracer"
+	"engine/internal/vlog"
 	"engine/utils/ampapi"
 	"engine/utils/mvlabel"
 )
@@ -56,13 +57,6 @@ const (
 	FlavorCBCS256 AssetFlavor = "30:cbcp256" // 256 kbps AAC-LC
 	FlavorCBCS64  AssetFlavor = "34:cbcp64"  // 64 kbps AAC-LC
 )
-
-// NewProvider returns a media.Provider backed by Apple Music.
-// ALAC and Atmos tracks require a CBCS decryption socket; use NewProviderWithCBCS
-// to enable them.
-func NewProvider() media.Provider {
-	return &appleMusicProvider{lp: fairplay.New(), acct: nil}
-}
 
 // AccountTokenSource supplies iTunes-style auth tokens and native API calls
 // from the Android DRM backend. It is satisfied by *drm.DRMManager via a
@@ -142,7 +136,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	switch {
 	case req.Atmos && traits["atmos"]:
 		codec, hlsFilter = pipeline.CodecAtmos, "ec-3"
-	case req.Lossless && traits["hi-res-lossless"]:
+	case req.Lossless && req.HiRes && traits["hi-res-lossless"]:
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
 		sr, bd = extractALACQuality(a.AudioTraits)
 	case req.Lossless && traits["lossless"]:
@@ -379,7 +373,7 @@ func makeSeekableTrackOpenerWithAuth(
 	auth bool,
 ) func(context.Context) (*pipeline.Stream, error) {
 	return func(ctx context.Context) (*pipeline.Stream, error) {
-		log.Printf("[apple] %s: opening media playlist url=%s auth=%v", kind, playlistURL, auth)
+		vlog.Printf("[apple] %s: opening media playlist url=%s auth=%v", kind, playlistURL, auth)
 		var med *hls.Media
 		var err error
 		if auth {
@@ -391,13 +385,13 @@ func makeSeekableTrackOpenerWithAuth(
 			log.Printf("[apple] %s: open media playlist FAILED: %v", kind, err)
 			return nil, fmt.Errorf("open media playlist: %w", err)
 		}
-		log.Printf("[apple] %s: media playlist OK nSegs=%d enc=%v", kind, len(med.SegmentURLs), med.Encryption != nil)
+		vlog.Printf("[apple] %s: media playlist OK nSegs=%d enc=%v", kind, len(med.SegmentURLs), med.Encryption != nil)
 		var dec pipeline.Decryptor
 		if med.Encryption == nil {
 			log.Printf("[apple] %s %s: enc=nil → passthrough (no content-level encryption detected)", kind, playlistURL)
 			dec = fairplay.PassthroughDecryptor()
 		} else {
-			log.Printf("[apple] %s %s: enc detected prefix=%q → acquiring licence", kind, playlistURL, med.Encryption.URIPrefix)
+			vlog.Printf("[apple] %s %s: enc detected prefix=%q → acquiring licence", kind, playlistURL, med.Encryption.URIPrefix)
 			dec, err = lp.Open(ctx, fairplay.LicenseRequest{
 				AssetID:        assetID,
 				KIDBase64:      med.Encryption.KIDBase64,
@@ -441,6 +435,13 @@ func (p *appleMusicProvider) makeCBCSTrackOpener(
 		cbcsMedia, err := hls.OpenMediaCBCS(ctx, playlistURL)
 		if err != nil {
 			return nil, fmt.Errorf("open CBCS media playlist: %w", err)
+		}
+		// Pre-warm the FairPlay key in the background so it is already in the
+		// Android SQLite cache by the time the CBCS pipeline needs it.  This
+		// overlaps the ~2 s hybris key fetch with the ~2 s CDN init-segment
+		// download, cutting ALAC start latency roughly in half for first plays.
+		if firstKey := fairplay.FirstAudioKeyURI(cbcsMedia.KeyURIs); firstKey != "" {
+			go fairplay.WarmCBCSKey(context.Background(), dialer, assetID, firstKey)
 		}
 		return &pipeline.Stream{
 			Source: fairplay.CBCSSeekableSource(assetID, dialer, cbcsMedia, durationMs),

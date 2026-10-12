@@ -30,16 +30,3 @@ func TestURLsFromPastEndReportsLastSegmentsStart(t *testing.T) {
 		t.Fatalf("urls=%v actual=%.1f, want [s1 s2] at 10.0", urls, actual)
 	}
 }
-
-func TestSelectVideoVariantWithoutAverageBandwidth(t *testing.T) {
-	m := &Master{Variants: []Variant{
-		{URL: "low", Bandwidth: 1_000_000, Codecs: "avc1", Resolution: "640x360"},
-		{URL: "high", Bandwidth: 8_000_000, Codecs: "avc1", Resolution: "1920x1080"},
-		{URL: "mid", Bandwidth: 4_000_000, Codecs: "avc1", Resolution: "1280x720"},
-	}}
-	for range 20 {
-		if got, _ := m.SelectVideoVariant(1080); got != "high" {
-			t.Fatalf("picked %q, want the highest-bandwidth variant", got)
-		}
-	}
-}

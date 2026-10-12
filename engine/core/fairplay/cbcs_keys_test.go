@@ -28,27 +28,69 @@ func TestEffectiveKeyURI(t *testing.T) {
 func TestSendKeyHandshakeBytes(t *testing.T) {
 	var buf bytes.Buffer
 	rw := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&buf))
-	iv := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-	if err := sendKeyHandshake(rw, "1440833098", "skd://real", iv); err != nil {
+	if err := sendKeyHandshake(rw, "1440833098", "skd://real"); err != nil {
 		t.Fatal(err)
 	}
 	rw.Flush()
+	// Exactly the wrapper's handle() header: [len][adamID][len][keyURI].
 	want := append(append([]byte{10}, "1440833098"...), append([]byte{10}, "skd://real"...)...)
-	want = append(want, append([]byte{16}, iv...)...)
 	if !bytes.Equal(buf.Bytes(), want) {
 		t.Fatalf("handshake bytes = %q, want %q", buf.Bytes(), want)
 	}
 
 	buf.Reset()
-	sendKeyHandshake(rw, "1440833098", cbcsPrefetchKey, nil)
+	sendKeyHandshake(rw, "1440833098", cbcsPrefetchKey)
 	rw.Flush()
 	if buf.Bytes()[0] != 1 || buf.Bytes()[1] != '0' {
 		t.Fatalf("prefetch key must be sent under adamID \"0\": %q", buf.Bytes())
 	}
-	// nil IV emits a single zero byte (empty length)
-	last := buf.Bytes()[len(buf.Bytes())-1]
-	if last != 0 {
-		t.Fatalf("nil IV must produce zero length byte, got %d", last)
+}
+
+func TestSendFragKeyStartsWithFragmentZeroKey(t *testing.T) {
+	var buf bytes.Buffer
+	rw := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&buf))
+	src := &cbcsSource{
+		adamID:  "1440833098",
+		keyURIs: []string{cbcsPrefetchKey, "skd://real"},
+	}
+
+	src.sendFragKey(0, rw)
+	rw.Flush()
+	want := append(append([]byte{1, '0'}, byte(len(cbcsPrefetchKey))), cbcsPrefetchKey...)
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("fragment 0 key bytes = %q, want %q", buf.Bytes(), want)
+	}
+
+	buf.Reset()
+	src.sendFragKey(1, rw)
+	rw.Flush()
+	wantReal := append([]byte{0, 0, 0, 0, byte(len(src.adamID))}, src.adamID...)
+	// The playlist URI goes out bare, as upstream sends it: no ",<kid>" suffix.
+	wantReal = append(wantReal, byte(len("skd://real")))
+	wantReal = append(wantReal, "skd://real"...)
+	if !bytes.Equal(buf.Bytes(), wantReal) {
+		t.Fatalf("fragment 1 must switch away from sentinel first, got %q", buf.Bytes())
+	}
+}
+
+// Like upstream, only the keys on segments 0 and 1 are used; later tags are ignored.
+func TestUpstreamKeyURIs(t *testing.T) {
+	in := []string{cbcsPrefetchKey, "skd://real", "", "skd://later"}
+	got := upstreamKeyURIs(in)
+	want := []string{cbcsPrefetchKey, "skd://real", "", ""}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("key %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if in[3] != "skd://later" {
+		t.Fatal("upstreamKeyURIs must not mutate the playlist's slice")
+	}
+	if len(upstreamKeyURIs([]string{"skd://only"})) != 1 || len(upstreamKeyURIs(nil)) != 0 {
+		t.Fatal("short inputs must keep their length")
+	}
+	if got := FirstAudioKeyURI(in); got != "skd://real" {
+		t.Fatalf("FirstAudioKeyURI = %q", got)
 	}
 }
 

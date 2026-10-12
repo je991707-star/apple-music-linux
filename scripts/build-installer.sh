@@ -106,7 +106,7 @@ fi
 # electron-builder recreates linux-unpacked after build-renderer.sh refreshed it. Always ship fresh
 # external bundles: an upgrade extracts over an existing install, and main.mjs prefers these paths
 # over app.asar (including older copies left there).
-for b in engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js mp4box-bundle.js; do
+for b in engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js; do
     cp "$ELECTRON/$b" "$ELECTRON/dist/linux-unpacked/resources/$b"
 done
 rm -rf "$STAGE"
@@ -119,12 +119,14 @@ echo "[6/7] Verifying package contents..."
 for f in engine libdrm_client.so \
          vlc/libvlc.so.5 vlc/libvlccore.so.9 vlc/plugins vlc/libvlc_pulse.so.0 \
          ffmpeg/bin/ffmpeg ffmpeg/lib/libavcodec.so.63 ffmpeg/lib/libavutil.so.61 ffmpeg/lib/libavformat.so.63 \
-         tray-icon.png icon.png app.asar; do
+         tray-icon.png icon.png app.asar \
+         fetch-fairplay-libs.sh fairplay-libs.lock \
+         android-stubs/libandroid.so android-stubs/libOpenSLES.so android-stubs/libdl.so; do
     [ -e "$RES/$f" ] || die "packaged resources/$f missing — the installed app would not work"
 done
 [ ! -e "$RES/libdrm-native.so" ] || die "stale resources/libdrm-native.so is packaged (old wrapper library)"
-[ ! -e "$RES/libhybris-core.so" ] || die "stale resources/libhybris-core.so is packaged (old Android path)"
-[ ! -e "$RES/rootfs" ] || die "stale resources/rootfs is packaged (old Android path)"
+[ ! -e "$RES/libhybris-core.so" ] || die "stale resources/libhybris-core.so is packaged (it is embedded in libdrm_client.so)"
+[ ! -e "$RES/rootfs" ] || die "resources/rootfs is packaged: Apple's libraries must not ship, they are downloaded at install time"
 
 same() { cmp -s "$1" "$2" || die "$3 in the package differs from the fresh build — stale copy"; }
 same "$RES_SRC/engine"           "$RES/engine"             "resources/engine"
@@ -142,7 +144,7 @@ ldd "$RES/engine" 2>/dev/null | grep -q 'libdrm_client.so => /' \
 # prefers) must equal the freshly built file.
 ASAR="$ELECTRON/node_modules/.bin/asar"
 TMP="$(mktemp -d)"
-for b in engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js mp4box-bundle.js; do
+for b in engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js; do
     (cd "$TMP" && "$ASAR" extract-file "$RES/app.asar" "$b") || die "$b is missing from app.asar"
     same "$ELECTRON/$b" "$TMP/$b" "$b in app.asar"
     [ ! -e "$RES/$b" ] || same "$ELECTRON/$b" "$RES/$b" "resources/$b"

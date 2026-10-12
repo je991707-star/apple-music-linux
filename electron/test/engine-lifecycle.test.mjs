@@ -186,3 +186,22 @@ test('windows recovery never touches an unowned lock holder', async () => {
         assert.equal(readFileSync(lockPath, 'utf8'), '4242\n');
     } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('reload restarts a running engine and is a no-op once stopped', async () => {
+    const children = [];
+    const lifecycle = createEngineLifecycle({
+        prepare: async () => {},
+        spawn: () => { const c = fakeChild(); children.push(c); return c; },
+        log: noop, restartDelay: 5,
+    });
+    await lifecycle.start();
+    lifecycle.reload();
+    assert.deepEqual(children[0].signals, ['SIGTERM']);
+    await wait(30);
+    assert.equal(children.length, 2, 'the engine must come back after a reload');
+
+    await lifecycle.stop();
+    lifecycle.reload();
+    await wait(30);
+    assert.equal(children.length, 2, 'reload after stop must not start a new engine');
+});

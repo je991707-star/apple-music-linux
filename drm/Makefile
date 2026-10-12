@@ -1,17 +1,18 @@
-# Makefile for DRM client clean-room implementation
+# Builds libdrm_client.so: the flat C API the engine calls (drm_linux.c), the
+# libhybris loader for Apple's Android FairPlay libraries (drm_hybris.c) and the
+# vendored wrapper that runs the FairPlay session (native/).
 #
-# Builds libdrm_client.so shared library and test executable.
-# The library embeds libhybris-core.so (loaded from a memfd). The Android libraries are NOT
-# embedded: they load from rootfs/system/lib64 on disk, which must hold everything in
-# android-libs.txt.
+# The library embeds libhybris-core.so (loaded from a memfd). Apple's Android libraries are
+# not part of the build: they load from rootfs/system/lib64 at runtime and are downloaded by
+# scripts/fetch-fairplay-libs.sh (pinned and checksummed in fairplay-libs.lock).
+
+.DEFAULT_GOAL := all
 
 CC = gcc
 AS = as
-CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -fno-stack-protector -Wno-format-truncation
-# drm_hybris.c uses setjmp/longjmp for SIGSEGV probing — clobbered-by-longjmp is expected
-HYBRIS_CFLAGS = $(CFLAGS) -Wno-clobbered -Wno-maybe-uninitialized -Wno-pedantic
+CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -fno-stack-protector -Wno-format-truncation -Wno-deprecated-declarations -Wno-stringop-truncation
+HYBRIS_CFLAGS = $(CFLAGS) -Wno-pedantic
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lm -lstdc++ -Wl,--no-as-needed -lcurl -Wl,--as-needed -Wl,-z,relro,-z,now
-LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
 # libhybris-core.so (Git LFS) lives beside the sources; override on the command line to
 # build against another copy.
@@ -20,13 +21,22 @@ HYBRIS_CORE ?= libhybris-core.so
 # Android library directory (loaded from disk at runtime)
 LIB64 = rootfs/system/lib64
 
-# libandroid.so and libOpenSLES.so are listed as dependencies by Apple's libraries but nothing
-# is imported from them, so they are built here from an empty stub instead of shipping the real
-# ones (which drag in the whole Android graphics/media stack). See stubs/empty_stub.c.
-STUB_LIBS = $(LIB64)/libandroid.so $(LIB64)/libOpenSLES.so
-$(STUB_LIBS): stubs/empty_stub.c
-	@mkdir -p $(LIB64)
-	$(CC) -shared -fPIC -nostdlib -O2 -Wl,-soname,$(notdir $@) -Wl,--hash-style=both -o $@ $<
+# libandroid.so, libOpenSLES.so and libdl.so are listed as dependencies by Apple's libraries
+# but nothing is imported from them, so they are built from our own stubs instead of shipping
+# the real ones (which drag in the whole Android graphics/media stack). They are packaged in
+# resources/android-stubs; scripts/fetch-fairplay-libs.sh installs them next to Apple's libraries.
+STUB_DIR = stubs/out
+STUB_LIBS = $(STUB_DIR)/libandroid.so $(STUB_DIR)/libOpenSLES.so $(STUB_DIR)/libdl.so
+STUB_LDFLAGS = -shared -fPIC -nostdlib -O2 -Wl,--hash-style=both
+
+$(STUB_DIR)/libandroid.so $(STUB_DIR)/libOpenSLES.so: stubs/empty_stub.c
+	@mkdir -p $(STUB_DIR)
+	$(CC) $(STUB_LDFLAGS) -Wl,-soname,$(notdir $@) -o $@ $<
+
+$(STUB_DIR)/libdl.so: stubs/empty_stub.c stubs/libdl.map
+	@mkdir -p $(STUB_DIR)
+	$(CC) $(STUB_LDFLAGS) -Wl,-soname,libdl.so -Wl,--version-script=stubs/libdl.map -o $@ stubs/empty_stub.c
+
 android-stubs: $(STUB_LIBS)
 
 # ICU open-source build (x86_64-linux-android via NDK).
@@ -46,7 +56,7 @@ EMBED_BLOB_OBJS = $(BLOBS_DIR)/libhybris-core.so.o
 EMBEDDED_LOADER_OBJ = $(BLOBS_DIR)/embedded_loader.o
 
 # Core source files
-SRCS = drm_client.c
+SRCS = drm_linux.c
 HYBRIS_SRCS = drm_hybris.c
 OBJS = $(SRCS:.c=.o)
 HYBRIS_OBJS = $(HYBRIS_SRCS:.c=.o)
@@ -83,21 +93,12 @@ $(NATIVE_DIR)/main_cpp.o: $(NATIVE_DIR)/main.cpp $(NATIVE_HEADERS)
 $(NATIVE_DIR)/guard_cpp.o: $(NATIVE_DIR)/guard.cpp $(NATIVE_HEADERS)
 	$(CXX) $(NATIVE_CXXFLAGS) -c -o $@ $<
 
-# Hybris probe binary (standalone)
-PROBE_TARGET = corefp_probe
-
 # Headers
-HEADERS = drm_client.h drm_types.h drm_hybris.h
+HEADERS = drm_types.h drm_hybris.h embedded_loader.h
 
-# Test files
-TEST_SRC = tests/test_drm_client.c
-TEST_TARGET = tests/test_drm_client
-TEST_REAL_SRC = tests/test_drm_realworld.c
-TEST_REAL_TARGET = tests/test_drm_realworld
-LDFLAGS_REAL = -lpthread -lcrypto -lcurl -fno-stack-protector
+TEST_TARGET = tests/test_drm_linux
 
-# Default target
-all: $(TARGET) $(TEST_TARGET) $(TEST_REAL_TARGET)
+all: $(TARGET) android-stubs
 
 # ── ICU open-source build ─────────────────────────────────────────────────────
 
@@ -158,27 +159,18 @@ $(TARGET): $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(EMBED_BLOB_OBJS) $(EMBEDDED_L
 drm_hybris.o: drm_hybris.c drm_hybris.h embedded_loader.h native/drm_lib.h
 	$(CC) $(HYBRIS_CFLAGS) -Wno-pedantic -c -o $@ $<
 
-# ── Probe binary ──────────────────────────────────────────────────────────────
-
-probe: $(PROBE_TARGET)
-
-$(PROBE_TARGET): drm_hybris.c drm_hybris.h
-	$(CC) $(HYBRIS_CFLAGS) -DCOREFP_PROBE_MAIN -o $@ drm_hybris.c -lpthread -ldl
-
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-$(TEST_TARGET): $(TEST_SRC) $(TARGET)
-	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_TEST)
-
-$(TEST_REAL_TARGET): $(TEST_REAL_SRC) $(TARGET)
-	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_REAL)
+$(TEST_TARGET): tests/test_drm_linux.c drm_linux.c drm_types.h
+	$(CC) -std=gnu11 -g -I. -o $@ tests/test_drm_linux.c drm_linux.c -lpthread
 
 # ── Utility targets ───────────────────────────────────────────────────────────
 
-# Compiler output only: objects, the generated embedded-blob sources, probe and test
-# binaries. The built library stays, so `make clean-objs` after a build keeps what you ship.
+# Compiler output only: objects, the generated embedded-blob sources and the test
+# binary. The built library stays, so `make clean-objs` after a build keeps what you ship.
 clean-objs:
-	rm -f $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(TEST_TARGET) $(TEST_REAL_TARGET) $(PROBE_TARGET)
+	rm -f $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(TEST_TARGET)
+	rm -rf $(STUB_DIR)
 	rm -rf $(BLOBS_DIR)
 
 # Everything `make` produced, including the library itself.
@@ -202,49 +194,28 @@ install: $(TARGET)
 
 uninstall:
 	rm -f $(DESTDIR)/usr/lib/$(TARGET)
-	rm -f $(DESTDIR)/usr/include/drm_client.h
-	rm -f $(DESTDIR)/usr/include/drm_types.h
+	rm -f $(addprefix $(DESTDIR)/usr/include/,$(HEADERS))
 
 test: $(TEST_TARGET)
-	@echo "Running acceptance tests..."
-	@LD_LIBRARY_PATH=. $(TEST_TARGET); exit $$?
+	@$(TEST_TARGET)
 
-# HTTP client and cookie jar against a local TLS server that misbehaves on purpose.
-test-https: $(TARGET)
-	@./tests/run_https_test.sh
-
-test-realworld: $(TEST_REAL_TARGET)
-	@echo "Running real-world tests..."
-	@LD_LIBRARY_PATH=. $(TEST_REAL_TARGET); exit $$?
-
-test-all:
-	@echo "========================================"
-	@echo "Running ALL Tests"
-	@echo "========================================"
-	@LD_LIBRARY_PATH=. $(TEST_TARGET) && \
-	echo "" && \
-	echo "========================================" && \
-	echo "Running Real-World Tests" && \
-	echo "========================================" && \
-	LD_LIBRARY_PATH=. $(TEST_REAL_TARGET)
+# Our own C/C++ (style in /.clang-format). Vendored and third-party files are excluded.
+FORMAT_SRCS = drm_linux.c drm_hybris.c drm_hybris.h drm_types.h embedded_loader.c \
+              embedded_loader.h stubs/empty_stub.c tests/test_drm_linux.c \
+              native/android_shim.c native/guard.cpp
 
 analyze:
 	clang-analyze $(CFLAGS) -c $(SRCS)
 
 format-check:
-	clang-format --dry-run --Werror $(SRCS) $(HEADERS) $(TEST_SRC)
+	clang-format --dry-run --Werror $(FORMAT_SRCS)
 
 format:
-	clang-format -i $(SRCS) $(HEADERS) $(TEST_SRC)
-
-valgrind-test: $(TEST_TARGET)
-	valgrind --leak-check=full --show-leak-kinds=all \
-		LD_LIBRARY_PATH=. $(TEST_TARGET)
+	clang-format -i $(FORMAT_SRCS)
 
 coverage: CFLAGS += --coverage
 coverage: LDFLAGS_LIB += --coverage
-coverage: LDFLAGS_TEST += --coverage
 coverage: clean all
 
-.PHONY: all android-stubs clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
-        analyze format-check format valgrind-test coverage probe gen-blobs build-icu
+.PHONY: all android-stubs clean clean-objs release clean-icu install uninstall test \
+        analyze format-check format coverage gen-blobs build-icu

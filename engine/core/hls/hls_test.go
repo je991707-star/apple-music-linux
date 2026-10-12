@@ -244,47 +244,6 @@ func TestSelectAudioVariant_EmptyAlternatives(t *testing.T) {
 	}
 }
 
-func TestSelectVideoVariant_MaxHeight(t *testing.T) {
-	t.Parallel()
-	m := &Master{Variants: []Variant{
-		{URL: "http://x/video_1920x1080.m3u8", AverageBandwidth: 5000000},
-		{URL: "http://x/video_1280x720.m3u8", AverageBandwidth: 3000000},
-	}}
-	got, err := m.SelectVideoVariant(720)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "1280x720") {
-		t.Errorf("got %q want 720p variant", got)
-	}
-}
-
-func TestSelectVideoVariant_NoMatch(t *testing.T) {
-	t.Parallel()
-	m := &Master{Variants: []Variant{
-		{URL: "http://x/video_1920x1080.m3u8", AverageBandwidth: 5000000},
-	}}
-	if _, err := m.SelectVideoVariant(480); err == nil {
-		t.Error("expected error when all variants exceed maxHeight")
-	}
-}
-
-func TestSelectVideoVariant_BestFit(t *testing.T) {
-	t.Parallel()
-	m := &Master{Variants: []Variant{
-		{URL: "http://x/video_1280x720.m3u8", AverageBandwidth: 3000000},
-		{URL: "http://x/video_640x360.m3u8", AverageBandwidth: 1000000},
-	}}
-	// maxHeight 1080 permits both; highest bandwidth (720p) wins.
-	got, err := m.SelectVideoVariant(1080)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "1280x720") {
-		t.Errorf("got %q want highest-bandwidth fit (720p)", got)
-	}
-}
-
 func TestSelectVideoVariantWithCodec_4K_HEVC(t *testing.T) {
 	t.Parallel()
 	// Apple's 4K variants: HEVC-only at 3840x1920, H.264 available up to 1080p.

@@ -17,16 +17,15 @@ const maxCBCSSample = 64 << 20
 // main.c over conn, with key-context creation and sample decryption injected
 // so the protocol is testable without the native library:
 //
-//	repeat:  [uint8 len][adamID] [uint8 len][keyURI] [uint8 ivLen][iv]  — select a key
+//	repeat:  [uint8 len][adamID] [uint8 len][keyURI]                    — select a key
 //	         ([uint32LE size][sample] → [decrypted sample])*              — decrypt samples
 //	         [uint32LE 0]                                                 — end of this key
 //
-// The iv field carries the tenc DefaultConstantIV (16 bytes, or 0 bytes for the
-// sentinel/passthrough key). A zero size ends the current key, NOT the connection.
+// A zero size ends the current key, NOT the connection.
 // The connection ends when the client closes it at a record boundary
 // (EOF where a header or size would start; EOF inside a record is an error), or
 // when a header is empty or its key cannot be opened.
-func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri string, iv []byte) (decrypt func([]byte) error, err error)) error {
+func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri string) (decrypt func([]byte) error, err error)) error {
 	for {
 		adamID, err := readShortString(conn)
 		if errors.Is(err, io.EOF) {
@@ -42,14 +41,10 @@ func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri stri
 		if err != nil {
 			return err
 		}
-		iv, err := readShortBytes(conn)
-		if err != nil {
-			return err
-		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		decrypt, err := openKey(adamID, uri, iv)
+		decrypt, err := openKey(adamID, uri)
 		if err != nil {
 			return err
 		}

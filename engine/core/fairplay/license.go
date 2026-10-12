@@ -73,11 +73,6 @@ func (p *fpLicenseProvider) open(ctx context.Context, req LicenseRequest, forceR
 	return &fairplayDecryptor{key: keyAndIV.Key, iv: keyAndIV.IV, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
 }
 
-// InvalidateKey evicts a cached content key identified by kidBase64 and
-// uriPrefix so the next Open call is forced to re-negotiate with the licence
-// server.  Use after a decrypt error to recover from a stale cached key.
-func InvalidateKey(kidBase64, uriPrefix string) { aacstream.InvalidateKey(kidBase64, uriPrefix) }
-
 // fairplayDecryptor is the ONLY type in the engine that holds key bytes.
 // It is unexported; callers receive it only through the pipeline.Decryptor interface.
 type fairplayDecryptor struct {
@@ -109,16 +104,6 @@ func shouldEvictKey(ctx context.Context, err error) bool {
 }
 
 // ── HLS segment source ────────────────────────────────────────────────────────
-
-// HLSSource returns a pipeline.Source that downloads and concatenates HLS
-// segments using the parallel downloader from utils/aacstream.
-//
-// urls must be [initURL, seg0, seg1, …] as returned by hls.Media.AllURLs().
-//
-// HLSSource lives in this package rather than engine/hls because
-// utils/aacstream may only be imported here (and by main). The function is
-// otherwise a pure transport concern with no DRM knowledge.
-func HLSSource(urls []string) pipeline.Source { return &hlsSource{urls: urls} }
 
 type hlsSource struct {
 	urls []string

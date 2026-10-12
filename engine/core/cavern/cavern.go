@@ -36,6 +36,8 @@ const (
 	socketPath  = "/tmp/CoreFxPipe_CavernPipe"
 	saveDatDir  = ".config/Cavern"
 	saveDatFile = "Save.dat"
+	// maxChunk bounds one PCM chunk; the length comes off the socket.
+	maxChunk = 64 << 20
 )
 
 // minimalSaveDat is the minimal valid Cavern Save.dat that enables
@@ -265,6 +267,9 @@ func readSocket(ctx context.Context, conn net.Conn, w io.Writer) error {
 		length := int32(binary.LittleEndian.Uint32(lenbuf[:]))
 		if length < 0 {
 			return nil // EOS
+		}
+		if length > maxChunk {
+			return fmt.Errorf("cavern: chunk of %d bytes exceeds the %d byte limit", length, maxChunk)
 		}
 		data := make([]byte, int(length))
 		if _, err := io.ReadFull(conn, data); err != nil {

@@ -24,6 +24,37 @@ import { createTransportController } from './engine/transport.js';
 import { installTransportControls } from './engine/transport-controls.js';
 import { playbackMode, leaveLossless } from './engine/handoff.js';
 import { PLAY_STATE, isLegalPlayTransition } from './engine/playstate.js';
+import { createAccountSheet } from './engine/account-sheet.js';
+
+// Apple Account sheet (FairPlay sign-in + verification code), shared by the SSE
+// handler and Settings. The engine runs Apple's sign-in and asks for the code
+// through a "two_factor" challenge, which this sheet answers.
+let _accountSheetInstance = null;
+let _onAccountSignedIn = null; // set by the open Settings dialog to refresh itself
+function _accountSheet() {
+    return _accountSheetInstance ??= createAccountSheet({
+        signIn: async (email, password) => {
+            const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password }),
+            });
+            if (!r.ok) return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
+            // Saved via safeStorage so the engine can sign in again on its own after a restart.
+            window.adamBridge?.drmSaveCredentials({ email, password }).catch(() => {});
+            return { ok: true };
+        },
+        submitCode: async (code) => {
+            const r = await fetch(`${ENGINE}/api/v1/drm/challenge`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reply: code }),
+            });
+            return r.ok;
+        },
+        onDone: () => _onAccountSignedIn?.(),
+    });
+}
 
 // One-time move of persisted page settings from the app's earlier name (aml-x / aml_x -> adam-x / adam_x).
 try {
@@ -42,7 +73,6 @@ const ENGINE = window._adamEngineURL || 'https://127.0.0.1:20025';
 // HTTPS origin for MV <video src> (engine serves TLS on the same port).
 // A real HTTPS origin avoids the mixed-content block AND the custom-protocol seek bug
 // (electron#38749) → Chrome's native byte-range seeking works.
-const ENGINE_HTTPS = ENGINE;
 const _ADAM_DEBUG = !!(window.adamBridge?.isDev || window.adamBridge?.debug) || localStorage.getItem('_ADAM_DEBUG') === '1';
 
 // ── Last.fm API credentials ────────────────────────────────────────────────────
@@ -245,12 +275,19 @@ if (window._adamDebug) (function installAudioCapture() {
             t: Date.now()
         });
         window.__adamCapture.totalBytes += value.byteLength;
+        // Enforce the cap on what is held: drop the oldest chunks first.
+        window.__adamCapture.heldBytes = (window.__adamCapture.heldBytes || 0) + hex.length;
+        const held = window.__adamCapture.chunks;
+        while (window.__adamCapture.heldBytes > CAP_LIMIT && held.length > 1) {
+            window.__adamCapture.heldBytes -= held.shift().hex.length;
+        }
     };
 
     // Python inspector calls this to drain all captured chunks.
     window.__adamDrainCapture = function() {
         const out = window.__adamCapture.chunks.slice();
         window.__adamCapture.chunks = [];
+        window.__adamCapture.heldBytes = 0;
         return out;
     };
 })();
@@ -273,6 +310,7 @@ let _nativePlay   = null; // saved when play() proxy is installed on the element
 let _ourBlobUrl   = null; // current blob URL we own; blocks MK from replacing it
 let _allowCDNTransition  = false; // temporarily lifted during changeToMediaAtIndex so MK can settle NPIDF
 let _externalPlayGateTimer = null; // safety reset timer for _allowCDNTransition
+let _adamInGotoTransition = false; // true from _adamGoto call until target NPIDF fires; blocks MK blob URLs
 let _mkApiSaved = null; // saved MK API methods during external-play gate window (VLC path)
 let _savedAacApiRestore = null; // restore fn for AAC-path MK API wrappers (setQueue/ctmi)
 let _savedGateTracingCleanup = null; // cleanup fn for audio/MK event tracing added during gate
@@ -315,7 +353,20 @@ let _vlcPosMs      = 0;     // last polled VLC position (frozen during seek)
 let _vlcPaused     = false; // virtual paused state (overrides audio.paused in VLC mode)
 // Mixer follow, transport controller, poll generation and EOF tolerance below are adapted from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1).
 let _vlcSyncVolume = null; // current track UI follows external mixer changes
-let _vlcVolPersist = 100;   // volume (0-200) persisted across track transitions
+const _VLC_VOL_KEY = 'adam.vlcVolume';
+// Last audible VLC volume (1-200), kept across tracks and app restarts. Zero is
+// never stored, so a mute never carries into the next track.
+let _vlcVolPersist = (() => {
+    try {
+        const v = parseInt(localStorage.getItem(_VLC_VOL_KEY), 10);
+        return v > 0 && v <= 200 ? v : 100;
+    } catch (_) { return 100; }
+})();
+function _rememberVlcVolume(v) {
+    if (!(v > 0)) return;
+    _vlcVolPersist = v;
+    try { localStorage.setItem(_VLC_VOL_KEY, String(v)); } catch (_) {}
+}
 let _adamTransitioning = false; // true during _adamGoto (set before setQueue, cleared after NPIDF)
 
 // ── Session queue ─────────────────────────────────────────────────────────────
@@ -734,7 +785,12 @@ function blockAppleCDN() {
             if (isAppleCDN(val) && !_allowCDNTransition) { console.log('[Adam Engine] Blocked CDN src:', val.slice(0, 80)); return; }
             if (isAppleCDN(val) && _allowCDNTransition) { console.log('[Adam Engine] CDN src THROUGH (gate open):', val.slice(0, 80)); }
             if (_allowCDNTransition && val !== undefined) { console.log('[AUDIO-SRC] gate-open src set → "' + String(val).slice(0,60) + '"'); }
-            if (val?.startsWith('blob:') && _ourBlobUrl && val !== _ourBlobUrl) { return; }
+            // Block foreign blob URLs: always when _ourBlobUrl is set (original guard),
+            // and also during an active goto transition before our stream is open.
+            if (val?.startsWith('blob:') && (_ourBlobUrl ? val !== _ourBlobUrl : _adamInGotoTransition)) {
+                if (_adamInGotoTransition && !_ourBlobUrl) console.log('[Adam Engine] Blocked MK blob during goto:', val.slice(0, 60));
+                return;
+            }
             _warnIfOurSourceCleared(this, 'src=' + JSON.stringify(String(val).slice(0, 24)));
             desc.set.call(this, val);
         },
@@ -944,62 +1000,6 @@ setInterval(() => {
 }, 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DORMANT — client-side Web Audio EQ for the AAC/MSE path. NOT WIRED IN.
-//
-// Reference implementation preserved for the not-yet-built EQ Studio (CLAUDE.md:
-// "The EQ Studio UI in engine-playback.js ... is not yet implemented"). Current
-// EQ only applies on the FFmpeg binaural path, never on AAC/MSE — this fills that
-// gap client-side: preamp gain → chain of biquad filters → destination, mapping
-// EqualizerAPO band types (LSC/HSC/NO/BP/AP) to Web Audio filter types.
-//
-// Nothing calls these on purpose. Do NOT wire them in without handling the risks:
-//   • AudioContext.createMediaElementSource(el) may be called AT MOST ONCE per
-//     element and reroutes ALL of that element's audio through the graph — if the
-//     graph is ever left disconnected, playback goes silent.
-//   • It attaches to the same <audio> the MSE/VLC hijack drives; interaction with
-//     that pipeline (and with VLC, which bypasses the element) is unverified.
-//   • Salvaged from an old branch (65 commits behind); re-validate against the
-//     current audio setup before use.
-// eslint-disable-next-line no-unused-vars
-const _webEQ = { ctx: null, src: null, preamp: null, filters: [] };
-// eslint-disable-next-line no-unused-vars
-function _ensureWebAudioEQ() {
-    if (_webEQ.src) { if (_webEQ.ctx?.state === 'suspended') _webEQ.ctx.resume().catch(() => {}); return true; }
-    const el = getMKAudio();
-    if (!el) return false;
-    try {
-        _webEQ.ctx = _webEQ.ctx || new AudioContext();
-        _webEQ.src = _webEQ.ctx.createMediaElementSource(el);
-        _webEQ.preamp = _webEQ.ctx.createGain();
-        _webEQ.src.connect(_webEQ.preamp);
-        _webEQ.preamp.connect(_webEQ.ctx.destination);
-        if (_webEQ.ctx.state === 'suspended') _webEQ.ctx.resume().catch(() => {});
-        return true;
-    } catch (e) { console.warn('[Adam EQ] Web Audio init:', e); return false; }
-}
-// eslint-disable-next-line no-unused-vars
-function _applyWebAudioEQ(bands, preampDb) {
-    if (!_ensureWebAudioEQ()) return;
-    const ctx = _webEQ.ctx;
-    _webEQ.preamp.gain.value = Math.pow(10, (preampDb || 0) / 20);
-    try { _webEQ.preamp.disconnect(); } catch (_) {}
-    _webEQ.filters.forEach(f => { try { f.disconnect(); } catch (_) {} });
-    _webEQ.filters = [];
-    const active = (bands || []).filter(b => b.enabled !== false && b.freq > 0);
-    if (!active.length) { _webEQ.preamp.connect(ctx.destination); return; }
-    _webEQ.filters = active.map(b => {
-        const f = ctx.createBiquadFilter();
-        f.type = { LSC: 'lowshelf', HSC: 'highshelf', NO: 'notch', BP: 'bandpass', AP: 'allpass' }[(b.type || '').toUpperCase()] || 'peaking';
-        f.frequency.value = b.freq;
-        f.Q.value = b.q || 1;
-        f.gain.value = b.gain || 0;
-        return f;
-    });
-    _webEQ.preamp.connect(_webEQ.filters[0]);
-    for (let i = 0; i < _webEQ.filters.length - 1; i++) _webEQ.filters[i].connect(_webEQ.filters[i + 1]);
-    _webEQ.filters[_webEQ.filters.length - 1].connect(ctx.destination);
-}
-// ─────────────────────────────────────────────────────────────────────────────
 
 
 function waitForMusicKit() {
@@ -1058,6 +1058,7 @@ let _durationSec = 0;
 let _audioAnalysis  = null;
 let _abortCtrl   = null;   // session-level abort — killed on track change
 let _generation  = 0;
+let _htcSkippedItem = null; // item saved when _htcConfirmDirectPlay skips handleTrackChange
 let _videoCodec  = null;   // HLS CODECS= for the video track (MV sessions only)
 let _mvGateOpen  = true;   // false while MV A/V gate is pending; blocks play/seek
 // Set by the active MV pipeline; resets the native scrubber to its loading look.
@@ -2700,7 +2701,6 @@ async function startMVPipeline() {
         // Skip our own quality button — it handles its own clicks.
         if (!btn || btn === _qualityBtn) return;
         const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-        const text  = btn.textContent.trim().toLowerCase();
         const cls   = btn.className.toLowerCase();
         // Use aria-label for semantic matching; fall back to class only (not textContent,
         // which would match "1080p" as containing "10" for the skip-seconds buttons).
@@ -2940,24 +2940,9 @@ async function startMVPipeline() {
                             if (ct > bufEnd && ct - bufEnd < 30 && Date.now() - _bufWaitStart > 8000) {
                                 console.warn(`[Adam MV buf:ahead-snap] ct=${ct.toFixed(2)} ahead of bufEnd=${bufEnd.toFixed(2)} — re-seeking`);
                                 _bufWaitStart = Date.now(); // throttle: won't fire again for 8s
-                                _mvVideoSeek(ct).catch(() => {});
+                                _mvSeekTo(ct); // vseg re-requests segments from ct
                             }
                         }
-                    }
-                    // Dead-pipe recovery: if the fetch pipe died (its signal aborted) while
-                    // _bufPaused is true, the normal deadlock-recovery branch below (which
-                    // gates on !_bufPaused) can never fire. Detect and restart here instead.
-                    if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
-                        _pipeRestarted = true;
-                        const restartAt = videoEl.currentTime;
-                        // Guard against Chrome's internal 'seeking' events (fired because the
-                        // buffer is empty at currentTime) re-entering _mvVideoSeek and aborting
-                        // our recovery pipe before it can fill the buffer — same guard that
-                        // _mvVideoSeek itself sets before starting its pipe. Cleared by onVideoPlaying.
-                        _ignoreSeekUntil = Date.now() + 8000;
-                        console.warn(`[Adam MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s — restarting pipe`);
-                        pipeCtrl = new AbortController();
-                        _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
                     }
                     // Abort if stalled too long — Chrome MSE resets decoder after ~60s idle,
                     // causing SB error on the next append. 45s gives a clean restart margin.
@@ -2966,24 +2951,6 @@ async function startMVPipeline() {
                         _abortMV('buf-timeout');
                         return;
                     }
-                }
-            } else if (videoEl.paused && lead < BUF_LOW && pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted) {
-                // Deadlock recovery: the video pipe died (its signal is aborted) while
-                // the MV session is still active and the element is paused with no
-                // buffer. The buf-LOW pause path below can't fire (it needs
-                // !videoEl.paused), so nothing would ever recover this — the symptom is
-                // an endless "buf:ok lead=0.00s". A user pause never aborts pipeCtrl, so
-                // this is genuine starvation. Restart the pipe from the current position
-                // and resume; one-shot, then abort if it still doesn't recover.
-                if (!_pipeRestarted) {
-                    _pipeRestarted = true;
-                    console.warn(`[Adam MV buf:recover] pipe dead + starved at ct=${videoEl.currentTime.toFixed(2)}s — restarting pipe`);
-                    pipeCtrl = new AbortController();
-                    _startVideoPipe(`${videoUrl}?t=${videoEl.currentTime.toFixed(3)}`);
-                    _iframePlay.call(videoEl).catch(() => {});
-                } else {
-                    console.warn('[Adam MV buf:recover] pipe restart did not recover — aborting session');
-                    _abortMV('pipe-dead');
                 }
             } else {
                 if (lead < BUF_LOW && !videoEl.paused) {
@@ -2995,14 +2962,12 @@ async function startMVPipeline() {
                     mkAudio.muted = true; // silent but still "playing" — MK sees no pause
                     console.warn(`[Adam MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s → pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'}`);
                 } else {
-                    if (lead >= BUF_HIGH) _pipeRestarted = false; // healthy again — re-arm recovery
                     // videoEl should never be paused here (_bufPaused is false). If it is,
                     // the _bufPaused resume called play() but it didn't stick (e.g. Chrome
                     // fired a waiting event before the first frame decoded). Force play again.
                     if (videoEl.paused && !_userPaused) {
                         console.warn(`[Adam MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s — retrying play`);
                         _iframePlay.call(videoEl).catch(() => {});
-                    } else {
                     }
                 }
             }
@@ -3803,7 +3768,7 @@ async function startMVPipeline() {
     console.log(`[Adam MV] pipeline started session=${_sessionId}`);
 }
 
-function _vlcHandleLength(lengthMs, mkAudio) {
+function _vlcHandleLength(lengthMs) {
     if (!_vlcLengthSet && lengthMs > 0) {
         _vlcLengthSet = true;
         _durationSec = lengthMs / 1000;
@@ -3979,7 +3944,7 @@ async function _vlcPollTick(mkAudio, mySession, generation = _vlcPollGeneration)
         const { posMs, lengthMs, state, volume, muted } = await r.json();
         if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return; // stale after command/skip
         _vlcSyncVolume?.(volume, muted);
-        _vlcHandleLength(lengthMs, mkAudio);
+        _vlcHandleLength(lengthMs);
         _vlcUpdatePosition(posMs, state, mkAudio);
         if (state === _vlcPrevState) return;
         const prev = _vlcPrevState;
@@ -4079,7 +4044,7 @@ async function _hoverPrewarmById(adamId, isVideo = false) {
             body: JSON.stringify({
                 assetId:    adamId,
                 storefront: sf,
-                capabilities: { lossless, atmos: false, video: isVideo },
+                capabilities: { lossless, hiRes: lossless && _streamingQuality === 'hi-res-lossless', atmos: false, video: isVideo },
                 ...(isVideo ? { mvMaxHeight: _mvMaxHeight } : {}),
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
@@ -4103,7 +4068,18 @@ async function _hoverPrewarmById(adamId, isVideo = false) {
     }
 }
 
-function _installHoverPrewarm(mk) {
+// Pre-warm only when the pointer rests on an item: sweeping across a grid must not
+// open (and evict) an engine session for every song it passes.
+const HOVER_INTENT_MS = 350;
+
+function _installHoverPrewarm() {
+    let pendingId = null, timer = null;
+    const prewarmSoon = (id, isVideo = false) => {
+        if (id === pendingId) return;
+        clearTimeout(timer);
+        pendingId = id;
+        timer = setTimeout(() => { pendingId = null; _hoverPrewarmById(id, isVideo); }, HOVER_INTENT_MS);
+    };
     document.addEventListener('pointerenter', (e) => {
         // Skip if no DRM or engine not ready
         if (!_engineCaps.lossless && !_engineCaps.aac) return;
@@ -4114,17 +4090,17 @@ function _installHoverPrewarm(mk) {
                 const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
                 if (did) {
                     const numId = did.startsWith('a.') ? did.slice(2) : did;
-                    if (/^\d{7,12}$/.test(numId) && numId !== _adamId) {
-                        _hoverPrewarmById(numId);
+                    if (/^\d{7,12}$/.test(numId) && numId !== _currentAssetId) {
+                        prewarmSoon(numId);
                         return;
                     }
                 }
                 // href on an anchor containing a numeric song/MV ID
                 if (el.tagName === 'A' && el.href) {
                     const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
-                    if (m && m[1] !== _adamId) {
+                    if (m && m[1] !== _currentAssetId) {
                         const isMV = el.href.includes('/music-video/');
-                        _hoverPrewarmById(m[1], isMV);
+                        prewarmSoon(m[1], isMV);
                         return;
                     }
                 }
@@ -4163,7 +4139,7 @@ async function _prewarmNextAlac() {
             body: JSON.stringify({
                 assetId:    nextAdamId,
                 storefront: sf,
-                capabilities: { lossless: true, atmos: false, video: false },
+                capabilities: { lossless: true, hiRes: _streamingQuality === 'hi-res-lossless', atmos: false, video: false },
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
             }),
@@ -4438,6 +4414,7 @@ async function _resolveSession(item, adamId, sf, mk) {
             storefront: sf,
             capabilities: {
                 lossless: losslessWanted,
+                hiRes:    losslessWanted && _streamingQuality === 'hi-res-lossless',
                 atmos:    false,
                 video:    isVideo,
             },
@@ -4722,7 +4699,7 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
         if (Math.round(_vlcVolume * _scFactor) === volume && _vlcMuted === !!muted) return;
         const requested = Math.round(volume / (_scFactor || 1));
         _vlcVolume = requested;
-        _vlcVolPersist = requested;
+        _rememberVlcVolume(requested);
         _vlcMuted = !!muted;
         _dispatchVolChange();
     };
@@ -4733,7 +4710,7 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
             const newVol = Math.max(0, Math.min(200, Math.round(v * 100)));
             if (newVol === _vlcVolume) return;
             _vlcVolume = newVol;
-            _vlcVolPersist = newVol;
+            _rememberVlcVolume(newVol);
             if (_vlcVolume > 0) _vlcMuted = false;
             _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
             _dispatchVolChange();
@@ -4745,7 +4722,7 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
         set: (v) => {
             _vlcMuted = !!v;
             if (_vlcMuted) { _vlcPreMuteVol = _vlcVolume || 100; _postVlcVol(0); }
-            else { _vlcVolume = _vlcPreMuteVol; _vlcVolPersist = _vlcVolume; _postVlcVol(_vlcVolume); }
+            else { _vlcVolume = _vlcPreMuteVol; _rememberVlcVolume(_vlcVolume); _postVlcVol(_vlcVolume); }
             _dispatchVolChange();
         },
         configurable: true,
@@ -4770,8 +4747,10 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
     });
     if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
 
-    // The existing player/desktop mixer retains its level; do not repost a
-    // stale per-track volume over a change made in the system mixer.
+    // Every track opens unmuted at the remembered level. The player otherwise
+    // keeps whatever the previous track left it at, including a mute or a 0.
+    // Mixer changes still reach _vlcVolPersist through _vlcSyncVolume.
+    _postVlcVol(_vlcVolume);
 
     if (ctrl.signal.aborted) return;
 
@@ -4859,7 +4838,7 @@ async function _triggerDirectPlay(adamId, mk) {
             body: JSON.stringify({
                 assetId:    adamId,
                 storefront: sf,
-                capabilities: { lossless: losslessWanted, atmos: false, video: false },
+                capabilities: { lossless: losslessWanted, hiRes: losslessWanted && _streamingQuality === 'hi-res-lossless', atmos: false, video: false },
                 mvMaxHeight: _mvMaxHeight,
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
@@ -4880,6 +4859,18 @@ async function _triggerDirectPlay(adamId, mk) {
             _directPlayAdamId = null;
             deleteSession(sess.sessionId);
             setPlayState(PLAY_STATE.IDLE, 'direct:codec-fallback');
+            // If NPIDF fired while _directPlayAdamId was set, handleTrackChange was short-
+            // circuited (returned early via _htcConfirmDirectPlay). For ALAC/MV tracks the
+            // VLC/MV path must take over — re-call handleTrackChange with the saved item
+            // so the correct path runs now that we know the codec is not AAC.
+            if (_htcSkippedItem) {
+                const pendingItem = _htcSkippedItem;
+                _htcSkippedItem = null;
+                const pendingId = pendingItem?.playParams?.catalogId
+                    ?? pendingItem?.attributes?.playParams?.catalogId
+                    ?? pendingItem?.id;
+                if (pendingId === adamId) handleTrackChange(pendingItem);
+            }
             return;
         }
 
@@ -4973,7 +4964,11 @@ async function handleTrackChange(mk) {
         ?? item.id
         ?? item.playParams?.id
         ?? item.attributes?.playParams?.id;
-    if (_htcConfirmDirectPlay(_htcAdamId)) return;
+    if (_htcConfirmDirectPlay(_htcAdamId)) {
+        _htcSkippedItem = item; // codec-fallback in _triggerDirectPlay will retry if ALAC/MV
+        return;
+    }
+    _htcSkippedItem = null;
     _directPlayAdamId = null;
     _directPlayGen    = 0;
 
@@ -6361,6 +6356,9 @@ async function setup() {
         // DRM just became lossless-capable — reset so the next track gets a wait window.
         if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
 
+        // Sign-in progress: Apple asking for the verification code, success, failure.
+        _accountSheet().onSnapshot(snap);
+
         // Binary needs credentials but none are stored — open the sign-in form
         // automatically so the user doesn't have to navigate to Settings.
         if (snap?.challenge?.type === 'credentials') {
@@ -6611,6 +6609,7 @@ async function setup() {
         _adamPendingII = ii;
         const targetFlat = _sessionFlatIdx(ci, ii);
         _adamGotoTarget = targetFlat;
+        _adamInGotoTransition = true;
         console.log('[Adam] _adamGoto ci=', ci, 'ii=', ii, 'flat=', targetFlat);
 
         // Stop the VLC poll first — it dispatches timeupdate events that cause MK's
@@ -6662,6 +6661,7 @@ async function setup() {
         _adamAdvancingTimer = setTimeout(() => {
             _adamGotoTarget = null;
             _adamGotoTargetId = null;
+            _adamInGotoTransition = false;
             _allowCDNTransition = false;
             _adamTransitioning = false;
             _adamNavInternal = false;
@@ -6696,6 +6696,7 @@ async function setup() {
                 _clearAdvancing();
                 _adamGotoTarget = null;
                 _adamGotoTargetId = null;
+                _adamInGotoTransition = false;
                 _allowCDNTransition = false;
                 _adamTransitioning = false;
                 _adamNavInternal = false;
@@ -6731,8 +6732,15 @@ async function setup() {
                 const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
                 _adamGotoTarget = targetIdx;
                 _adamGotoTargetId = targetSongId ?? null;
-                await mk.setQueue({ songs: allIds }).catch(() => {});
-                await mk.changeToMediaAtIndex(targetIdx).catch(() => {});
+                // Use setQueue+play() rather than setQueue+ctmi. ctmi hangs when MK tries to
+                // set up the audio pipeline from a cold start (FairPlay CDN setup never resolves
+                // on ALAC tracks). play() fires NPIDF as soon as MK accepts the queue start
+                // position without waiting for the full audio pipeline to settle.
+                const sqDesc = targetSongId
+                    ? { songs: allIds, startWith: { id: targetSongId } }
+                    : { songs: allIds };
+                await mk.setQueue(sqDesc).catch(() => {});
+                await mk.play().catch(() => {});
             }
         }
 
@@ -6837,6 +6845,10 @@ async function setup() {
         const ii = Math.max(0, _sessionContainers[ci].items.indexOf(target));
         if (_ADAM_DEBUG) console.log(`[MK-DBG] ${label} → owned change: ${items.length} track(s) ci=${ci} ii=${ii} target=${target}`);
         if (closeGate) closeGate();
+        // _aacCloseGate sets _allowCDNTransition=false, but changeToMediaAtIndex needs
+        // the CDN gate open so MK can set audio.src=CDN_URL and advance its state
+        // machine to fire NPIDF. Re-open it here; handleTrackChange will close it.
+        _allowCDNTransition = true;
         return _adamGoto(ci, ii)
             .then(()  => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} → owned change dispatched`))
             .catch(err => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} → owned change failed:`, err?.message || err));
@@ -7277,10 +7289,28 @@ async function setup() {
                 // AAC was playing fell through to Apple's network-bound setQueue({playlists})
                 // and stalled. Serve it from the engine DB and own the change instead.
                 if (desc?.playlists && desc?.startWith?.id) {
-                    const startCid = _normalizeStartId(desc);
-                    if (_ADAM_DEBUG) console.log('[MK-DBG AAC] playlists → resolving pre-fetched tracks, startWith=' + startCid);
-                    return _resolvePlaylistCatalogIds().then(catalogIds => {
+                    const startWithLid = desc.startWith?.id ?? null;
+                    if (_ADAM_DEBUG) console.log('[MK-DBG AAC] playlists → resolving pre-fetched tracks, startWithLid=' + startWithLid);
+                    // Use _pendingPlaylistFetch directly so we keep the lid→cid mapping
+                    // needed to resolve opaque library item IDs like "i.XXXX".
+                    const fetchResult = _pendingPlaylistFetch
+                        ? Promise.race([_pendingPlaylistFetch, new Promise(res => setTimeout(() => res(null), 3000))])
+                        : Promise.resolve(null);
+                    return fetchResult.then(result => {
+                        const tracks = result?.tracks || [];
+                        const catalogIds = tracks.map(t => t.cid).filter(id => id && /^\d{6,}$/.test(id));
                         if (catalogIds.length > 1) {
+                            // Resolution order (mirrors VLC gate): DOM-extracted catalog ID
+                            // first (captured at click time, most reliable), then numeric
+                            // form of an "a." library prefix, then lid→cid map lookup.
+                            const _lidNumeric = startWithLid?.startsWith('a.') ? startWithLid.slice(2) : startWithLid;
+                            let startCid = _pendingExternalClickCatalogId
+                                || (/^\d{6,}$/.test(_lidNumeric) ? _lidNumeric : null);
+                            if (!startCid && startWithLid) {
+                                const match = tracks.find(t => t.lid === startWithLid || t.lid === startWithLid.replace(/^[a-z]\./, ''));
+                                startCid = match?.cid ?? null;
+                            }
+                            if (_ADAM_DEBUG) console.log('[MK-DBG AAC] playlists → ' + catalogIds.length + ' tracks, startCid=' + startCid);
                             return _aacOwnedGoto(catalogIds, startCid, 'playlist/local');
                         }
                         // Cache cold and the engine's live fetch came back empty — nothing to
@@ -7661,22 +7691,16 @@ async function setup() {
                 const desc = a[0];
                 if (desc?.playlists && desc?.startWith?.id) {
                     const targetId = desc.startWith.id;
-                    // Library song IDs carry an "a." prefix — strip for numeric comparison.
-                    const targetNumId = targetId.startsWith('a.') ? targetId.slice(2) : targetId;
-                    // Library tracks only (a. prefix): try local cache first. The engine's
-                    // /library/playlists/{id}/tracks endpoint hits the DB when synced, or
-                    // falls back to a live Apple API fetch when the DB is cold. Either way
-                    // it returns [{lid,cid}] — we build {songs:[catalogIds]} without stalling
-                    // on Apple's network-hungry setQueue({playlists:[...]}) path.
-                    // Non-library catalog tracks skip straight to passthrough — they are never
-                    // in the library DB and the engine won't fetch them from /me/library.
-                    const isLibraryTrack = targetId.startsWith('a.');
-                    // Fall back to the numeric part of startWith.id when DOM extraction missed it
-                    // (library songs with "a." prefix).
-                    const effectiveCatalogId = _pendingExternalClickCatalogId ||
-                        (/^\d{6,}$/.test(targetNumId) ? targetNumId : null);
-                    if (isLibraryTrack && effectiveCatalogId) {
-                        const catalogId = effectiveCatalogId;
+                    // Library song IDs carry an "a." or "i." prefix. "a." is a library song ID
+                    // with a numeric part; "i." is an opaque library item ID (no numeric form).
+                    // Both resolve via the playlist track cache (lid→cid mapping).
+                    const isLibraryTrack = targetId.startsWith('a.') || targetId.startsWith('i.');
+                    if (isLibraryTrack) {
+                        const startWithLid = targetId;
+                        // Pre-computed numeric catalog ID from DOM extraction or "a." prefix strip.
+                        const targetNumId = targetId.startsWith('a.') ? targetId.slice(2) : targetId;
+                        const domCatalogId = _pendingExternalClickCatalogId ||
+                            (/^\d{6,}$/.test(targetNumId) ? targetNumId : null);
                         const fetchPromise = _pendingPlaylistFetch
                             ? Promise.race([_pendingPlaylistFetch, new Promise(res => setTimeout(() => res(null), 3000))])
                             : Promise.resolve(null);
@@ -7687,10 +7711,17 @@ async function setup() {
                                 .map(t => t.cid)
                                 .filter(id => id && /^\d{6,}$/.test(id));
                             if (catalogIds.length > 1) {
+                                // Resolve the startWith catalogId: prefer DOM-extracted id, fall back to
+                                // lid→cid lookup which handles opaque "i.XXXX" library item IDs.
+                                let catalogId = domCatalogId;
+                                if (!catalogId && startWithLid) {
+                                    const match = tracks.find(t => t.lid === startWithLid || t.lid === startWithLid.replace(/^[a-z]\./, ''));
+                                    catalogId = match?.cid ?? null;
+                                }
                                 // Local cache hit — build songs descriptor without touching Apple's CDN setQueue.
                                 if (_ADAM_DEBUG) console.log('[MK-DBG] setQueue → local cache: ' + catalogIds.length + ' tracks, startWith=' + catalogId);
                                 const pDesc = {songs: catalogIds};
-                                if (catalogIds.includes(catalogId)) pDesc.startWith = {id: catalogId};
+                                if (catalogId && catalogIds.includes(catalogId)) pDesc.startWith = {id: catalogId};
                                 const p = _mkApiSaved.setQueue.call(mk, pDesc);
                                 if (p?.then) p.then(() => _ADAM_DEBUG && console.log('[MK-DBG] local cache resolved'), e2 => _ADAM_DEBUG && console.log('[MK-DBG] local cache rejected:', e2?.message || String(e2)));
                                 return p;
@@ -7700,7 +7731,7 @@ async function setup() {
                             // ctmi is NOT used here: the CDN gate is open only during VLC mode where
                             // the audio element is synthetic (paused=true, no src). ctmi's stop→load
                             // sequence hangs waiting for element events that never fire → 20s timeout.
-                            if (_ADAM_DEBUG) console.log('[MK-DBG] setQueue → passthrough (cache cold) catalogId=' + catalogId);
+                            if (_ADAM_DEBUG) console.log('[MK-DBG] setQueue → passthrough (cache cold) startWithLid=' + startWithLid);
                             const p = _mkApiSaved.setQueue.apply(mk, a);
                             if (p?.then) p.then(() => _ADAM_DEBUG && console.log('[MK-DBG] passthrough resolved'), e2 => _ADAM_DEBUG && console.log('[MK-DBG] passthrough rejected:', e2?.message || String(e2)));
                             return p;
@@ -7805,7 +7836,7 @@ async function setup() {
             mk.changeToMediaAtIndex = (idx) => {
                 console.log('[VLC-MK] mk.changeToMediaAtIndex(' + idx + ')');
                 const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
-                if (p?.then) p.then(r => console.log('[VLC-MK] ctmi(' + idx + ') resolved'), e => console.log('[VLC-MK] ctmi(' + idx + ') rejected:', e?.message || e));
+                if (p?.then) p.then(() => console.log('[VLC-MK] ctmi(' + idx + ') resolved'), e => console.log('[VLC-MK] ctmi(' + idx + ') rejected:', e?.message || e));
                 return p;
             };
             // Trace audio element events in the gate window so we can see MK's internal flow.
@@ -7910,7 +7941,7 @@ async function setup() {
     _scSetup();            // async; fire-and-forget: load Sound Check enabled state
     _xfSetup();            // async; fire-and-forget: load crossfade duration
     _hotkeysSetup();       // async; fire-and-forget: install in-app media hotkeys
-    _installHoverPrewarm(mk); // hover → pre-warm DRM+HLS so external clicks are instant
+    _installHoverPrewarm(); // hover → pre-warm DRM+HLS so external clicks are instant
 
     // Persistent listener: whenever MK appends tracks to the queue (station/autoplay
     // fetches the next batch asynchronously), sync them into the active container so
@@ -7956,12 +7987,30 @@ async function setup() {
             // lookup would match the wrong track and accept a spurious NPIDF early.
             const targetId = _adamGotoTargetId || _extractItemId(targetItem);
             if (targetId && itemId !== targetId) {
-                // Spurious NPIDF for the OLD track during transition — drop it.
+                // Spurious NPIDF for the wrong track during transition — drop it.
                 console.log('[Adam] NPIDF filtered: spurious event for', item?.attributes?.name, '(advancing to idx', _adamGotoTarget, 'target id', targetId, ')');
+                // If the external play gate is still open, MK will route the wrong track.
+                // Close the gate and retry navigation so the correct track plays.
+                if (_allowCDNTransition || _mkApiSaved) {
+                    if (_mkApiSaved) {
+                        mk.play = _mkApiSaved.play;
+                        mk.setQueue = _mkApiSaved.setQueue;
+                        mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex;
+                        if (typeof _savedGateTracingCleanup === 'function') { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
+                        _mkApiSaved = null;
+                    }
+                    _allowCDNTransition = false;
+                    clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null;
+                    if (_adamPendingCI >= 0 && !_adamAdvancing) {
+                        const rCI = _adamPendingCI, rII = _adamPendingII;
+                        console.log('[Adam] NPIDF filter: gate closed — retrying _adamGoto ci=', rCI, 'ii=', rII);
+                        setTimeout(() => _adamGoto(rCI, rII), 250);
+                    }
+                }
                 return;
             }
             // Target track arrived (or target ID indeterminate) — clear filter and cancel safety timer.
-            _adamGotoTarget = null; _adamGotoTargetId = null; _adamTransitioning = false;
+            _adamGotoTarget = null; _adamGotoTargetId = null; _adamInGotoTransition = false; _adamTransitioning = false;
             clearTimeout(_adamAdvancingTimer); _adamAdvancingTimer = null;
         }
         // Confirm the track change and release any residual advance lock.
@@ -8718,7 +8767,6 @@ window.adamGetQueueInfo = function () {
 (function setupEngineSettings() {
     if (!window.adamBridge) return;
 
-    let injected = false;
     const FF = 'font-family:-apple-system,SF Pro Text,system-ui,sans-serif;';
 
     function dot(ok) {
@@ -8795,6 +8843,59 @@ window.adamGetQueueInfo = function () {
     async function fetchDRM() {
         const r = await fetch(`${ENGINE}/api/v1/drm/status`);
         return r.json();
+    }
+
+    // ── Engine Account section (self-contained, mutates its own body) ─────
+    function buildAccountSection(drm, onRefresh) {
+        const { wrap, body } = makeSection('Engine Account');
+        const drmState = drm?.state ?? drm ?? {};
+        const managerOk = drmState?.manager === 'ready';
+        const processOk = drmState?.process === 'running';
+        const fairplayOk = drmState?.fairplay === 'ready';
+        const cbcsOk = drm?.capabilities?.cbcs === true;
+        // "Signed in" means the user completed the engine login (email+password) and
+        // FairPlay/ALAC is ready. A web-session MUT alone gives AAC but is not an
+        // explicit engine login — don't show "Signed in" for that.
+        const isSignedIn = cbcsOk || fairplayOk;
+
+        function renderState() {
+            body.innerHTML = '';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:11px 0;';
+            row.appendChild(dot(isSignedIn));
+            const text = document.createElement('div');
+            text.style.cssText = 'flex:1;';
+            const main = document.createElement('div');
+            main.style.cssText = FF + 'font-size:13px;color:rgba(255,255,255,0.85);';
+            main.textContent = isSignedIn ? 'Signed in' : 'Not signed in';
+            text.appendChild(main);
+            if (!isSignedIn) {
+                const sub = document.createElement('div');
+                sub.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;';
+                if (!managerOk) {
+                    sub.textContent = 'DRM engine not ready. Check engine logs.';
+                } else if (!processOk) {
+                    sub.textContent = 'DRM backend not loaded. Restart the app.';
+                } else {
+                    sub.textContent = 'Sign in to enable lossless and hi-res playback';
+                }
+                text.appendChild(sub);
+            }
+            row.appendChild(text);
+            const btn = makeBtn(isSignedIn ? 'Sign Out' : 'Sign In…');
+            btn.onclick = isSignedIn ? async () => {
+                btn.disabled = true; btn.textContent = 'Signing out…';
+                await fetch(`${ENGINE}/api/v1/drm/logout`, { method: 'POST' }).catch(() => {});
+                window.adamBridge?.drmClearCredentials().catch(() => {});
+                onRefresh();
+            } : () => _accountSheet().openSignIn();
+            row.appendChild(btn);
+            body.appendChild(row);
+        }
+
+        _onAccountSignedIn = onRefresh;
+        renderState();
+        return wrap;
     }
 
     // ── Dialog (created once, reused) ─────────────────────────────────────
@@ -9282,7 +9383,7 @@ window.adamGetQueueInfo = function () {
 
     // ── Section builders ────────────────────────────────────────────────────
 
-    function _buildEngineStatusSection(drm, coreFP) {
+    function _buildEngineStatusSection(drm) {
         const { wrap, body: stBody } = makeSection('Engine Status');
         function spinner() {
             const s = document.createElement('span');
@@ -9298,8 +9399,12 @@ window.adamGetQueueInfo = function () {
             const fpOk = fp === 'ready';
             const fpLoading = fp === 'unknown' && procLoading;
             const cbcs = d?.capabilities?.cbcs === true;
-            const sessOk = st.session === 'valid' || cbcs;
-            const sessText = st.session === 'valid' ? 'valid' : cbcs ? 'active (cbcs)' : st.session ?? 'unknown';
+            // Session is only "valid" (green) when backed by a real engine login —
+            // i.e. FairPlay is ready or CBCS capability is present. A web-session MUT
+            // alone sets session=valid in the engine for AAC, but that is not an
+            // explicit engine login: show "none" (red) until FairPlay is ready.
+            const sessOk = cbcs || fpOk;
+            const sessText = cbcs ? 'active (cbcs)' : fpOk ? 'valid' : 'none';
             const sessLoading = !sessOk && (procLoading || proc === 'running');
             return [
                 { label: 'DRM process', ok: procOk, loading: procLoading, text: proc },
@@ -9314,21 +9419,14 @@ window.adamGetQueueInfo = function () {
             if (!noDot) v.appendChild(loading ? spinner() : dot(ok));
             v.appendChild(document.createTextNode(text));
         }
-        const hasCoreFP = coreFP !== undefined;
         const valEls = [];
         renderStatusRows(drm).forEach((row, i, arr) => {
-            const isLast = !hasCoreFP && i === arr.length - 1;
+            const isLast = i === arr.length - 1;
             const v = statusVal('', row.noDot ? undefined : row.ok);
             applyStatusRow(v, row);
             valEls.push({ el: v, noDot: !!row.noDot });
             stBody.appendChild(makeRow(row.label, v, row.subtitle, isLast));
         });
-        if (hasCoreFP) {
-            const cfAvail = coreFP?.available === true;
-            const cfVal = statusVal(cfAvail ? 'detected' : 'not found', cfAvail);
-            const cfSub = cfAvail ? undefined : 'Place CoreFP.dll at ~/.config/Adam/LibCoreFP/';
-            stBody.appendChild(makeRow('CoreFP (FPS)', cfVal, cfSub, true));
-        }
         const refreshRow = document.createElement('div');
         refreshRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
         const refreshBtn = makeBtn('Refresh');
@@ -9639,7 +9737,7 @@ window.adamGetQueueInfo = function () {
         return { wrap, onLosslessChange: fn => { _onLosslessChange = fn; } };
     }
 
-    async function _buildCacheSection(prefs) {
+    async function _buildCacheSection() {
         const { wrap, body: cBody } = makeSection('Playback Cache');
         const cacheStats = await fetch(`${ENGINE}/api/v1/cache/stats`).then(r => r.json()).catch(() => null);
         const mvCacheInfo = await fetch(`${ENGINE}/api/v1/cache/mv`).then(r => r.json()).catch(() => null);
@@ -9903,18 +10001,8 @@ window.adamGetQueueInfo = function () {
         const { wrap, body: dlBody } = makeSection('Downloads');
         function makeIOSToggle(on, onChange) { return _adamIOSToggle(on, onChange); }
         function makeMiniBtn(_, onClick) { return _adamMiniBtn(onClick); }
-        function dlSubhead(text) { return _dlSubhead(text); }
-        function dlDropdown(opts, val, onSave) { return _dlDropdown(opts, val, onSave); }
         // Lossless and hi-res options require DRM AND lossless pref enabled.
         const losslessAllowed = drmSignedIn && prefs['lossless-enabled'] !== false;
-        const qualityOpts = losslessAllowed ? [
-            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
-            { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
-            { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
-        ] : [
-            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
-        ];
-        function makeQualityDropdown(prefKey) { return _adamMakeQualityDropdown(prefKey, prefs, qualityOpts); }
         let previewEl = null;
         function updatePreview() {
             if (!previewEl) return;
@@ -10081,7 +10169,7 @@ window.adamGetQueueInfo = function () {
         return { wrap, applyLossless: applyDlLossless };
     }
 
-    async function _buildPlaybackSection(prefs, drmSignedIn) {
+    async function _buildPlaybackSection(prefs) {
         const { wrap, body } = makeSection('Playback');
 
         // Resume playback on launch
@@ -10523,7 +10611,7 @@ window.adamGetQueueInfo = function () {
         // then immediately start re-warming for the next open.
         // Account state must be current: a warmed snapshot can precede a login or a session restore.
         // Tools and preferences may come from the cache; authorization never does.
-        const [drm, [, tools, prefs, caps]] = await Promise.all([
+        const [drm, [, tools, prefs]] = await Promise.all([
             fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
             _settingsPreload ?? _warmSettingsCache(),
         ]);
@@ -10531,21 +10619,21 @@ window.adamGetQueueInfo = function () {
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
         // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
-        const drmState = drm?.state ?? drm ?? {};
         const drmSignedIn = accountSignedIn(drm); // one definition, shared with the status poll below
 
         // Build all async sections in parallel now that we have prefs.
         const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
             _buildThemeSection(prefs),
-            _buildCacheSection(prefs),
-            _buildPlaybackSection(prefs, drmSignedIn),
+            _buildCacheSection(),
+            _buildPlaybackSection(prefs),
             _buildScrobbleSection().then(r => r.wrap),
             _buildHistorySection(),
             _buildLibrarySection(),
         ]);
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
-        dlg.appendChild(_buildEngineStatusSection(drm, caps?.coreFP));
+        dlg.appendChild(buildAccountSection(drm, openSettings));
+        dlg.appendChild(_buildEngineStatusSection(drm));
         dlg.appendChild(_buildDisplaySection(prefs));
         dlg.appendChild(themeWrap);
         const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);
@@ -10733,7 +10821,6 @@ window.adamGetQueueInfo = function () {
         const ALL_CON = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(con).join(',\n');
         const ALL_SVG = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(svg).join(',\n');
         const EMBED_LI  = li(EMBED_TITLE);
-        const EMBED_CON = con(EMBED_TITLE);
 
         const s = document.createElement('style');
         s.id = 'adam-ctx-icons';

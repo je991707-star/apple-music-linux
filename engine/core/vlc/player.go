@@ -8,8 +8,6 @@ package vlc
 import "C"
 import (
 	"fmt"
-	"log"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -149,113 +147,6 @@ func (p *Player) Volume() (int, bool) {
 	return vol, C.libvlc_audio_get_mute(p.mp) == 1
 }
 
-// SeekURL stops current playback, loads seekURL, and logs the actual landed
-// position once VLC reaches playing state. seekURL should be an HTTP URL with
-// a ?t= parameter so the engine can stream from the correct fMP4 fragment,
-// bypassing any truncated disk-cached file.
-func (p *Player) SeekURL(seekURL string, posMs int64) error {
-	p.mu.Lock()
-	if p.mp != nil {
-		C.libvlc_media_player_stop(p.mp)
-	}
-	p.mu.Unlock()
-
-	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, seekURL)
-
-	if err := p.Load(seekURL); err != nil {
-		return err
-	}
-
-	p.mu.Lock()
-	myGen := p.loadGen
-	p.mu.Unlock()
-
-	go p.confirmLanding(myGen, posMs)
-	return nil
-}
-
-// SeekReload seeks by reloading the current media with the libvlc :start-time
-// option. This is reliable for fMP4/ALAC files where set_time silently fails
-// (Apple fMP4 fragments lack a usable time→byte index that libvlc can follow).
-// VLC estimates the byte offset from the file's duration and bitrate, then
-// scans forward to the next valid moof boundary — accurate to ±1 fragment.
-func (p *Player) SeekReload(posMs int64) error {
-	if posMs < 0 {
-		posMs = 0
-	}
-	p.mu.Lock()
-	if p.mp == nil {
-		p.mu.Unlock()
-		return fmt.Errorf("vlc: player closed")
-	}
-	url := p.lastURL
-	if url == "" {
-		p.mu.Unlock()
-		return nil
-	}
-	// Strip any existing query string from the URL so :start-time is the only
-	// seek parameter (file:// URLs do not accept query strings).
-	base := url
-	if i := strings.Index(url, "?"); i >= 0 {
-		base = url[:i]
-	}
-
-	cURL := C.CString(base)
-	defer C.free(unsafe.Pointer(cURL))
-	media := C.libvlc_media_new_location(p.inst, cURL)
-	if media == nil {
-		p.mu.Unlock()
-		return fmt.Errorf("vlc: libvlc_media_new_location failed for %s", base)
-	}
-	defer C.libvlc_media_release(media)
-
-	opt := C.CString(fmt.Sprintf(":start-time=%.3f", float64(posMs)/1000.0))
-	defer C.free(unsafe.Pointer(opt))
-	C.libvlc_media_add_option(media, opt)
-
-	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, base)
-
-	// The whole swap-and-play runs under the lock: Close releases mp/inst under
-	// the same lock, so an unlocked play() here could hit a freed player.
-	p.detachLocked()
-	C.libvlc_media_player_stop(p.mp)
-	C.libvlc_media_player_set_media(p.mp, media)
-	p.lastURL = base
-	if err := p.playLocked(); err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	myGen := p.loadGen
-	p.mu.Unlock()
-
-	// Verify actual landing position once VLC enters playing state.
-	go p.confirmLanding(myGen, posMs)
-	return nil
-}
-
-// confirmLanding logs where a seek landed, abandoning the check if the player
-// is reloaded or closed first.
-func (p *Player) confirmLanding(myGen int, posMs int64) {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		p.mu.Lock()
-		if p.loadGen != myGen || p.mp == nil {
-			p.mu.Unlock()
-			log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
-			return
-		}
-		state := C.libvlc_media_player_get_state(p.mp)
-		pos := int64(C.libvlc_media_player_get_time(p.mp))
-		p.mu.Unlock()
-		if state == C.libvlc_Playing && pos > 0 {
-			log.Printf("[vlc seek] ◄ LANDED  requested=%dms  actual=%dms  Δ=%+dms", posMs, pos, pos-posMs)
-			return
-		}
-	}
-	log.Printf("[vlc seek] ✗ TIMEOUT — VLC did not reach playing state within 5s (requested=%dms)", posMs)
-}
-
 // SetTime seeks within the currently loaded media to posMs milliseconds.
 // If VLC is already playing the call is synchronous (instant disk-cache seek).
 // If VLC is still opening (e.g. right after Load), it polls up to 5 s for the
@@ -339,17 +230,6 @@ func (p *Player) Resume() {
 		return
 	}
 	C.libvlc_media_player_set_pause(p.mp, 0)
-}
-
-// SetRate adjusts the playback rate (1.0 = normal, 0.99 = 1% slow, 1.01 = 1% fast).
-// Used for gradual drift correction instead of hard SetTime seeks.
-func (p *Player) SetRate(rate float64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.mp == nil {
-		return
-	}
-	C.libvlc_media_player_set_rate(p.mp, C.float(rate))
 }
 
 // SetVolume sets the audio volume. vol is 0–200 (100 = 100%).

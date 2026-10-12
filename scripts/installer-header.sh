@@ -1,10 +1,11 @@
 #!/bin/sh
 # Adam — self-extracting installer
-# Usage: ./adam.run [--force] [--system] [--uninstall]
+# Usage: ./adam.run [--force] [--system] [--no-lossless] [--uninstall]
 #
-# --force      reinstall even if already at this version
-# --system     install to /opt/adam + /usr/local/bin (needs sudo)
-# --uninstall  remove a previous installation
+# --force        reinstall even if already at this version
+# --system       install to /opt/adam + /usr/local/bin (needs sudo)
+# --no-lossless  skip downloading Apple's FairPlay libraries (lossless/ALAC stays off)
+# --uninstall    remove a previous installation
 
 VERSION="__VERSION__"
 
@@ -17,6 +18,7 @@ ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
 FORCE=0
 SYSTEM=0
 UNINSTALL=0
+LOSSLESS=1
 
 # ── launcher directory ───────────────────────────────────────────────────────
 # The command is installed as `adam`. The standard home for user executables is
@@ -32,8 +34,9 @@ for arg in "$@"; do
         --force)    FORCE=1 ;;
         --system)   SYSTEM=1 ;;
         --uninstall) UNINSTALL=1 ;;
+        --no-lossless) LOSSLESS=0 ;;
         --help|-h)
-            echo "Usage: $0 [--force] [--system] [--uninstall]"
+            echo "Usage: $0 [--force] [--system] [--no-lossless] [--uninstall]"
             exit 0 ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
@@ -153,6 +156,22 @@ EOF
 
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 xdg-mime default adam.desktop x-scheme-handler/adam 2>/dev/null || true
+
+# ── FairPlay libraries (lossless) ─────────────────────────────────────────────
+# Apple's Android FairPlay libraries cannot be redistributed with Adam, so they are
+# downloaded here from pinned sources and checked against SHA-256 sums
+# (resources/fairplay-libs.lock). They live per user, so a system-wide install
+# leaves them to each user's first launch, which fetches them automatically.
+FETCH="$INSTALL_DIR/resources/fetch-fairplay-libs.sh"
+if [ "$LOSSLESS" = "1" ] && [ "$SYSTEM" != "1" ] && [ -f "$FETCH" ]; then
+    echo "Downloading Apple's FairPlay libraries for lossless playback (~65 MB)..."
+    if sh "$FETCH"; then
+        :
+    else
+        echo "Lossless playback is off for now; Adam will retry on its next launch,"
+        echo "or run: sh \"$FETCH\""
+    fi
+fi
 
 # ── version stamp ─────────────────────────────────────────────────────────────
 echo "$VERSION" > "$INSTALL_DIR/.version"

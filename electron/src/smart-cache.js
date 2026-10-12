@@ -17,11 +17,6 @@ const MAX_CONTEXT_TRACKS = 200;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function getMUT() {
-    const c = document.cookie.split(';').find(s => s.trim().startsWith('media-user-token='));
-    return c ? decodeURIComponent(c.trim().slice('media-user-token='.length)) : '';
-}
-
 function parseContentUrl(url) {
     // Extract type + catalog ID from Apple Music SPA URLs.
     // /album/{slug}/{id} or /album/{id}

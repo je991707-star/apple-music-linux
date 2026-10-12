@@ -48,7 +48,6 @@ test('parseGsettingsUri accepts file URIs only', () => {
 
 test('windowsWallpaperPath falls back to the transcoded wallpaper when the registry value is empty', async () => {
     const env = { APPDATA: 'C:\\Users\\a\\AppData\\Roaming' };
-    const cached = 'C:\\Users\\a\\AppData\\Roaming/Microsoft/Windows/Themes/TranscodedWallpaper';
     const seen = new Set();
     const exists = (p) => seen.has(p.replace(/\\/g, '/'));
     seen.add('C:/Users/a/AppData/Roaming/Microsoft/Windows/Themes/TranscodedWallpaper');

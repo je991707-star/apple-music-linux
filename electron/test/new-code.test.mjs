@@ -159,3 +159,64 @@ test('_lbTrackMeta: maps fields; release only when present', () => {
     assert.deepEqual(norm(ctx._lbTrackMeta({ artist: 'A', track: 'T' })),
         { artist_name: 'A', track_name: 'T' }, 'no release_name when album absent');
 });
+
+// ── VLC volume memory ─────────────────────────────────────────────────────────
+// The persisted-volume block is top-level state, not a single function, so the
+// declarations from `const _VLC_VOL_KEY` through _rememberVlcVolume are run as-is.
+function vlcVolumeSandbox(stored, { throws = false } = {}) {
+    const start = PB.indexOf('const _VLC_VOL_KEY');
+    const fn = extractFn(PB, '_rememberVlcVolume');
+    const end = PB.indexOf(fn) + fn.length;
+    assert.ok(start >= 0 && end > start, 'volume memory block not found');
+    const store = new Map(stored == null ? [] : [['adam.vlcVolume', String(stored)]]);
+    const localStorage = {
+        getItem: k => { if (throws) throw new Error('blocked'); return store.has(k) ? store.get(k) : null; },
+        setItem: (k, v) => { if (throws) throw new Error('blocked'); store.set(k, String(v)); },
+    };
+    const ctx = { localStorage, parseInt, Number };
+    vm.createContext(ctx);
+    vm.runInContext(PB.slice(start, end) + '\n;globalThis.get = () => _vlcVolPersist; globalThis.remember = _rememberVlcVolume;', ctx);
+    return { ctx, store };
+}
+
+test('VLC volume: restores the last audible level, defaults to 100', () => {
+    assert.equal(vlcVolumeSandbox(null).ctx.get(), 100);
+    assert.equal(vlcVolumeSandbox(37).ctx.get(), 37);
+    for (const bad of ['0', '-5', '250', 'abc']) {
+        assert.equal(vlcVolumeSandbox(bad).ctx.get(), 100, `stored ${bad} must fall back to 100`);
+    }
+    assert.equal(vlcVolumeSandbox(null, { throws: true }).ctx.get(), 100, 'blocked storage must not break startup');
+});
+
+test('VLC volume: zero / mute is never remembered', () => {
+    const { ctx, store } = vlcVolumeSandbox(80);
+    ctx.remember(55);
+    assert.equal(ctx.get(), 55);
+    assert.equal(store.get('adam.vlcVolume'), '55');
+    for (const v of [0, -1, NaN, undefined]) ctx.remember(v);
+    assert.equal(ctx.get(), 55, 'a mute must not carry into the next track');
+    assert.equal(store.get('adam.vlcVolume'), '55');
+    const blocked = vlcVolumeSandbox(null, { throws: true });
+    blocked.ctx.remember(42);
+    assert.equal(blocked.ctx.get(), 42, 'the in-memory level still updates when storage throws');
+});
+
+test('VLC volume: every load re-applies the remembered level before playback starts', () => {
+    const setup = extractFn(PB, '_setupVLCPath');
+    const load = setup.indexOf('/api/v1/vlc/load');
+    const post = setup.indexOf('_postVlcVol(_vlcVolume);', load);
+    const canplay = setup.indexOf("addEventListener('canplay'", load);
+    assert.ok(load > 0 && post > load && post < canplay, 'volume must be posted after /vlc/load and before canplay');
+    assert.match(setup, /let _vlcVolume = _vlcVolPersist;/);
+    assert.match(setup, /let _vlcMuted = false;/);
+});
+
+test('pageLogLevel: maps numeric and string console levels', () => {
+    const ctx = sandbox("const PAGE_LEVELS = ['verbose', 'info', 'warning', 'error'];", ['pageLogLevel'], MAIN);
+    assert.equal(ctx.pageLogLevel({ level: 3 }), 'error');
+    assert.equal(ctx.pageLogLevel({ level: 2 }), 'warning');
+    assert.equal(ctx.pageLogLevel({ level: 0 }), 'verbose');
+    assert.equal(ctx.pageLogLevel({ level: 9 }), 'info');
+    assert.equal(ctx.pageLogLevel({ level: 'error' }), 'error');
+    assert.equal(ctx.pageLogLevel({}), 'info');
+});

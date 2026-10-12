@@ -7,6 +7,15 @@ the project's Releases page.
 
 ## Unreleased
 
+### Lossless (ALAC)
+- **Lossless playback works again, decrypted the way the upstream downloader does.** Every FairPlay key, including the shared prefetch key that encrypts each track's first segment, now goes through Apple's own key exchange (`getKdContext`) and sample decryptor. Previously the first segment was passed through or decrypted with an all-zero key, and the track key was requested from Widevine under an all-zero key ID, which garbled the audio. Only the key tags on segments 0 and 1 are used, as upstream does. Streaming to the disk cache and VLC is unchanged, so playback still starts before the download finishes.
+- **Apple's FairPlay libraries are downloaded, not shipped.** The `.run` installer fetches them (`--no-lossless` skips it); the AppImage, system-wide installs and the Flatpak fetch them on first launch and switch lossless on once they arrive. Sources are pinned to fixed commits and every file is checked against `drm/fairplay-libs.lock`. Windows stays AAC-only for now.
+- **Concurrent FairPlay calls are serialised.** Key opens, sample decrypts and the lease-recovery reset now share one lock, and a key context freed by a lease refresh is detected and reopened instead of being used after free.
+- **VLC opens every track unmuted at your last volume**, remembered across restarts.
+- **Each install now has its own device identity.** Every install used to present the same hard-coded Android ID to Apple. A new install generates a random one (stored in `drm/files/device-id`); an install that is already signed in keeps the old one until its next sign-out, so the upgrade does not log anyone out.
+- **Fixed:** decode times were patched before decrypting, which shifted every sample by 4 bytes when a fragment carried a 32-bit `tfdt`; a parser panic on a malformed fragment could crash the whole engine (now it fails that stream only); a stale "Kernel restriction detected" dialog could pop up on unrelated engine output; the Cavern reader trusted chunk sizes from its socket.
+- **Removed** the unused CoreFP/Wine route, the old native FairPlay licence exchange and about 18,000 lines of other unreachable code.
+
 ### Reliability and sign-in
 Ported from the pull request by Flavio Giacchetti ([silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1)), adapted to Adam (Windows included, `adam` names).
 - **Engine startup no longer kills whatever owns the engine port.** It recovers only an orphan of this exact engine (same binary, data directory and port; `/proc` on Linux, the image path and command line on Windows), never deletes the session lock file (a replacement inode let two engines own the session at once), waits for the port, and reports a clear error when something else is using it. Starts, crash restarts and quitting are owned by one lifecycle module, so a quit during startup cannot spawn an engine.

@@ -328,24 +328,28 @@ func TestReadNextFragment_EmptyStream(t *testing.T) {
 // Creates a synthetic fragment: moof box + mdat box (minimal valid sizes).
 func TestReadNextFragment_MoofMdat(t *testing.T) {
 	t.Parallel()
-	// moof needs a valid structure for mp4ff; use "moof" with zero-content children.
-	// mp4.NewFragment() creates a fragment; encode it to get valid bytes.
-	frag := mp4.NewFragment()
+	frag, err := mp4.CreateFragment(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frag.AddFullSample(mp4.FullSample{Sample: mp4.Sample{Dur: 1024, Size: 3}, Data: []byte{1, 2, 3}})
 	var buf bytes.Buffer
 	if err := frag.Encode(&buf); err != nil {
-		// If encoding an empty fragment fails, skip — needs real content.
-		t.Skipf("fragment encode: %v", err)
+		t.Fatal(err)
 	}
-	if buf.Len() == 0 {
-		t.Skip("empty fragment encoding — skipping")
-	}
-	r := bytes.NewReader(buf.Bytes())
-	got, _, err := ReadNextFragment(r, 0)
+	buf.Write(makeFree()) // trailing box after the fragment's mdat
+	got, off, err := ReadNextFragment(bytes.NewReader(buf.Bytes()), 0)
 	if err != nil {
 		t.Fatalf("ReadNextFragment: %v", err)
 	}
-	if got == nil {
-		t.Error("expected non-nil fragment")
+	if got == nil || got.Moof == nil || got.Mdat == nil {
+		t.Fatal("expected a fragment with moof and mdat")
+	}
+	if want := uint64(buf.Len() - len(makeFree())); off != want {
+		t.Fatalf("offset after fragment = %d, want %d (end of mdat)", off, want)
+	}
+	if !bytes.Equal(got.Mdat.Data, []byte{1, 2, 3}) {
+		t.Fatalf("mdat payload = %v", got.Mdat.Data)
 	}
 }
 

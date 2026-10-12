@@ -6,7 +6,6 @@
 package m3u8safe
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 
@@ -21,9 +20,4 @@ func DecodeFrom(r io.Reader, strict bool) (p m3u8.Playlist, t m3u8.ListType, err
 		}
 	}()
 	return m3u8.DecodeFrom(r, strict)
-}
-
-// Decode is m3u8.Decode with panics converted to errors.
-func Decode(buf bytes.Buffer, strict bool) (m3u8.Playlist, m3u8.ListType, error) {
-	return DecodeFrom(&buf, strict)
 }

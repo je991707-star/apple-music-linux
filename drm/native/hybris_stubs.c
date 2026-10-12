@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include "hybris_types.h"
 
+extern int drm_lib_debug_enabled(void); /* drm_lib.c: ADAM_DRM_DEBUG */
+
 /* hybris public API (from libhybris-core.so) */
 extern void *android_dlopen(const char *filename, int flag);
 extern void *android_dlsym(void *handle, const char *symbol);
@@ -86,7 +88,7 @@ int hybris_init_libs(const char *lib64) {
     PATCHV(_ZTVNSt6__ndk120__shared_ptr_emplaceIN13mediaplatform11HTTPMessageENS_9allocatorIS2_EEEE,
            "_ZTVNSt6__ndk120__shared_ptr_emplaceIN13mediaplatform11HTTPMessageENS_9allocatorIS2_EEEE");
 
-    fprintf(stderr, "[hybris] libs loaded\n");
+    if (drm_lib_debug_enabled()) fprintf(stderr, "[hybris] libs loaded\n");
     return 0;
 }
 
@@ -94,16 +96,20 @@ int hybris_init_libs(const char *lib64) {
 
 /* curl: provided by system libcurl, no stub needed */
 
-/* Android log → stderr */
+/* Android log → stderr: warnings and errors always (ANDROID_LOG_WARN = 5),
+ * verbose/debug/info only with ADAM_DRM_DEBUG. */
+static int android_log_wanted(int prio) { return prio >= 5 || drm_lib_debug_enabled(); }
+
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
-    (void)prio;
+    if (!android_log_wanted(prio)) return 0;
     char buf[1024];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
     fprintf(stderr, "[%s] %s\n", tag, buf);
     return 0;
 }
 int __android_log_write(int prio, const char *tag, const char *text) {
-    (void)prio; fprintf(stderr, "[%s] %s\n", tag, text); return 0;
+    if (android_log_wanted(prio)) fprintf(stderr, "[%s] %s\n", tag, text);
+    return 0;
 }
 
 /* resolv: no-op on glibc */

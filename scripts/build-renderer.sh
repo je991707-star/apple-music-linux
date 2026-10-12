@@ -7,9 +7,6 @@
 #   smart-cache-bundle.js esbuild  src/smart-cache.js
 #   vision-bundle.js      verbatim copy of src/vision-glass.js
 #
-# mp4box-bundle.js is a pinned build of the third-party mp4box library, not derived from
-# src/, so it is only checked for presence.
-#
 # main.mjs prefers a bundle in <resources>/ over the one in app.asar, so when an unpacked
 # build exists its copies are refreshed too.
 #
@@ -27,7 +24,6 @@ ESB=(npx esbuild --bundle --format=iife --log-level=warning)
 "${ESB[@]}" src/smart-cache.js --outfile=smart-cache-bundle.js
 cp src/vision-glass.js vision-bundle.js
 
-[ -s mp4box-bundle.js ] || { echo "error: electron/mp4box-bundle.js is missing" >&2; exit 1; }
 
 # A bundle with module syntax left in it would throw when injected as a plain script.
 for b in engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js; do
@@ -39,6 +35,6 @@ done
 
 UNPACKED="dist/linux-unpacked/resources"
 if [ -d "$UNPACKED" ]; then
-    cp engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js mp4box-bundle.js "$UNPACKED/"
+    cp engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js "$UNPACKED/"
 fi
 echo "renderer bundles built"

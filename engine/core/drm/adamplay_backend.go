@@ -29,21 +29,21 @@ typedef struct {
 } drm_config;
 
 typedef uint64_t drm_adam_id_t;
-typedef struct drm_key_context *drm_key_context_handle_t;
 
 int   drm_init(const drm_config *config);
 void  drm_shutdown(void);
 char *drm_get_account(void);
 char *drm_get_hls_url(drm_adam_id_t asset_id);
 int   drm_get_progressive_url(drm_adam_id_t asset_id, char **out_url, char **out_download_key, int *out_has_decryptor);
-drm_key_context_handle_t drm_open_key_context(const char *asset_id_str, const char *media_uri);
-int   drm_decrypt_sample(drm_key_context_handle_t key_context, uint8_t *sample_data, uint32_t sample_size);
-int   drm_decrypt_sample_at(drm_key_context_handle_t key_context, uint8_t *sample_data, uint32_t sample_size, uint64_t sample_number);
-int   drm_decrypt_sample_with_sample_iv(drm_key_context_handle_t key_context, uint8_t *sample_data, uint32_t sample_size);
-void  drm_close_key_context(drm_key_context_handle_t key_context);
-int   drm_set_key_context_key(drm_key_context_handle_t key_context, const uint8_t *aes_key, const uint8_t *iv);
 int   drm_decrypt_itun(drm_adam_id_t asset_id, uint8_t *sample_data, uint32_t input_size, uint32_t *output_size);
-int   drm_is_recovery_active(void);
+
+// ── hybris / Android library path (drm_hybris.c) ────────────────────────────
+int  hybris_backend_init(const char *linker_dir, const char *lib64_dir, const char *core_path);
+int  hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir, const char *username, const char *password, drm_auth_callback_t auth_cb, void *auth_ud);
+// keep in sync with drm/drm_hybris.h
+#define HYBRIS_ERR_STALE_CONTEXT (-2)
+void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri, unsigned *epoch);
+int  hybris_backend_decrypt(void *ctx, unsigned epoch, uint8_t *data, uint32_t len);
 
 // ── CGO bridge function pointers ────────────────────────────────────────────
 extern void adamplayBridgeAuth(char *ctype, char *buf, int size, void *ud);
@@ -54,19 +54,19 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"engine/internal/vlog"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime/cgo"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
-
-	"engine/utils/aacstream"
-	"engine/utils/ampapi"
 )
 
 // adamplayBackend implements the DRM backend using the native implementation
@@ -80,16 +80,23 @@ type adamplayBackend struct {
 	// Global state callback channel for C callbacks
 	stateCh         chan string
 	stateHandle     cgo.Handle
+	authBox         unsafe.Pointer     // C-allocated cell holding a cgo.Handle to this backend, for 2FA callbacks
+	authSrcV        atomic.Value       // authSrcHolder; read by the 2FA callback while Start holds mu
 	stateBox        unsafe.Pointer     // C-allocated cell holding stateHandle; the pointer handed to C
 	accountFallback func() AccountInfo // web-session token when no credential files exist (guarded by mu)
-	devTok          devTokenCache      // MusicKit developer JWT: fetched on Start, retried at use if that failed
 
 	// In-flight accounting for calls into the C library (guarded by mu). Stop must not
 	// tear the library down under a running call, and key contexts handed out by one
 	// Start are meaningless after the next, so each Start gets a generation.
-	active  int           // calls currently inside the C library
-	drained chan struct{} // closed when active reaches 0 while Stop is waiting
-	gen     uint64        // incremented by every successful Start
+	active      int           // calls currently inside the C library
+	drained     chan struct{} // closed when active reaches 0 while Stop is waiting
+	gen         uint64        // incremented by every successful Start
+	hybrisReady bool          // true when hybris_backend_init+hybris_fairplay_init succeeded
+
+	// hybrisInitDone is closed when the background hybris init goroutine completes
+	// (success or failure). nil means hybris was initialised synchronously (login
+	// path) or has not started yet.
+	hybrisInitDone chan struct{}
 }
 
 var errBackendStopped = errors.New("DRM backend is not running")
@@ -137,6 +144,8 @@ func AdamplayBackend(drmDir string) DRMBackend {
 	// as the backend (one per process), so the callback never sees a freed cell.
 	b.stateBox = C.malloc(C.size_t(unsafe.Sizeof(uintptr(0))))
 	*(*uintptr)(b.stateBox) = uintptr(b.stateHandle)
+	b.authBox = C.malloc(C.size_t(unsafe.Sizeof(uintptr(0))))
+	*(*uintptr)(b.authBox) = uintptr(cgo.NewHandle(b))
 	return b
 }
 
@@ -158,6 +167,37 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	if baseDir == "" {
 		// Default: use files/ folder next to libdrm_client.so
 		baseDir = filepath.Join(b.drmDir, "files")
+	}
+	// storeservicescore opens its account database below this directory while
+	// constructing RequestContext. Logout removes mpl_db/, so recreate both
+	// levels before handing the path to the native library; otherwise a fresh
+	// login can appear authenticated without being able to persist accounts.sqlitedb.
+	if err := os.MkdirAll(filepath.Join(baseDir, "mpl_db"), 0o700); err != nil {
+		return fmt.Errorf("create DRM session directory: %w", err)
+	}
+
+	// Wipe stale FPS key-store and HTTP-cache files before drm_init opens them.
+	// Apple FPS persistent keys expire (typically within a few hours). A key
+	// cached in kvs.sqlitedb from a previous session will be returned by
+	// hybris_open_kd_ctx_from_uri as if it were valid, but AES-CBC with an
+	// expired key produces garbage audio. Deleting the key-value store forces
+	// the Android library to negotiate a fresh FPS key from Apple on every
+	// startup — the warmDefaultKeyContext pre-warm then overlaps with CDN
+	// download, so the user pays no latency. httpcache caches the CKC HTTP
+	// response; stale CKC can also carry wrong keys, so it is wiped too.
+	// accounts.sqlitedb and cookies.sqlitedb are left untouched (Apple ID login).
+	var removed []string
+	for _, name := range []string{
+		"kvs.sqlitedb", "kvs.sqlitedb-wal", "kvs.sqlitedb-shm",
+		"kvs.db",
+		"httpcache.sqlitedb", "httpcache.sqlitedb-wal", "httpcache.sqlitedb-shm",
+	} {
+		if err := os.Remove(filepath.Join(baseDir, "mpl_db", name)); err == nil {
+			removed = append(removed, name)
+		}
+	}
+	if len(removed) > 0 {
+		log.Printf("[drm] cleared stale FairPlay key store: %s", strings.Join(removed, ", "))
 	}
 
 	// Prepare config
@@ -201,40 +241,137 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		return fmt.Errorf("drm_init failed with code %d", ret)
 	}
 
-	// Fetch and cache the MusicKit developer JWT (used in AcquireKey's
-	// Authorization header). This token is embedded in the web player JS and
-	// does not require user credentials — it is safe to fetch on every Start.
-	if tok, err := ampapi.GetToken(); err == nil && tok != "" {
-		b.devTok.set(tok)
-		log.Printf("[drm] native: dev token fetched (%d bytes)", len(tok))
-	} else {
-		log.Printf("[drm] native: dev token fetch failed: %v", err)
+	// Compute hybris paths once; used by both the sync and async init paths.
+	lib64Dir := filepath.Join(filepath.Dir(baseDir), "rootfs", "system", "lib64")
+	var hybrisLinkerDir string
+	if exePath, err := os.Executable(); err == nil {
+		hybrisLinkerDir = filepath.Join(filepath.Dir(exePath), "hybris-linker")
 	}
-
-	fpState := FairPlayReady
 
 	b.running = true
 	b.gen++
 
-	// Emit initial state event to notify DRMManager that backend is running
-	select {
-	case b.eventCh <- DRMEvent{
-		Snapshot: DRMSnapshot{
-			State: DRMState{
-				Process:  ProcessRunning,
-				Manager:  ManagerReady,
-				FairPlay: fpState,
-				Recovery: RecoveryIdle,
-			},
-			Timestamp: time.Now(),
-			Message:   "native backend initialized",
-		},
-	}:
-	default:
-		// Event channel full, ignore
+	// Emit initial state — AAC is ready; ALAC state is determined below.
+	b.emitState(DRMState{
+		Process:  ProcessRunning,
+		Manager:  ManagerReady,
+		FairPlay: FairPlayUnknown,
+		Recovery: RecoveryIdle,
+	}, "native backend initialized (ALAC init pending)")
+
+	if cfg.Credentials.Email != "" {
+		// Login flow: run hybris synchronously so the caller can verify the
+		// session-ready marker before returning "login succeeded".
+		// b.mu is held for all of Start, so set hybrisReady here rather than in
+		// runHybrisInit (sync.Mutex is not re-entrant).
+		if !b.hybrisReady && b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg) {
+			b.hybrisReady = true
+		}
+		if !b.hybrisReady {
+			return fmt.Errorf("native login completed but session-ready marker missing — hybris_fairplay_init may have failed silently")
+		}
+		b.emitFairPlayReady()
+	} else if !b.hybrisReady {
+		// Session-reuse path: spin hybris init in the background so Start()
+		// returns immediately and AAC playback works while hybris loads (~11 s).
+		// DialCBCS will wait on hybrisInitDone before opening a CBCS connection.
+		done := make(chan struct{})
+		b.hybrisInitDone = done
+		go func() {
+			defer close(done)
+			if b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg) {
+				b.mu.Lock()
+				b.hybrisReady = true
+				b.mu.Unlock()
+				b.emitFairPlayReady()
+			}
+		}()
 	}
 
 	return nil
+}
+
+// runHybrisInit initialises the hybris+Android FairPlay path and reports whether
+// FairPlay is ready. It is called either from Start (login flow, b.mu held) or
+// from a background goroutine (session reuse, b.mu not held), so it must not
+// touch b.mu or b.hybrisReady; the caller records the result.
+func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir string, cfg BackendConfig) bool {
+	// Guard: libhybris-core.so calls exit(1) if q.so is missing.
+	qso := filepath.Join(hybrisLinkerDir, "q.so")
+	if _, err := os.Stat(qso); err != nil {
+		log.Printf("[drm] hybris linker not found at %s — ALAC hybris path disabled", qso)
+		return false
+	}
+	if _, err := os.Stat(lib64Dir); err != nil {
+		log.Printf("[drm] lib64 dir not found at %s — ALAC hybris path disabled", lib64Dir)
+		return false
+	}
+
+	cLinker := C.CString(hybrisLinkerDir)
+	cLib64 := C.CString(lib64Dir)
+	hiRet := C.hybris_backend_init(cLinker, cLib64, nil)
+	C.free(unsafe.Pointer(cLinker))
+	C.free(unsafe.Pointer(cLib64))
+	if hiRet != 0 {
+		log.Printf("[drm] hybris_backend_init failed: ret=%d (ALAC will not work)", hiRet)
+		return false
+	}
+
+	// For session-reuse (no credentials): gate hybris_fairplay_init on the
+	// session-ready marker. The Android lib creates 4096-byte SQLite stub files
+	// during RequestContext::init, so a post-init size check always passes.
+	if cfg.Credentials.Email == "" {
+		markerPath := filepath.Join(baseDir, "session-ready")
+		if _, err := os.Stat(markerPath); err != nil {
+			log.Printf("[drm] hybris: session-ready marker absent — ALAC disabled (login required)")
+			_ = os.Remove(filepath.Join(baseDir, "MUSIC_TOKEN"))
+			return false
+		}
+	}
+
+	cBase := C.CString(baseDir)
+	cLib64b := C.CString(lib64Dir)
+	var cFPUser, cFPPass *C.char
+	if cfg.Credentials.Email != "" && cfg.Credentials.Password != "" {
+		cFPUser = C.CString(cfg.Credentials.Email)
+		cFPPass = C.CString(cfg.Credentials.Password)
+	}
+	cDevice := deviceInfoCString(baseDir)
+	defer C.free(unsafe.Pointer(cDevice))
+	fpRet := C.hybris_fairplay_init(cBase, cDevice, cLib64b, cFPUser, cFPPass, (C.drm_auth_callback_t)(C.adamplayBridgeAuth), b.authBox)
+	C.free(unsafe.Pointer(cBase))
+	C.free(unsafe.Pointer(cLib64b))
+	if cFPUser != nil {
+		C.free(unsafe.Pointer(cFPUser))
+		C.free(unsafe.Pointer(cFPPass))
+	}
+	if fpRet != 0 {
+		log.Printf("[drm] hybris_fairplay_init failed: ret=%d (ALAC will not work)", fpRet)
+		return false
+	}
+	_ = os.WriteFile(filepath.Join(baseDir, "session-ready"), []byte("1"), 0o600)
+	log.Printf("[drm] hybris: FairPlay ready via Android libraries (%s)", lib64Dir)
+	// enter() takes b.mu, so this waits until Start has returned.
+	go b.warmDefaultKeyContext()
+	return true
+}
+
+// emitState sends a DRMEvent snapshot onto the event channel (non-blocking).
+func (b *adamplayBackend) emitState(st DRMState, msg string) {
+	select {
+	case b.eventCh <- DRMEvent{Snapshot: DRMSnapshot{State: st, Timestamp: time.Now(), Message: msg}}:
+	default:
+	}
+}
+
+// emitFairPlayReady emits a FairPlayReady event after hybris succeeds.
+func (b *adamplayBackend) emitFairPlayReady() {
+	b.emitState(DRMState{
+		Process:  ProcessRunning,
+		Manager:  ManagerReady,
+		FairPlay: FairPlayReady,
+		Recovery: RecoveryIdle,
+	}, "hybris FairPlay ready")
 }
 
 // Authenticate ensures an authenticated DRM context exists
@@ -274,6 +411,72 @@ func (b *adamplayBackend) quiesce(timeout time.Duration) bool {
 	}
 }
 
+// RetryFairPlay is called when a fresh Media-User-Token arrives from the web
+// player while the backend is already running but hybris failed at Start time
+// (e.g. MUSIC_TOKEN was missing on eager-start). It writes the token to disk
+// and retries hybris_fairplay_init without a full Stop/Start cycle.
+// Implements the optional FairPlayRetrier interface checked by NoteWebSession.
+func (b *adamplayBackend) RetryFairPlay(mut string) {
+	b.mu.Lock()
+	if b.hybrisReady || !b.running || mut == "" {
+		b.mu.Unlock()
+		return
+	}
+	// If the background init goroutine is still running, let it finish first.
+	initDone := b.hybrisInitDone
+	b.mu.Unlock()
+
+	if initDone != nil {
+		select {
+		case <-initDone:
+		case <-time.After(30 * time.Second):
+		}
+		b.mu.Lock()
+		if b.hybrisReady {
+			b.mu.Unlock()
+			return
+		}
+		b.mu.Unlock()
+	}
+
+	b.mu.Lock()
+	baseDir := b.config.BaseDir
+	if baseDir == "" {
+		baseDir = filepath.Join(b.drmDir, "files")
+	}
+	b.mu.Unlock()
+
+	// A web MUT alone is not enough for getPersistentKey — that uses the
+	// reqCtx Apple ID session from mpl_db. Without a real session the retry
+	// would set hybrisReady=true while ALAC still fails with SVError: Invalid CKC.
+	markerPath := filepath.Join(baseDir, "session-ready")
+	if _, err := os.Stat(markerPath); err != nil {
+		log.Printf("[drm] RetryFairPlay: session-ready marker absent — skipping (login required for ALAC)")
+		return
+	}
+	tokenFile := filepath.Join(baseDir, "MUSIC_TOKEN")
+	if err := os.WriteFile(tokenFile, []byte(mut), 0o600); err == nil {
+		log.Printf("[drm] RetryFairPlay: wrote web MUT to MUSIC_TOKEN (%d bytes)", len(mut))
+	}
+	lib64Dir := filepath.Join(filepath.Dir(baseDir), "rootfs", "system", "lib64")
+	cBase := C.CString(baseDir)
+	cLib64 := C.CString(lib64Dir)
+	cDevice := deviceInfoCString(baseDir)
+	defer C.free(unsafe.Pointer(cDevice))
+	fpRet := C.hybris_fairplay_init(cBase, cDevice, cLib64, nil, nil, (C.drm_auth_callback_t)(C.adamplayBridgeAuth), b.authBox)
+	C.free(unsafe.Pointer(cBase))
+	C.free(unsafe.Pointer(cLib64))
+	if fpRet != 0 {
+		log.Printf("[drm] RetryFairPlay: hybris_fairplay_init still failed: ret=%d", fpRet)
+	} else {
+		b.mu.Lock()
+		b.hybrisReady = true
+		b.mu.Unlock()
+		b.emitFairPlayReady()
+		log.Printf("[drm] RetryFairPlay: FairPlay ready via web MUT")
+	}
+}
+
 // Stop shuts down the native DRM backend. New calls are refused at once; calls already
 // inside the C library get a bounded time to finish before it is torn down.
 func (b *adamplayBackend) Stop() error {
@@ -299,47 +502,7 @@ func (b *adamplayBackend) SetAuthSource(src AuthSource) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.authSrc = src
-}
-
-// Decrypt decrypts FairPlay-encrypted samples
-func (b *adamplayBackend) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
-	leave, err := b.enter(0)
-	if err != nil {
-		return DecryptResponse{}, err
-	}
-	defer leave()
-
-	// Open key context
-	cAssetID := C.CString(req.AdamID)
-	cMediaURI := C.CString(req.KeyURI)
-	kdCtx := C.drm_open_key_context(cAssetID, cMediaURI)
-	C.free(unsafe.Pointer(cAssetID))
-	C.free(unsafe.Pointer(cMediaURI))
-
-	if kdCtx == nil {
-		return DecryptResponse{}, fmt.Errorf("failed to open key context for asset %s", req.AdamID)
-	}
-	defer C.drm_close_key_context(kdCtx)
-
-	// Decrypt each sample
-	decrypted := make([][]byte, len(req.Samples))
-	for i, sample := range req.Samples {
-		if len(sample) == 0 {
-			continue // nothing to decrypt (and &sample[0] would panic)
-		}
-		cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
-		ret := C.drm_decrypt_sample(kdCtx, cSample, C.uint32_t(len(sample)))
-
-		if ret != 0 {
-			return DecryptResponse{}, fmt.Errorf("decryption failed for sample %d with code %d", i, ret)
-		}
-
-		decrypted[i] = sample
-	}
-
-	return DecryptResponse{
-		Samples: decrypted,
-	}, nil
+	b.authSrcV.Store(authSrcHolder{src})
 }
 
 // GetM3U8 returns the HLS URL for an asset
@@ -475,26 +638,23 @@ func (b *adamplayBackend) DecryptItunSamples(ctx context.Context, adamID uint64,
 // defaultKeyURI is the key every ALAC init segment names; its context is shared by all tracks.
 const defaultKeyURI = "skd://itunes.apple.com/P000000000/s1/e1"
 
-// warmDefaultKeyContext opens the shared default key context as soon as FairPlay is up.
-// The first open costs about 5 s inside the Android library; the library caches contexts
-// by (asset, URI), so doing it here means the first track's CBCS dial finds it instead of
-// paying that during playback startup. The shim keeps no per-asset cache, so the probe
-// context is closed straight away.
+// warmDefaultKeyContext opens the shared prefetch key context under adamID "0"
+// as soon as FairPlay is up, as the wrapper's refresh_decrypt_ctx() does. The
+// first call pays the ~5 s Android class loading, and getKdContext caches the
+// context, so segment 0 of every ALAC track decrypts without waiting.
 func (b *adamplayBackend) warmDefaultKeyContext() {
-	leave, err := b.enter(b.currentGen()) // waits for Start to release b.mu
+	leave, err := b.enter(b.currentGen())
 	if err != nil {
 		return
 	}
 	defer leave()
-	cAssetID := C.CString("0")
-	cMediaURI := C.CString(defaultKeyURI)
-	defer C.free(unsafe.Pointer(cAssetID))
-	defer C.free(unsafe.Pointer(cMediaURI))
+	cAdamID := C.CString("0")
+	cURI := C.CString(defaultKeyURI)
+	defer C.free(unsafe.Pointer(cAdamID))
+	defer C.free(unsafe.Pointer(cURI))
 	start := time.Now()
-	kc := C.drm_open_key_context(cAssetID, cMediaURI)
-	ok := kc != nil
-	C.drm_close_key_context(kc) // a probe only: nothing will ever use or free it otherwise
-	log.Printf("[drm] default key context warmed in %s (ok=%v)", time.Since(start).Round(time.Millisecond), ok)
+	ok := C.hybris_open_kd_ctx_from_uri(cAdamID, cURI, nil) != nil
+	log.Printf("[drm] FairPlay prefetch key context warmed in %s (ok=%v)", time.Since(start).Round(time.Millisecond), ok)
 }
 
 // InProcess marks DialCBCS connections as in-process pipes (see DRMManager.InProcess).
@@ -506,113 +666,73 @@ func (b *adamplayBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	client, server := net.Pipe()
 	gen := b.currentGen() // key contexts opened below belong to this run of the backend
 
-	// Start the CBCS server on the server side
+	b.mu.Lock()
+	hybrisReady := b.hybrisReady
+	initDone := b.hybrisInitDone
+	b.mu.Unlock()
+
+	// If hybris is still initialising in the background, wait for it before
+	// opening the connection. This is the one-time ~11 s Android library load;
+	// the user pressed play on a lossless track while the app was still starting.
+	if !hybrisReady && initDone != nil {
+		log.Printf("[drm] DialCBCS: hybris init in progress — waiting (up to 60s)")
+		select {
+		case <-initDone:
+		case <-time.After(60 * time.Second):
+			log.Printf("[drm] DialCBCS: hybris init wait timed out — proceeding without ALAC")
+		case <-ctx.Done():
+			server.Close()
+			return nil, ctx.Err()
+		}
+		b.mu.Lock()
+		hybrisReady = b.hybrisReady
+		b.mu.Unlock()
+	}
+
+	// ALAC is FairPlay-only: every key, the shared prefetch key included, is
+	// opened through getKdContext in libandroidappmusic.so exactly as the
+	// wrapper's handle() does, and samples go through the same NfcR call.
+	// There is no fallback; without hybris the key fails and nothing plays.
 	go func() {
 		defer server.Close()
-		// serveCBCS handles one key at a time, so only the current context is ever in
-		// use. Each is wiped and freed when the next key is selected or the session
-		// ends; otherwise every track left its plaintext content key in memory.
-		var cur C.drm_key_context_handle_t
-		defer func() { C.drm_close_key_context(cur) }()
-		err := serveCBCS(ctx, server, func(adamID, uri string) (decrypt func([]byte) error, err error) {
-			log.Printf("[drm] DialCBCS: opening key context for adamID=%s uri=%s", adamID, uri)
-
-			// Parse key URI to extract kidBase64 and uriPrefix
-			// Format: skd://itunes.apple.com/p1484937438/c6,kidBase64
-			log.Printf("[drm] DialCBCS: raw key URI=%s", uri)
-			commaIdx := strings.LastIndex(uri, ",")
-			var uriPrefix, kidBase64 string
-			if commaIdx >= 0 {
-				uriPrefix = uri[:commaIdx]
-				kidBase64 = uri[commaIdx+1:]
-				log.Printf("[drm] DialCBCS: parsed uriPrefix=%s kidBase64=%s", uriPrefix, kidBase64)
-			} else {
-				uriPrefix = uri
-				kidBase64 = ""
-				log.Printf("[drm] DialCBCS: no comma in URI, using full URI as prefix")
+		err := serveCBCS(ctx, server, func(adamID, uri string) (func([]byte) error, error) {
+			if !hybrisReady {
+				return nil, fmt.Errorf("FairPlay is not ready: cannot open ALAC key %s", uri)
 			}
-
-			// Fetch license if we have kid info
-			// For CBCS (skd://...), the key URI is used directly with the Widevine endpoint
-			var fetchedKeyAndIV aacstream.KeyAndIV
-			if kidBase64 != "" && adamID != "0" {
-				log.Printf("[drm] DialCBCS: fetching license for adamID=%s kid=%s uriPrefix=%s", adamID, kidBase64, uriPrefix)
-				// Get tokens from account info
-				account, accErr := b.GetAccount(ctx)
-				if accErr != nil {
-					log.Printf("[drm] DialCBCS: failed to get account: %v", accErr)
-				} else {
-					// Fetch license using aacstream's AcquireKey.
-					// token = developer JWT (Authorization: Bearer), mutoken = user music token.
-					devTok := b.devTok.get(account.DevToken, ampapi.GetToken)
-					fetchedKeyAndIV, err = aacstream.AcquireKey(ctx, adamID, kidBase64, uriPrefix, devTok, account.MusicToken, false)
-					if err != nil {
-						log.Printf("[drm] DialCBCS: failed to fetch license: %v", err)
-					} else {
-						log.Printf("[drm] DialCBCS: license fetched (%d-byte key, IV=%02x%02x%02x%02x..., KID=%02x%02x%02x%02x...)",
-							len(fetchedKeyAndIV.Key),
-							fetchedKeyAndIV.IV[0], fetchedKeyAndIV.IV[1], fetchedKeyAndIV.IV[2], fetchedKeyAndIV.IV[3],
-							fetchedKeyAndIV.KID[0], fetchedKeyAndIV.KID[1], fetchedKeyAndIV.KID[2], fetchedKeyAndIV.KID[3])
-					}
-				}
+			leave, err := b.enter(gen)
+			if err != nil {
+				return nil, err
 			}
-
-			leave, enterErr := b.enter(gen)
-			if enterErr != nil {
-				return nil, enterErr
-			}
-			C.drm_close_key_context(cur) // previous key is finished with
-			cur = nil
-			cAssetID := C.CString(adamID)
-			cMediaURI := C.CString(uri)
-			kdCtx := C.drm_open_key_context(cAssetID, cMediaURI)
-			C.free(unsafe.Pointer(cAssetID))
-			C.free(unsafe.Pointer(cMediaURI))
-
-			if kdCtx == nil {
-				leave()
-				log.Printf("[drm] DialCBCS: drm_open_key_context returned NULL for adamID=%s", adamID)
-				return nil, fmt.Errorf("failed to open key context for asset %s", adamID)
-			}
-			log.Printf("[drm] DialCBCS: key context opened successfully for adamID=%s", adamID)
-
-			// Set the fetched key. If no key was fetched, the context remains uninitialized
-			// and decryption will fail — no default key fallback.
-			if len(fetchedKeyAndIV.Key) == 16 {
-				// The sample-derived IV path uses this as its base value.
-				cKey := (*C.uint8_t)(unsafe.Pointer(&fetchedKeyAndIV.Key[0]))
-				cIV := (*C.uint8_t)(unsafe.Pointer(&fetchedKeyAndIV.IV[0]))
-				if ret := C.drm_set_key_context_key(kdCtx, cKey, cIV); ret != 0 {
-					log.Printf("[drm] DialCBCS: failed to set key context key: ret=%d", ret)
-				} else {
-					log.Printf("[drm] DialCBCS: key context key set successfully (IV=%02x%02x%02x%02x...)",
-						fetchedKeyAndIV.IV[0], fetchedKeyAndIV.IV[1], fetchedKeyAndIV.IV[2], fetchedKeyAndIV.IV[3])
-				}
-			} else if kidBase64 != "" {
-				// Key was expected but not fetched — log warning
-				log.Printf("[drm] DialCBCS: WARN: no key fetched for adamID=%s kid=%s", adamID, kidBase64)
-			}
-			cur = kdCtx
+			cAdamID := C.CString(adamID)
+			cURI := C.CString(uri)
+			// Owned by libandroidappmusic.so (cached per session); never freed here.
+			var epoch C.uint
+			hCtx := C.hybris_open_kd_ctx_from_uri(cAdamID, cURI, &epoch)
+			C.free(unsafe.Pointer(cAdamID))
+			C.free(unsafe.Pointer(cURI))
 			leave()
-
+			if hCtx == nil {
+				return nil, fmt.Errorf("FairPlay key context failed for adamID=%s uri=%s", adamID, uri)
+			}
+			vlog.Printf("[drm] DialCBCS: FairPlay key context opened adamID=%s uri=%s", adamID, uri)
 			return func(sample []byte) error {
-				// CBCS pattern: only whole 16-byte blocks are encrypted.
-				// Apple Music CBCS uses a fixed zero IV per key context —
-				// confirmed by Frida T4 test (T4_ivIsZero=true).
-				// drm_decrypt_sample_at(ctx, data, n, 0) computes
-				// derive_iv(zeroBaseIV, 0) = zeros, matching the correct IV.
-				if n := len(sample) &^ 0xf; n > 0 {
-					// kdCtx is only valid for the run that created it: refuse after a Stop
-					// or restart instead of handing a dangling pointer to the library.
-					leaveDec, err := b.enter(gen)
-					if err != nil {
-						return err
-					}
-					defer leaveDec()
-					cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
-					if ret := C.drm_decrypt_sample_at(kdCtx, cSample, C.uint32_t(n), 0); ret != 0 {
-						return fmt.Errorf("drm_decrypt_sample_at failed (size=%d): ret=%d", n, ret)
-					}
+				if len(sample) < 16 {
+					return nil
+				}
+				leaveDec, err := b.enter(gen)
+				if err != nil {
+					return err
+				}
+				defer leaveDec()
+				cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
+				switch ret := C.hybris_backend_decrypt(hCtx, epoch, cSample, C.uint32_t(len(sample))); ret {
+				case 0:
+				case C.HYBRIS_ERR_STALE_CONTEXT:
+					// A lease refresh freed the context; failing here makes the
+					// streaming loop reconnect and open the key again.
+					return fmt.Errorf("FairPlay key context invalidated by a lease refresh")
+				default:
+					return fmt.Errorf("FairPlay decrypt failed (size=%d): ret=%d", len(sample), ret)
 				}
 				return nil
 			}, nil
@@ -641,10 +761,21 @@ func (b *adamplayBackend) stateLoop() {
 		// Parse state string and emit event
 		result := ParseStateFile(state)
 
+		// The C library emits RUNNING when the AAC path is ready, and RUNNING also
+		// maps to FairPlayReady in ParseStateFile. But FairPlay (ALAC/CBCS) requires
+		// hybris_fairplay_init to have succeeded. Cap FairPlay at FairPlayUnknown
+		// when hybris didn't initialise, regardless of what the state string says.
+		fpState := result.FairPlay
+		b.mu.Lock()
+		if !b.hybrisReady && fpState == FairPlayReady {
+			fpState = FairPlayUnknown
+		}
+		b.mu.Unlock()
+
 		snap := DRMSnapshot{
 			State: DRMState{
 				Process:        result.Process,
-				FairPlay:       result.FairPlay,
+				FairPlay:       fpState,
 				Authentication: result.Auth,
 				Recovery:       result.Recovery,
 			},
@@ -660,4 +791,47 @@ func (b *adamplayBackend) stateLoop() {
 			// Event channel full, ignore
 		}
 	}
+}
+
+// deviceInfoCString returns this install's device string for hybris_fairplay_init
+// (caller frees). If it cannot be stored, the wrapper's shared default is used.
+func deviceInfoCString(baseDir string) *C.char {
+	info, err := DeviceInfo(baseDir)
+	if err != nil {
+		log.Printf("[drm] device ID unavailable (%v); using the shared default", err)
+	}
+	return C.CString(info)
+}
+
+type authSrcHolder struct{ src AuthSource }
+
+// twoFactorTimeout bounds how long sign-in waits for the code the user types in.
+const twoFactorTimeout = 5 * time.Minute
+
+// answerChallenge is called (via adamplayBridgeAuth) when Apple's sign-in needs
+// input. For a verification code it raises a two-factor challenge, which the
+// Settings sign-in form shows as a code field, and blocks until the user submits
+// it. Returns "" when nothing was entered, which fails that sign-in attempt.
+func (b *adamplayBackend) answerChallenge(kind string) string {
+	if kind != "2fa" {
+		return ""
+	}
+	h, _ := b.authSrcV.Load().(authSrcHolder)
+	if h.src == nil {
+		log.Printf("[drm] Apple asked for a verification code but no sign-in form is connected")
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), twoFactorTimeout)
+	defer cancel()
+	code, err := h.src.Challenge(ctx, AuthChallenge{
+		Type:        ChallengeTwoFactor,
+		Title:       "Apple ID verification code",
+		Description: "Enter the 6-digit code sent to your Apple devices.",
+		Metadata:    map[string]string{"issuer": "Apple ID"},
+	})
+	if err != nil {
+		log.Printf("[drm] verification code not entered: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(code)
 }

@@ -136,13 +136,32 @@ This installs to `~/.local/lib/adam` and adds a launcher to `~/.local/bin`. A de
 **Other install options:**
 
 ```bash
-./adam.run --system      # install system-wide to /opt/ (needs sudo)
-./adam.run --force       # overwrite an existing installation
-./adam.run --uninstall   # remove the installation
-./adam.run --help        # show all options
+./adam.run --system       # install system-wide to /opt/ (needs sudo)
+./adam.run --force        # overwrite an existing installation
+./adam.run --no-lossless  # skip the FairPlay library download (lossless stays off)
+./adam.run --uninstall    # remove the installation
+./adam.run --help         # show all options
 ```
 
 After install, launch from your app menu or run `adam` in a terminal.
+
+### Lossless (ALAC) and the FairPlay libraries
+
+Lossless and hi-res playback decrypt through Apple's own Android FairPlay libraries, which Adam
+is not allowed to redistribute. They are downloaded on your machine instead, so Adam itself stays
+open source:
+
+- The `.run` installer downloads them at the end of a user install (~65 MB).
+- The AppImage, a `--system` install and the Flatpak download them in the background on first launch;
+  lossless switches on by itself once they are in place (at the next pause if something is playing).
+- They come from the [wrapper project](https://github.com/WorldObservationLog/wrapper), with
+  [a fork](https://github.com/silentone12725/wrapper) as fallback, pinned to fixed commits. Every file
+  is checked against the SHA-256 list in `drm/fairplay-libs.lock`; a file that does not match is refused.
+- They go to `~/.config/adam/drm/rootfs/system/lib64`. To retry or repair, run the bundled
+  script: `sh ~/.local/lib/adam/resources/fetch-fairplay-libs.sh` (adjust the path for `--system`
+  installs or an extracted AppImage).
+
+Without them everything else works and playback uses AAC 256 kbps.
 
 ### Option B — AppImage (162 MB, portable)
 
@@ -186,7 +205,7 @@ Windows integration:
 - **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `adam://` link handler.
 - **Discord Rich Presence** over the Windows named pipe.
 
-Not available on Windows yet: Cavern (Atmos JOC) rendering and the bundled FFmpeg (music-video remux and export use an `ffmpeg.exe` on `PATH` if present).
+Not available on Windows yet: lossless/ALAC (Apple's FairPlay libraries only run on Linux, so Windows plays AAC 256 kbps), Cavern (Atmos JOC) rendering and the bundled FFmpeg (music-video remux and export use an `ffmpeg.exe` on `PATH` if present).
 
 ### GNOME
 
@@ -235,6 +254,13 @@ sudo pacman -S vlc nodejs npm
 sudo apt install vlc nodejs npm
 ```
 
+**Lossless in development** — fetch Apple's FairPlay libraries into the repo's rootfs once:
+
+```bash
+make -C drm android-stubs
+scripts/fetch-fairplay-libs.sh --dest drm/rootfs/system/lib64 --lock drm/fairplay-libs.lock --stubs drm/stubs/out
+```
+
 **Rebuild the Go engine:**
 
 ```bash
@@ -251,7 +277,7 @@ cp ../drm/libdrm_client.so ../electron/dist/resources/
 ## Build
 
 ```bash
-make -C drm libdrm_client.so   # DRM client library
+make -C drm                    # DRM library + Android stub libraries
 cd electron
 bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
@@ -319,14 +345,18 @@ adam/
 │   │   ├── autoeq/ ffmpeg/ cavern/   Headphone EQ and binaural (Atmos) rendering
 │   │   └── archtest/          Import-boundary tests
 │   └── utils/                 aacstream, alacstream, ampapi, lyrics, manifest, config
-├── drm/                       DRM client (AES key contexts; Widevine keys are acquired in Go)
-│   ├── drm_client.c/.h, drm_linux.c   C client library (libdrm_client.so)
+├── drm/                       DRM library (libdrm_client.so)
+│   ├── drm_linux.c            Session lifecycle and account files
+│   ├── drm_hybris.c           Loads Apple's Android FairPlay libraries through libhybris
+│   ├── native/                Vendored wrapper: FairPlay login, lease, key contexts, decrypt
+│   ├── stubs/                 Stand-ins for Android libraries Apple's code links but never calls
+│   ├── fairplay-libs.lock     Pinned sources + SHA-256 of Apple's libraries (fetched, never shipped)
 │   └── files/                 Your Apple session (never packaged or committed)
 ├── flatpak/                   Flatpak manifest, desktop entry, metainfo and icon
 ├── third_party/ffmpeg/        Prebuilt minimal FFmpeg (LGPL, Git LFS) bundled into every package
 ├── scripts/                   build-installer.sh, build-flatpak.sh, build-engine.sh,
 │                              build-renderer.sh, bundle-vlc.sh, build-ffmpeg.sh, clean.sh,
-│                              install-cavern.sh
+│                              install-cavern.sh, fetch-fairplay-libs.sh
 ├── verification/              API schema, QA console, benchmark and test harnesses
 ├── releases/                  Release notes (one file per version)
 ├── assets/                    Screenshots and tray icon
@@ -335,7 +365,7 @@ adam/
 └── go.work                    Go workspace (engine module)
 ```
 
-How the pieces fit: the Electron app loads music.apple.com and injects the renderer bundles. The renderer asks the engine for a session per track. The engine fetches the stream, decrypts it with the DRM library, and either serves AAC to a MediaSource in the page or plays lossless audio through libvlc inside the engine.
+How the pieces fit: the Electron app loads music.apple.com and injects the renderer bundles. The renderer asks the engine for a session per track. The engine fetches the stream and either serves AAC to a MediaSource in the page, or decrypts the lossless stream fragment by fragment through Apple's FairPlay code (loaded by the DRM library) and plays it through libvlc inside the engine.
 
 ## Changelog
 
@@ -360,7 +390,6 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 **Electron app**
 - [mpris-service](https://github.com/dbkr/mpris-service) — MPRIS2 over D-Bus
-- [MP4Box.js](https://github.com/gpac/mp4box.js) — MP4 handling in the renderer
 - [esbuild](https://esbuild.github.io) — renderer bundles
 - [electron-builder](https://www.electron.build) — AppImage and package layout
 - [Last.fm](https://www.last.fm/api) and [ListenBrainz](https://listenbrainz.readthedocs.io) — scrobbling APIs

@@ -28,7 +28,7 @@ export function removeSchemeAssociations(text, desktopId, schemes) {
     const wanted = new Set(schemes.map(s => `x-scheme-handler/${s}`));
     const out = [];
     for (const line of text.split('\n')) {
-        const m = /^([^=#\[][^=]*)=(.*)$/.exec(line);
+        const m = /^([^=#[][^=]*)=(.*)$/.exec(line);
         if (!m || !wanted.has(m[1].trim())) { out.push(line); continue; }
         const kept = m[2].split(';').map(s => s.trim()).filter(s => s && s !== desktopId);
         if (kept.length) out.push(`${m[1]}=${kept.join(';')};`);

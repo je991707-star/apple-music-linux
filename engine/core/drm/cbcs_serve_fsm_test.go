@@ -28,7 +28,6 @@ func rec(adam, uri string, samples ...[]byte) []byte {
 	b.WriteString(adam)
 	b.WriteByte(byte(len(uri)))
 	b.WriteString(uri)
-	b.WriteByte(0) // iv: empty
 	for _, s := range samples {
 		var n [4]byte
 		binary.LittleEndian.PutUint32(n[:], uint32(len(s)))
@@ -39,7 +38,7 @@ func rec(adam, uri string, samples ...[]byte) []byte {
 	return b.Bytes()
 }
 
-func run(t *testing.T, in []byte, openKey func(string, string, []byte) (func([]byte) error, error)) (*pipeConn, error) {
+func run(t *testing.T, in []byte, openKey func(string, string) (func([]byte) error, error)) (*pipeConn, error) {
 	t.Helper()
 	c := &pipeConn{r: bytes.NewReader(in)}
 	done := make(chan error, 1)
@@ -53,7 +52,7 @@ func run(t *testing.T, in []byte, openKey func(string, string, []byte) (func([]b
 	}
 }
 
-func xorKey(adam, uri string, _ []byte) (func([]byte) error, error) {
+func xorKey(adam, uri string) (func([]byte) error, error) {
 	return func(s []byte) error {
 		for i := range s {
 			s[i] ^= 0xFF
@@ -65,9 +64,9 @@ func xorKey(adam, uri string, _ []byte) (func([]byte) error, error) {
 func TestCBCSKeySwitchKeepsTheConnectionAndUsesEachKey(t *testing.T) {
 	var opened []string
 	in := append(rec("111", "uri-a", []byte{1, 2, 3}), rec("222", "uri-b", []byte{9})...)
-	c, err := run(t, in, func(adam, uri string, iv []byte) (func([]byte) error, error) {
+	c, err := run(t, in, func(adam, uri string) (func([]byte) error, error) {
 		opened = append(opened, adam)
-		return xorKey(adam, uri, iv)
+		return xorKey(adam, uri)
 	})
 	if err != nil {
 		t.Fatalf("clean stream ended with %v", err)
@@ -91,7 +90,7 @@ func TestCBCSEmptyAdamIDEndsTheSession(t *testing.T) {
 // sample's size header would. Stopping anywhere else is a truncated record and must be an error.
 func TestCBCSTruncatedInputIsAnErrorNotACleanEnd(t *testing.T) {
 	good := rec("111", "uri", []byte{1, 2, 3, 4})
-	const afterHeader, afterSample = 9, 17 // offsets of the two legitimate boundaries inside this record
+	const afterHeader, afterSample = 8, 16 // offsets of the two legitimate boundaries inside this record
 	for cut := 1; cut < len(good); cut++ {
 		_, err := run(t, good[:cut], xorKey)
 		legal := cut == afterHeader || cut == afterSample
@@ -112,7 +111,7 @@ func TestCBCSTruncatedInputIsAnErrorNotACleanEnd(t *testing.T) {
 
 func TestCBCSOpenKeyFailureEndsTheSession(t *testing.T) {
 	boom := errors.New("no key")
-	_, err := run(t, rec("1", "u", []byte{1}), func(string, string, []byte) (func([]byte) error, error) { return nil, boom })
+	_, err := run(t, rec("1", "u", []byte{1}), func(string, string) (func([]byte) error, error) { return nil, boom })
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v, want the open error", err)
 	}

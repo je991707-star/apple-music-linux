@@ -158,5 +158,11 @@ export function createEngineLifecycle({ prepare, spawn, onOutput = () => {}, onS
             try { proc.kill('SIGTERM'); } catch { done(); }
         });
     }
-    return { start, stop };
+    // Restart a running engine (e.g. so it picks up newly installed libraries): the
+    // exit handler's normal restart path brings it back.
+    function reload() {
+        if (quitting() || !child) return;
+        try { child.kill('SIGTERM'); } catch {}
+    }
+    return { start, stop, reload };
 }

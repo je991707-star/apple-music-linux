@@ -47,21 +47,12 @@ type logoutStub struct {
 
 func (logoutStub) Stop() error { return nil }
 
-func TestLogoutReleasesRecoveryWaitersAndToleratesNilSink(t *testing.T) {
+func TestLogoutToleratesNilSink(t *testing.T) {
 	stub := &logoutStub{crashStub{events: make(chan DRMEvent)}}
 	m := NewDRMManager(stub, NewSessionManager(t.TempDir()), nil, BackendConfig{}, DefaultRestartPolicy)
 	m.mergeAndEmit(DRMSnapshot{State: DRMState{Recovery: RecoveryRefreshing}})
-	if active, _ := m.recoveryActive(); !active {
-		t.Fatal("setup: recovery not active")
-	}
-	_, gate := m.recoveryActive()
-	if err := m.Logout(context.Background()); err != nil { // nil sink must not panic
+	if err := m.Logout(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	select {
-	case <-gate:
-	case <-time.After(time.Second):
-		t.Fatal("Decrypt waiters stay parked after logout")
 	}
 }
 

@@ -278,24 +278,3 @@ func TestArtworkURL_DefaultSize(t *testing.T) {
 }
 
 // ── formatDuration ────────────────────────────────────────────────────────────
-
-func TestFormatDuration(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		ms   int
-		want string
-	}{
-		{0, "0:00"},
-		{60000, "1:00"},
-		{90500, "1:30"},
-		{3600000, "1:00:00"},
-		{3661000, "1:01:01"},
-		{201569, "3:21"}, // ALAC track duration
-	}
-	for _, c := range cases {
-		got := formatDuration(c.ms)
-		if got != c.want {
-			t.Errorf("formatDuration(%d) = %q want %q", c.ms, got, c.want)
-		}
-	}
-}

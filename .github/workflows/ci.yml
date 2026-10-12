@@ -29,7 +29,11 @@ jobs:
           cache-dependency-path: engine/go.sum
       - name: Install libvlc headers
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc-plugin-base
+      - name: gofmt
+        run: test -z "$(gofmt -s -l . | tee /dev/stderr)"
       - run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
       - run: go test ./...
 
   electron:
@@ -48,11 +52,31 @@ jobs:
           cache: npm
           cache-dependency-path: electron/package-lock.json
       - run: npm ci --ignore-scripts
+      - run: npm run lint
       - name: Renderer bundles are up to date
         run: |
           npm run build:engine
           git diff --exit-code -- . ':!dist'
       - run: node --test test/*.test.mjs test/engine/*.test.mjs
+
+  style:
+    name: C format and shell syntax
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: clang-format (same version as .clang-format was applied with)
+        run: |
+          pip install --user clang-format==23.1.1
+          export PATH="$HOME/.local/bin:$PATH"
+          clang-format --version
+          make -C drm format-check
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh electron/build.sh; do
+            case "$(head -1 "$f")" in *bash*) bash -n "$f" ;; *) sh -n "$f" ;; esac
+          done
 
   windows:
     name: Windows build

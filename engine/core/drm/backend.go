@@ -71,7 +71,6 @@ type DRMBackend interface {
 	SetAuthSource(AuthSource)
 
 	// DRM operations — transport details invisible to callers.
-	Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error)
 	GetM3U8(ctx context.Context, adamID uint64) (string, error)
 	GetAccount(ctx context.Context) (AccountInfo, error)
 	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
@@ -110,6 +109,13 @@ type BackendConfig struct {
 	// snapshot. The account JWT carries no subscription tier, so hi-res is
 	// assumed available once FairPlay is ready unless the embedder opts out.
 	DisableHiRes bool
+
+	// GetMusicToken, when set, is called during Start() to obtain the
+	// Media-User-Token from the web player session. If the MUSIC_TOKEN file
+	// is missing from BaseDir, the returned value is written there so the
+	// Android library has a fallback when createMusicToken() fails (which
+	// happens after a sign-out clears mpl_db credentials).
+	GetMusicToken func() string
 }
 
 // ─── Authentication challenge model ──────────────────────────────────────────
@@ -129,6 +135,9 @@ type AuthSource interface {
 // are handled by adding new AuthChallengeType values and Metadata keys
 // without changing the interface.
 type AuthChallenge struct {
+	// ID numbers each announced challenge, so a client can tell Apple asking
+	// again (a wrong code) from the same challenge repeated in later snapshots.
+	ID          uint64            `json:"id,omitempty"`
 	Type        AuthChallengeType `json:"type"`
 	Title       string            `json:"title"`
 	Description string            `json:"description,omitempty"`

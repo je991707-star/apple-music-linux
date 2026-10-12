@@ -325,7 +325,373 @@
     return PLAY_TRANSITIONS[prev]?.includes(next) ?? false;
   }
 
+  // src/engine/verification-code.js
+  var CODE_LENGTH = 6;
+  function normalizeCode(text) {
+    return String(text ?? "").replace(/\D/g, "").slice(0, CODE_LENGTH);
+  }
+  function spreadDigits(current, index, text) {
+    const digits = normalizeCode(text);
+    const next = current.slice();
+    for (let i = 0; i < digits.length && index + i < CODE_LENGTH; i++) next[index + i] = digits[i];
+    const focus = Math.min(index + digits.length, CODE_LENGTH - 1);
+    return { digits: next, focus };
+  }
+  function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null }) {
+    const st = snap?.state ?? {};
+    if (st.fairplay === "ready" || snap?.capabilities?.cbcs === true || st.authentication === "logged_in") {
+      return open ? "close" : "none";
+    }
+    const ch = snap?.challenge;
+    if (ch?.type === "two_factor") {
+      if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "code";
+      if (view !== "code") return "code";
+      if (submittedId != null && ch.id !== submittedId) return "retry";
+      return "none";
+    }
+    if (st.authentication === "failed" && open) return "failed";
+    return "none";
+  }
+
+  // src/engine/account-sheet.js
+  var ACCENT = "#fc3c44";
+  var STYLE = `
+#adam-account{width:380px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:0;border:0;border-radius:12px;
+  background:rgba(43,43,45,.97);color:rgba(255,255,255,.88);overflow:hidden;
+  box-shadow:0 0 0 .5px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.08) inset,0 22px 70px rgba(0,0,0,.55);
+  font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+#adam-account[open]{animation:adamSheetIn .2s ease-out}
+#adam-account::backdrop{background:rgba(0,0,0,.32)}
+#adam-account .body{padding:22px 22px 18px;display:flex;flex-direction:column;align-items:center;text-align:center}
+#adam-account .app-icon{width:56px;height:56px;margin-bottom:12px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.35))}
+#adam-account h1{margin:0;font:600 15px/1.3 -apple-system,BlinkMacSystemFont,"SF Pro Display",system-ui,sans-serif;color:#fff}
+#adam-account .sub{margin:4px 0 16px;max-width:300px;font-size:12px;color:rgba(235,235,245,.6)}
+#adam-account .group{align-self:stretch;border-radius:7px;background:rgba(0,0,0,.22);
+  box-shadow:0 0 0 .5px rgba(255,255,255,.14) inset;text-align:left;overflow:hidden}
+#adam-account .group input{display:block;width:100%;box-sizing:border-box;height:30px;padding:0 10px;border:0;margin:0;
+  background:transparent;color:#fff;font:13px -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;outline:none}
+#adam-account .group .pw{position:relative;border-top:.5px solid rgba(255,255,255,.12)}
+#adam-account .group .pw input{padding-right:34px}
+#adam-account .group button.eye{position:absolute;top:3px;right:4px;min-width:0;width:24px;height:24px;padding:0;border-radius:5px;
+  background:transparent;box-shadow:none;color:rgba(235,235,245,.45)}
+#adam-account .group button.eye:hover{color:rgba(235,235,245,.8)}
+#adam-account .group button.eye[aria-pressed="true"]{color:${ACCENT}}
+#adam-account .group button.eye svg{width:16px;height:16px}
+#adam-account .group input::placeholder{color:rgba(235,235,245,.3)}
+#adam-account .group input:disabled{color:rgba(255,255,255,.45)}
+#adam-account .note{align-self:stretch;margin:8px 2px 0;font-size:11px;color:rgba(235,235,245,.38);text-align:left}
+#adam-account .msg{align-self:stretch;min-height:16px;margin:8px 0 0;font-size:12px;color:rgba(235,235,245,.6)}
+#adam-account .msg.err{color:#ff6961}
+#adam-account .digits{display:flex;gap:7px;align-items:center;justify-content:center;margin:2px 0 0}
+#adam-account .digits .sep{width:8px;height:1px;background:rgba(255,255,255,.25);margin:0 2px}
+#adam-account .digits input{width:38px;height:46px;box-sizing:border-box;padding:0;border:0;border-radius:7px;text-align:center;
+  background:rgba(0,0,0,.22);box-shadow:0 0 0 .5px rgba(255,255,255,.14) inset;color:#fff;caret-color:${ACCENT};
+  font:500 22px/1 -apple-system,BlinkMacSystemFont,"SF Pro Rounded","SF Pro Display",system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;outline:none}
+#adam-account .digits input:disabled{opacity:.55}
+#adam-account.shake .digits{animation:adamShake .4s}
+#adam-account .bar{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 14px;
+  border-top:.5px solid rgba(255,255,255,.08);background:rgba(255,255,255,.02)}
+#adam-account button{min-width:76px;height:24px;padding:0 12px;border:0;border-radius:6px;cursor:default;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  font:13px -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color:#fff;
+  background:rgba(255,255,255,.14);box-shadow:0 .5px 0 rgba(255,255,255,.08) inset,0 1px 1.5px rgba(0,0,0,.25)}
+#adam-account button.primary{background:${ACCENT};box-shadow:0 .5px 0 rgba(255,255,255,.25) inset,0 1px 1.5px rgba(0,0,0,.3)}
+#adam-account button:disabled{opacity:.45}
+#adam-account button{outline:none}
+#adam-account .spin{width:11px;height:11px;border-radius:50%;border:1.5px solid rgba(255,255,255,.35);border-top-color:#fff;
+  animation:adamSpin .8s linear infinite}
+@keyframes adamSheetIn{from{opacity:0;transform:translateY(-8px) scale(.98)}}
+@keyframes adamShake{0%,100%{transform:none}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
+@keyframes adamSpin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){#adam-account[open],#adam-account.shake .digits,#adam-account .spin{animation:none}}
+`;
+  var APP_ICON = `<svg class="app-icon" viewBox="0 0 56 56" aria-hidden="true">
+<defs><linearGradient id="adamIconBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb5c74"/><stop offset="1" stop-color="#fa233b"/></linearGradient></defs>
+<rect width="56" height="56" rx="12.5" fill="url(#adamIconBg)"/>
+<path fill="#fff" d="M37.6 13.2v20.6c0 2.9-2.1 5-5 5.4-2.4.3-4.3-1-4.3-3.1 0-1.9 1.4-3.3 3.6-3.8l2.4-.5c.8-.2 1.2-.7 1.2-1.5V20.4l-12 2.5v14.6c0 2.9-2.1 5-5 5.4-2.4.3-4.3-1-4.3-3.1 0-1.9 1.4-3.3 3.6-3.8l2.4-.5c.8-.2 1.2-.7 1.2-1.5V18.2c0-1 .6-1.6 1.6-1.8l13.1-2.8c.9-.2 1.5.4 1.5 1.3z"/>
+</svg>`;
+  var EYE = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/></svg>`;
+  var EYE_SLASH = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/><path d="M2.5 2.5l11 11"/></svg>`;
+  var REVEAL_MS = 8e3;
+  function el(doc, tag, props = {}, ...children) {
+    const n = doc.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === "class") n.className = v;
+      else if (k in n) n[k] = v;
+      else n.setAttribute(k, v);
+    }
+    n.append(...children);
+    return n;
+  }
+  function createAccountSheet({ signIn, submitCode, onDone = () => {
+  }, doc = globalThis.document }) {
+    let dlg = null, view = null, busy = false;
+    let challengeId = null, submittedId = null, dismissedId = null;
+    let inputs = [], msg = null, primary = null;
+    let hidePassword = () => {
+    };
+    function ensureDialog() {
+      if (dlg) return dlg;
+      if (!doc.getElementById("adam-account-style")) {
+        doc.head.appendChild(el(doc, "style", { id: "adam-account-style", textContent: STYLE }));
+      }
+      dlg = el(doc, "dialog", { id: "adam-account", "aria-labelledby": "adam-account-title" });
+      dlg.addEventListener("cancel", (e) => {
+        e.preventDefault();
+        cancel();
+      });
+      doc.body.appendChild(dlg);
+      return dlg;
+    }
+    function setMessage(text, isError = false) {
+      if (!msg) return;
+      msg.textContent = text;
+      msg.className = isError ? "msg err" : "msg";
+    }
+    function setBusy(on, label) {
+      busy = on;
+      for (const i of inputs) i.disabled = on;
+      if (!primary) return;
+      primary.disabled = on || !ready();
+      primary.replaceChildren(...on ? [el(doc, "span", { class: "spin" }), label] : [primary.dataset.label]);
+    }
+    function ready() {
+      if (view === "signin") return inputs[0]?.value.trim() && inputs[1]?.value;
+      return inputs.map((i) => i.value).join("").length === CODE_LENGTH;
+    }
+    function render(header, content, buttons) {
+      ensureDialog();
+      const body = el(doc, "div", { class: "body" });
+      body.insertAdjacentHTML("beforeend", APP_ICON);
+      body.append(...header, ...content);
+      dlg.replaceChildren(body, el(doc, "div", { class: "bar" }, ...buttons));
+      if (!dlg.open) dlg.showModal();
+    }
+    function button(label, { isPrimary = false, onClick }) {
+      const b = el(doc, "button", { type: "button", class: isPrimary ? "primary" : "" }, label);
+      b.dataset.label = label;
+      b.addEventListener("click", onClick);
+      return b;
+    }
+    function showSignIn(error = "") {
+      view = "signin";
+      busy = false;
+      const email = el(doc, "input", { type: "email", placeholder: "Email or Phone Number", autocomplete: "username", spellcheck: false });
+      const pass = el(doc, "input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
+      inputs = [email, pass];
+      const eye = el(doc, "button", { type: "button", class: "eye", "aria-label": "Show password", "aria-pressed": "false" });
+      let revealTimer = null;
+      const reveal = (on) => {
+        clearTimeout(revealTimer);
+        pass.type = on ? "text" : "password";
+        eye.setAttribute("aria-pressed", String(on));
+        eye.setAttribute("aria-label", on ? "Hide password" : "Show password");
+        eye.innerHTML = on ? EYE_SLASH : EYE;
+        if (on) revealTimer = setTimeout(() => reveal(false), REVEAL_MS);
+      };
+      reveal(false);
+      eye.addEventListener("mousedown", (e) => e.preventDefault());
+      eye.addEventListener("click", () => reveal(pass.type === "password"));
+      hidePassword = () => reveal(false);
+      msg = el(doc, "div", { class: "msg", "aria-live": "polite" });
+      primary = button("Sign In", { isPrimary: true, onClick: submitSignIn });
+      render(
+        [
+          el(doc, "h1", { id: "adam-account-title" }, "Sign in with your Apple Account"),
+          el(doc, "div", { class: "sub" }, "Lossless and Hi-Res Lossless use Apple\u2019s FairPlay, which needs its own sign-in.")
+        ],
+        [
+          el(doc, "div", { class: "group" }, email, el(doc, "div", { class: "pw" }, pass, eye)),
+          el(doc, "div", { class: "note" }, "Your password is sent only to Apple and kept encrypted on this computer."),
+          msg
+        ],
+        [button("Cancel", { onClick: cancel }), primary]
+      );
+      for (const i of inputs) {
+        i.addEventListener("input", () => {
+          primary.disabled = busy || !ready();
+          setMessage("");
+        });
+        i.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && ready()) submitSignIn();
+        });
+      }
+      primary.disabled = true;
+      if (error) setMessage(error, true);
+      email.focus();
+    }
+    async function submitSignIn() {
+      if (busy || !ready()) return;
+      hidePassword();
+      setMessage("");
+      setBusy(true, "Signing In\u2026");
+      let res;
+      try {
+        res = await signIn(inputs[0].value.trim(), inputs[1].value);
+      } catch (e) {
+        res = { ok: false, error: e?.message };
+      }
+      if (view !== "signin") return;
+      if (!res?.ok) {
+        setBusy(false);
+        setMessage(res?.error || "Could not sign in. Try again.", true);
+      }
+    }
+    function showCode() {
+      view = "code";
+      busy = false;
+      const fields = el(doc, "div", { class: "digits" });
+      inputs = [];
+      for (let i = 0; i < CODE_LENGTH; i++) {
+        if (i === CODE_LENGTH / 2) fields.appendChild(el(doc, "span", { class: "sep", "aria-hidden": "true" }));
+        const inp = el(doc, "input", {
+          type: "text",
+          inputMode: "numeric",
+          maxLength: CODE_LENGTH,
+          autocomplete: i === 0 ? "one-time-code" : "off",
+          "aria-label": `Digit ${i + 1} of ${CODE_LENGTH}`
+        });
+        inp.addEventListener("input", () => fill(i, inp.value));
+        inp.addEventListener("paste", (e) => {
+          e.preventDefault();
+          fill(i, e.clipboardData?.getData("text") ?? "");
+        });
+        inp.addEventListener("keydown", (e) => {
+          if (e.key === "Backspace" && !inp.value && i > 0) {
+            inputs[i - 1].value = "";
+            inputs[i - 1].focus();
+            e.preventDefault();
+          } else if (e.key === "ArrowLeft" && i > 0) {
+            inputs[i - 1].focus();
+            e.preventDefault();
+          } else if (e.key === "ArrowRight" && i < CODE_LENGTH - 1) {
+            inputs[i + 1].focus();
+            e.preventDefault();
+          } else if (e.key === "Enter") submitCodeNow();
+        });
+        inputs.push(inp);
+        fields.appendChild(inp);
+      }
+      msg = el(doc, "div", { class: "msg", "aria-live": "polite" });
+      primary = button("Continue", { isPrimary: true, onClick: submitCodeNow });
+      render(
+        [
+          el(doc, "h1", { id: "adam-account-title" }, "Enter Verification Code"),
+          el(doc, "div", { class: "sub" }, "A verification code was sent to your other devices. Enter it to continue.")
+        ],
+        [fields, msg],
+        [button("Cancel", { onClick: cancel }), primary]
+      );
+      primary.disabled = true;
+      inputs[0].focus();
+    }
+    function fill(index, text) {
+      const { digits, focus } = spreadDigits(inputs.map((i) => i.value), index, text);
+      digits.forEach((d, i) => {
+        inputs[i].value = d || "";
+      });
+      inputs[focus].focus();
+      primary.disabled = busy || !ready();
+      if (ready()) submitCodeNow();
+    }
+    async function submitCodeNow() {
+      if (busy || !ready()) return;
+      setMessage("");
+      setBusy(true, "Verifying\u2026");
+      submittedId = challengeId;
+      let ok = false;
+      try {
+        ok = await submitCode(inputs.map((i) => i.value).join(""));
+      } catch {
+        ok = false;
+      }
+      if (view !== "code" || ok) return;
+      submittedId = null;
+      setBusy(false);
+      setMessage("Could not send the code. Try again.", true);
+    }
+    function wrongCode() {
+      submittedId = null;
+      setBusy(false);
+      for (const i of inputs) i.value = "";
+      primary.disabled = true;
+      inputs[0]?.focus();
+      setMessage("Incorrect code. Enter the new code sent to your devices.", true);
+      dlg.classList.remove("shake");
+      void dlg.offsetWidth;
+      dlg.classList.add("shake");
+    }
+    function close() {
+      hidePassword();
+      if (dlg?.open) dlg.close();
+      view = null;
+      busy = false;
+      submittedId = null;
+      inputs = [];
+      msg = null;
+      primary = null;
+    }
+    function cancel() {
+      if (view === "code") dismissedId = challengeId;
+      close();
+    }
+    function onSnapshot(snap) {
+      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId });
+      if (snap?.challenge?.type === "two_factor") challengeId = snap.challenge.id ?? null;
+      switch (action) {
+        case "code":
+          showCode();
+          break;
+        case "retry":
+          wrongCode();
+          break;
+        case "close":
+          close();
+          onDone();
+          break;
+        case "failed":
+          if (!busy) break;
+          if (view === "signin") {
+            setBusy(false);
+            setMessage(snap?.message || "Could not sign in. Check your Apple Account and password.", true);
+          } else showSignIn(snap?.message || "Sign-in failed. Try again.");
+          break;
+      }
+    }
+    return { openSignIn: () => showSignIn(), onSnapshot, close, isOpen: () => view !== null };
+  }
+
   // src/engine-playback.js
+  var _accountSheetInstance = null;
+  var _onAccountSignedIn = null;
+  function _accountSheet() {
+    return _accountSheetInstance ??= createAccountSheet({
+      signIn: async (email, password) => {
+        const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        if (!r.ok) return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
+        window.adamBridge?.drmSaveCredentials({ email, password }).catch(() => {
+        });
+        return { ok: true };
+      },
+      submitCode: async (code) => {
+        const r = await fetch(`${ENGINE}/api/v1/drm/challenge`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reply: code })
+        });
+        return r.ok;
+      },
+      onDone: () => _onAccountSignedIn?.()
+    });
+  }
   try {
     for (const k of Object.keys(localStorage)) {
       if (!/^aml[-_]/.test(k)) continue;
@@ -484,10 +850,16 @@
         t: Date.now()
       });
       window.__adamCapture.totalBytes += value.byteLength;
+      window.__adamCapture.heldBytes = (window.__adamCapture.heldBytes || 0) + hex.length;
+      const held = window.__adamCapture.chunks;
+      while (window.__adamCapture.heldBytes > CAP_LIMIT && held.length > 1) {
+        window.__adamCapture.heldBytes -= held.shift().hex.length;
+      }
     };
     window.__adamDrainCapture = function() {
       const out = window.__adamCapture.chunks.slice();
       window.__adamCapture.chunks = [];
+      window.__adamCapture.heldBytes = 0;
       return out;
     };
   })();
@@ -506,6 +878,7 @@
   var _ourBlobUrl = null;
   var _allowCDNTransition = false;
   var _externalPlayGateTimer = null;
+  var _adamInGotoTransition = false;
   var _mkApiSaved = null;
   var _savedAacApiRestore = null;
   var _savedGateTracingCleanup = null;
@@ -536,7 +909,23 @@
   var _vlcPosMs = 0;
   var _vlcPaused = false;
   var _vlcSyncVolume = null;
-  var _vlcVolPersist = 100;
+  var _VLC_VOL_KEY = "adam.vlcVolume";
+  var _vlcVolPersist = (() => {
+    try {
+      const v = parseInt(localStorage.getItem(_VLC_VOL_KEY), 10);
+      return v > 0 && v <= 200 ? v : 100;
+    } catch (_) {
+      return 100;
+    }
+  })();
+  function _rememberVlcVolume(v) {
+    if (!(v > 0)) return;
+    _vlcVolPersist = v;
+    try {
+      localStorage.setItem(_VLC_VOL_KEY, String(v));
+    } catch (_) {
+    }
+  }
   var _adamTransitioning = false;
   var _sessionContainers = [];
   var _sessionContainerIdx = -1;
@@ -654,9 +1043,9 @@
   }
   function _slBuildOverlay() {
     if (_slOverlay) return;
-    const el = document.createElement("div");
-    el.id = "adam-lyrics-overlay";
-    el.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:99998;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.86);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);transition:opacity 0.35s;opacity:0;overflow:hidden;font-family:-apple-system,SF Pro Display,system-ui,sans-serif;box-sizing:border-box;";
+    const el2 = document.createElement("div");
+    el2.id = "adam-lyrics-overlay";
+    el2.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:99998;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.86);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);transition:opacity 0.35s;opacity:0;overflow:hidden;font-family:-apple-system,SF Pro Display,system-ui,sans-serif;box-sizing:border-box;";
     const closeBtn = document.createElement("div");
     closeBtn.innerHTML = _svgCloseLg;
     closeBtn.style.cssText = "position:absolute;top:20px;right:24px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.45);cursor:pointer;user-select:none;transition:color 0.15s;z-index:1;border-radius:50%;";
@@ -670,9 +1059,9 @@
     const inner = document.createElement("div");
     inner.id = "adam-sl-inner";
     inner.style.cssText = "width:100%;max-width:700px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:80px 32px 48px;box-sizing:border-box;overflow-y:auto;max-height:100%;scroll-behavior:smooth;scrollbar-width:none;";
-    el.append(closeBtn, inner);
-    document.body.appendChild(el);
-    _slOverlay = el;
+    el2.append(closeBtn, inner);
+    document.body.appendChild(el2);
+    _slOverlay = el2;
   }
   function _slRenderLines(lines) {
     if (!_slOverlay) _slBuildOverlay();
@@ -895,7 +1284,7 @@
       };
     }
   }
-  function _warnIfOurSourceCleared(el, how) {
+  function _warnIfOurSourceCleared(el2, how) {
     if (!_activeMs || _activeMs.readyState === "closed" || !_ourBlobUrl) return;
     if (how.startsWith("src=") && how !== 'src=""') return;
     console.warn("[Adam MSE] our MediaSource is being detached by " + how + "\n" + (new Error().stack || "").split("\n").slice(2, 8).join("\n"));
@@ -920,7 +1309,8 @@
         if (_allowCDNTransition && val !== void 0) {
           console.log('[AUDIO-SRC] gate-open src set \u2192 "' + String(val).slice(0, 60) + '"');
         }
-        if (val?.startsWith("blob:") && _ourBlobUrl && val !== _ourBlobUrl) {
+        if (val?.startsWith("blob:") && (_ourBlobUrl ? val !== _ourBlobUrl : _adamInGotoTransition)) {
+          if (_adamInGotoTransition && !_ourBlobUrl) console.log("[Adam Engine] Blocked MK blob during goto:", val.slice(0, 60));
           return;
         }
         _warnIfOurSourceCleared(this, "src=" + JSON.stringify(String(val).slice(0, 24)));
@@ -1119,6 +1509,7 @@
   var _audioAnalysis = null;
   var _abortCtrl = null;
   var _generation = 0;
+  var _htcSkippedItem = null;
   var _videoCodec = null;
   var _mvGateOpen = true;
   var _mvResetScrubberRef = null;
@@ -1563,8 +1954,8 @@
       });
     }
   }
-  async function _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl2, mySC, wasStreamComplete, seekSec) {
-    if (pipeCtrl2.signal.aborted || _seekFetchCtrl !== mySC) return;
+  async function _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec) {
+    if (pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) return;
     await _sbWaitUpdate(sb, 0);
     if (wasStreamComplete) {
       if (ms.readyState === "open") {
@@ -1581,18 +1972,18 @@
       const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : seekSec;
       let resumeResp;
       try {
-        resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl2.signal });
+        resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl.signal });
       } catch (_) {
         return;
       }
-      if (!resumeResp.ok || pipeCtrl2.signal.aborted || _seekFetchCtrl !== mySC) {
+      if (!resumeResp.ok || pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) {
         resumeResp?.body?.cancel();
         return;
       }
-      await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl2.signal, ms, _durationSec, performance.now());
+      await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl.signal, ms, _durationSec, performance.now());
     }
   }
-  async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl2, mySC, wasStreamComplete, seekSec) {
+  async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec) {
     const waitIdle = () => new Promise((res, rej) => {
       if (!sb.updating) return res();
       const done = () => {
@@ -1610,7 +2001,7 @@
     });
     try {
       await waitIdle();
-      if (pipeCtrl2.signal.aborted || ms.readyState !== "open") return;
+      if (pipeCtrl.signal.aborted || ms.readyState !== "open") return;
       if (sb.buffered.length > 0) sb.remove(0, Infinity);
       await waitIdle();
       try {
@@ -1618,9 +2009,9 @@
       } catch (_) {
       }
       for (const chunk of cacheSnap.chunks) {
-        if (pipeCtrl2.signal.aborted) return;
+        if (pipeCtrl.signal.aborted) return;
         await waitIdle();
-        if (pipeCtrl2.signal.aborted || ms.readyState !== "open") return;
+        if (pipeCtrl.signal.aborted || ms.readyState !== "open") return;
         try {
           sb.appendBuffer(chunk);
         } catch (e) {
@@ -1628,9 +2019,9 @@
           return;
         }
       }
-      await _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl2, mySC, wasStreamComplete, seekSec);
+      await _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec);
     } catch (e) {
-      if (!pipeCtrl2.signal.aborted) console.error("[Adam MSE] cache re-inject error:", e.message);
+      if (!pipeCtrl.signal.aborted) console.error("[Adam MSE] cache re-inject error:", e.message);
     }
   }
   function _mseCacheSeek(sb, audio, ms, seekSec) {
@@ -1653,16 +2044,16 @@
       _pipeCtrl = null;
     }
     _pipeCtrl = new AbortController();
-    const pipeCtrl2 = _pipeCtrl;
+    const pipeCtrl = _pipeCtrl;
     console.log(`[Adam MSE] Seek ${seekSec.toFixed(2)}s \u2192 cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
-    _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl2, mySC, wasStreamComplete, seekSec).catch(() => {
+    _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec).catch(() => {
     });
     try {
       _nativeCTSet.call(audio, seekSec);
     } catch (_) {
     }
     audio.addEventListener("canplay", () => {
-      if (pipeCtrl2.signal.aborted) return;
+      if (pipeCtrl.signal.aborted) return;
       try {
         sb.appendWindowStart = 0;
       } catch (_) {
@@ -1740,12 +2131,12 @@
     } catch (_) {
     }
     _pipeCtrl = new AbortController();
-    const pipeCtrl2 = _pipeCtrl;
-    pipeToSourceBuffer(sb, audio, resp, pipeCtrl2.signal, ms, _durationSec, performance.now()).catch((e) => {
-      if (!pipeCtrl2.signal.aborted) console.error("[Adam MSE] Seek pipe error:", e.message);
+    const pipeCtrl = _pipeCtrl;
+    pipeToSourceBuffer(sb, audio, resp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch((e) => {
+      if (!pipeCtrl.signal.aborted) console.error("[Adam MSE] Seek pipe error:", e.message);
     });
     audio.addEventListener("canplay", () => {
-      if (pipeCtrl2.signal.aborted) return;
+      if (pipeCtrl.signal.aborted) return;
       try {
         sb.appendWindowStart = 0;
       } catch (_) {
@@ -2351,10 +2742,10 @@
     if (_scrimObs) _scrimObs.observe(scrimEl, { attributes: true, attributeFilter: ["style", "class"] });
     const footerRow = avp?.querySelector('[slot="footer"]');
     const infoEls = avp ? [...avp.querySelectorAll('[slot="info"]')] : [];
-    [...infoEls, footerRow].forEach((el) => {
-      if (!el) return;
-      el.style.setProperty("visibility", "visible", "important");
-      el.style.setProperty("opacity", "1", "important");
+    [...infoEls, footerRow].forEach((el2) => {
+      if (!el2) return;
+      el2.style.setProperty("visibility", "visible", "important");
+      el2.style.setProperty("opacity", "1", "important");
     });
     const footerEls = avp ? [...avp.querySelectorAll('[slot="footer"]')] : [];
     const scrubberEl = footerEls[0]?.querySelector("amp-playback-controls-progress") ?? footerRow?.querySelector("amp-playback-controls-progress");
@@ -2570,7 +2961,6 @@
       const btn = e.target.closest("button");
       if (!btn || btn === _qualityBtn) return;
       const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const text = btn.textContent.trim().toLowerCase();
       const cls = btn.className.toLowerCase();
       if (label.includes("play") || label.includes("pause") || cls.includes("play") || cls.includes("pause")) {
         e.stopImmediatePropagation();
@@ -2729,36 +3119,15 @@
                 if (ct > bufEnd && ct - bufEnd < 30 && Date.now() - _bufWaitStart > 8e3) {
                   console.warn(`[Adam MV buf:ahead-snap] ct=${ct.toFixed(2)} ahead of bufEnd=${bufEnd.toFixed(2)} \u2014 re-seeking`);
                   _bufWaitStart = Date.now();
-                  _mvVideoSeek(ct).catch(() => {
-                  });
+                  _mvSeekTo(ct);
                 }
               }
-            }
-            if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
-              _pipeRestarted = true;
-              const restartAt = videoEl.currentTime;
-              _ignoreSeekUntil = Date.now() + 8e3;
-              console.warn(`[Adam MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s \u2014 restarting pipe`);
-              pipeCtrl = new AbortController();
-              _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
             }
             if (Date.now() - _bufWaitStart > 45e3) {
               console.warn(`[Adam MV buf:timeout] stalled ${((Date.now() - _bufWaitStart) / 1e3).toFixed(0)}s \u2014 restarting session`);
               _abortMV("buf-timeout");
               return;
             }
-          }
-        } else if (videoEl.paused && lead < BUF_LOW && pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted) {
-          if (!_pipeRestarted) {
-            _pipeRestarted = true;
-            console.warn(`[Adam MV buf:recover] pipe dead + starved at ct=${videoEl.currentTime.toFixed(2)}s \u2014 restarting pipe`);
-            pipeCtrl = new AbortController();
-            _startVideoPipe(`${videoUrl}?t=${videoEl.currentTime.toFixed(3)}`);
-            _iframePlay.call(videoEl).catch(() => {
-            });
-          } else {
-            console.warn("[Adam MV buf:recover] pipe restart did not recover \u2014 aborting session");
-            _abortMV("pipe-dead");
           }
         } else {
           if (lead < BUF_LOW && !videoEl.paused) {
@@ -2770,12 +3139,10 @@
             mkAudio.muted = true;
             console.warn(`[Adam MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s \u2192 pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"}`);
           } else {
-            if (lead >= BUF_HIGH) _pipeRestarted = false;
             if (videoEl.paused && !_userPaused) {
               console.warn(`[Adam MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s \u2014 retrying play`);
               _iframePlay.call(videoEl).catch(() => {
               });
-            } else {
             }
           }
         }
@@ -3634,7 +4001,7 @@
     _abortCtrl.signal.addEventListener("abort", cleanup, { once: true });
     console.log(`[Adam MV] pipeline started session=${_sessionId}`);
   }
-  function _vlcHandleLength(lengthMs, mkAudio) {
+  function _vlcHandleLength(lengthMs) {
     if (!_vlcLengthSet && lengthMs > 0) {
       _vlcLengthSet = true;
       _durationSec = lengthMs / 1e3;
@@ -3770,7 +4137,7 @@
       const { posMs, lengthMs, state, volume, muted } = await r.json();
       if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return;
       _vlcSyncVolume?.(volume, muted);
-      _vlcHandleLength(lengthMs, mkAudio);
+      _vlcHandleLength(lengthMs);
       _vlcUpdatePosition(posMs, state, mkAudio);
       if (state === _vlcPrevState) return;
       const prev = _vlcPrevState;
@@ -3843,7 +4210,7 @@
         body: JSON.stringify({
           assetId: adamId,
           storefront: sf,
-          capabilities: { lossless, atmos: false, video: isVideo },
+          capabilities: { lossless, hiRes: lossless && _streamingQuality === "hi-res-lossless", atmos: false, video: isVideo },
           ...isVideo ? { mvMaxHeight: _mvMaxHeight } : {},
           token: mk.developerToken ?? "",
           mediaUserToken: getMUT()
@@ -3864,29 +4231,40 @@
       _hoverInflight.delete(adamId);
     }
   }
-  function _installHoverPrewarm(mk) {
+  var HOVER_INTENT_MS = 350;
+  function _installHoverPrewarm() {
+    let pendingId = null, timer = null;
+    const prewarmSoon = (id, isVideo = false) => {
+      if (id === pendingId) return;
+      clearTimeout(timer);
+      pendingId = id;
+      timer = setTimeout(() => {
+        pendingId = null;
+        _hoverPrewarmById(id, isVideo);
+      }, HOVER_INTENT_MS);
+    };
     document.addEventListener("pointerenter", (e) => {
       if (!_engineCaps.lossless && !_engineCaps.aac) return;
       try {
-        let el = e.target;
-        for (let depth = 0; depth < 12 && el; depth++) {
-          const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
+        let el2 = e.target;
+        for (let depth = 0; depth < 12 && el2; depth++) {
+          const did = el2.dataset?.id || el2.dataset?.contentId || el2.dataset?.songId;
           if (did) {
             const numId = did.startsWith("a.") ? did.slice(2) : did;
-            if (/^\d{7,12}$/.test(numId) && numId !== _adamId) {
-              _hoverPrewarmById(numId);
+            if (/^\d{7,12}$/.test(numId) && numId !== _currentAssetId) {
+              prewarmSoon(numId);
               return;
             }
           }
-          if (el.tagName === "A" && el.href) {
-            const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
-            if (m && m[1] !== _adamId) {
-              const isMV = el.href.includes("/music-video/");
-              _hoverPrewarmById(m[1], isMV);
+          if (el2.tagName === "A" && el2.href) {
+            const m = el2.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
+            if (m && m[1] !== _currentAssetId) {
+              const isMV = el2.href.includes("/music-video/");
+              prewarmSoon(m[1], isMV);
               return;
             }
           }
-          el = el.parentElement;
+          el2 = el2.parentElement;
         }
       } catch (_) {
       }
@@ -3914,7 +4292,7 @@
         body: JSON.stringify({
           assetId: nextAdamId,
           storefront: sf,
-          capabilities: { lossless: true, atmos: false, video: false },
+          capabilities: { lossless: true, hiRes: _streamingQuality === "hi-res-lossless", atmos: false, video: false },
           token: mk.developerToken ?? "",
           mediaUserToken: getMUT()
         })
@@ -4207,6 +4585,7 @@
         storefront: sf,
         capabilities: {
           lossless: losslessWanted,
+          hiRes: losslessWanted && _streamingQuality === "hi-res-lossless",
           atmos: false,
           video: isVideo
         },
@@ -4218,8 +4597,8 @@
     if (!sessResp.ok) throw new Error(`Session ${sessResp.status}: ${await sessResp.text()}`);
     return sessResp.json();
   }
-  async function _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl2, durationSec, t0) {
-    if (pipeCtrl2.signal.aborted) return;
+  async function _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl, durationSec, t0) {
+    if (pipeCtrl.signal.aborted) return;
     const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
     console.warn("[Adam MSE] pipe error \u2014 recovering from", bufEnd.toFixed(1) + "s:", err.message);
     if (ms.readyState === "closed") {
@@ -4229,14 +4608,14 @@
     if (ms.readyState === "ended") console.warn("[Adam MSE] ms=ended (Chrome decode-error path) \u2014 attempting resume");
     try {
       const resumeUrl = bufEnd > 1 ? `${myStreamBase}&t=${bufEnd.toFixed(3)}` : myStreamBase;
-      const resp = await fetch(resumeUrl, { signal: pipeCtrl2.signal });
-      if (!resp.ok || pipeCtrl2.signal.aborted) {
+      const resp = await fetch(resumeUrl, { signal: pipeCtrl.signal });
+      if (!resp.ok || pipeCtrl.signal.aborted) {
         resp?.body?.cancel();
         return;
       }
-      await pipeToSourceBuffer(sb, mkAudio, resp, pipeCtrl2.signal, ms, durationSec, t0);
+      await pipeToSourceBuffer(sb, mkAudio, resp, pipeCtrl.signal, ms, durationSec, t0);
     } catch (e2) {
-      if (!pipeCtrl2.signal.aborted) {
+      if (!pipeCtrl.signal.aborted) {
         console.error("[Adam MSE] recovery failed:", e2.message);
         if (ms.readyState === "open") try {
           ms.endOfStream();
@@ -4303,7 +4682,7 @@
       }
     }, { once: true });
     _pipeCtrl = new AbortController();
-    const pipeCtrl2 = _pipeCtrl;
+    const pipeCtrl = _pipeCtrl;
     const myStreamBase = streamBase;
     let pipeInput = streamBase;
     if (_nextAacStreamResp?.sessionId === _sessionId) {
@@ -4313,7 +4692,7 @@
     } else if (_nextAacStreamResp) {
       _discardNextAacStream();
     }
-    pipeToSourceBuffer(sb, mkAudio, pipeInput, pipeCtrl2.signal, ms, _durationSec, t0).catch((err) => _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl2, _durationSec, t0));
+    pipeToSourceBuffer(sb, mkAudio, pipeInput, pipeCtrl.signal, ms, _durationSec, t0).catch((err) => _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl, _durationSec, t0));
     const onXfVol = () => _xfTrackUserVolume(mkAudio);
     mkAudio.addEventListener("volumechange", onXfVol);
     ctrl.signal.addEventListener(
@@ -4462,7 +4841,7 @@
       if (Math.round(_vlcVolume * _scFactor) === volume && _vlcMuted === !!muted) return;
       const requested = Math.round(volume / (_scFactor || 1));
       _vlcVolume = requested;
-      _vlcVolPersist = requested;
+      _rememberVlcVolume(requested);
       _vlcMuted = !!muted;
       _dispatchVolChange();
     };
@@ -4473,7 +4852,7 @@
         const newVol = Math.max(0, Math.min(200, Math.round(v * 100)));
         if (newVol === _vlcVolume) return;
         _vlcVolume = newVol;
-        _vlcVolPersist = newVol;
+        _rememberVlcVolume(newVol);
         if (_vlcVolume > 0) _vlcMuted = false;
         _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
         _dispatchVolChange();
@@ -4489,7 +4868,7 @@
           _postVlcVol(0);
         } else {
           _vlcVolume = _vlcPreMuteVol;
-          _vlcVolPersist = _vlcVolume;
+          _rememberVlcVolume(_vlcVolume);
           _postVlcVol(_vlcVolume);
         }
         _dispatchVolChange();
@@ -4511,6 +4890,7 @@
       signal: ctrl.signal
     });
     if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
+    _postVlcVol(_vlcVolume);
     if (ctrl.signal.aborted) return;
     mkAudio.addEventListener("canplay", () => {
       if (!ctrl.signal.aborted) {
@@ -4571,7 +4951,7 @@
         body: JSON.stringify({
           assetId: adamId,
           storefront: sf,
-          capabilities: { lossless: losslessWanted, atmos: false, video: false },
+          capabilities: { lossless: losslessWanted, hiRes: losslessWanted && _streamingQuality === "hi-res-lossless", atmos: false, video: false },
           mvMaxHeight: _mvMaxHeight,
           token: mk.developerToken ?? "",
           mediaUserToken: getMUT()
@@ -4590,6 +4970,12 @@
         _directPlayAdamId = null;
         deleteSession(sess.sessionId);
         setPlayState(PLAY_STATE.IDLE, "direct:codec-fallback");
+        if (_htcSkippedItem) {
+          const pendingItem = _htcSkippedItem;
+          _htcSkippedItem = null;
+          const pendingId = pendingItem?.playParams?.catalogId ?? pendingItem?.attributes?.playParams?.catalogId ?? pendingItem?.id;
+          if (pendingId === adamId) handleTrackChange(pendingItem);
+        }
         return;
       }
       _sessionId = sess.sessionId;
@@ -4674,7 +5060,11 @@
     }
     _closeCDNGate(mk);
     const _htcAdamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
-    if (_htcConfirmDirectPlay(_htcAdamId)) return;
+    if (_htcConfirmDirectPlay(_htcAdamId)) {
+      _htcSkippedItem = item;
+      return;
+    }
+    _htcSkippedItem = null;
     _directPlayAdamId = null;
     _directPlayGen = 0;
     const myGen = ++_generation;
@@ -5564,22 +5954,22 @@
   }
   var _adamToastTimer = null;
   function _adamToast(text) {
-    let el = document.getElementById("adam-toast");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "adam-toast";
-      el.style.cssText = "position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(10px);z-index:99999;padding:9px 18px;border-radius:20px;background:rgba(30,30,32,0.92);border:0.5px solid rgba(255,255,255,0.14);color:#fff;font-size:13px;font-weight:500;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;pointer-events:none;opacity:0;box-shadow:0 8px 30px rgba(0,0,0,0.5);backdrop-filter:blur(24px) saturate(1.8);-webkit-backdrop-filter:blur(24px) saturate(1.8);transition:opacity 0.2s,transform 0.2s;";
-      document.body.appendChild(el);
+    let el2 = document.getElementById("adam-toast");
+    if (!el2) {
+      el2 = document.createElement("div");
+      el2.id = "adam-toast";
+      el2.style.cssText = "position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(10px);z-index:99999;padding:9px 18px;border-radius:20px;background:rgba(30,30,32,0.92);border:0.5px solid rgba(255,255,255,0.14);color:#fff;font-size:13px;font-weight:500;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;pointer-events:none;opacity:0;box-shadow:0 8px 30px rgba(0,0,0,0.5);backdrop-filter:blur(24px) saturate(1.8);-webkit-backdrop-filter:blur(24px) saturate(1.8);transition:opacity 0.2s,transform 0.2s;";
+      document.body.appendChild(el2);
     }
-    el.textContent = text;
+    el2.textContent = text;
     requestAnimationFrame(() => {
-      el.style.opacity = "1";
-      el.style.transform = "translateX(-50%) translateY(0)";
+      el2.style.opacity = "1";
+      el2.style.transform = "translateX(-50%) translateY(0)";
     });
     clearTimeout(_adamToastTimer);
     _adamToastTimer = setTimeout(() => {
-      el.style.opacity = "0";
-      el.style.transform = "translateX(-50%) translateY(10px)";
+      el2.style.opacity = "0";
+      el2.style.transform = "translateX(-50%) translateY(10px)";
     }, 1600);
   }
   var _lovedState = {};
@@ -5886,7 +6276,7 @@
     blockAppleCDN();
     let _adamLastGotoMs = 0;
     const _inGotoWindow = () => performance.now() - _adamLastGotoMs < 1e3 || _playState === PLAY_STATE.OPENING || _playState === PLAY_STATE.STREAMING;
-    const _isSpuriousDialog = (el) => el?.tagName === "DIALOG" && el?.dataset?.testid === "dialog" && el?.classList?.contains("error");
+    const _isSpuriousDialog = (el2) => el2?.tagName === "DIALOG" && el2?.dataset?.testid === "dialog" && el2?.classList?.contains("error");
     const _origShowModal = HTMLDialogElement.prototype.showModal;
     HTMLDialogElement.prototype.showModal = function() {
       if (_isSpuriousDialog(this)) {
@@ -5975,6 +6365,7 @@
       }
       console.log(`[Adam Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
       if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
+      _accountSheet().onSnapshot(snap);
       if (snap?.challenge?.type === "credentials") {
         console.log("[Adam Engine] DRM credential challenge \u2014 opening sign-in form");
         window.__adamOpenEngineSettings?.();
@@ -6162,6 +6553,7 @@
       _adamPendingII = ii;
       const targetFlat = _sessionFlatIdx(ci, ii);
       _adamGotoTarget = targetFlat;
+      _adamInGotoTransition = true;
       console.log("[Adam] _adamGoto ci=", ci, "ii=", ii, "flat=", targetFlat);
       stopVLCPoll();
       const _gotoAudio = getMKAudio();
@@ -6207,6 +6599,7 @@
       _adamAdvancingTimer = setTimeout(() => {
         _adamGotoTarget = null;
         _adamGotoTargetId = null;
+        _adamInGotoTransition = false;
         _allowCDNTransition = false;
         _adamTransitioning = false;
         _adamNavInternal = false;
@@ -6229,6 +6622,7 @@
           _clearAdvancing();
           _adamGotoTarget = null;
           _adamGotoTargetId = null;
+          _adamInGotoTransition = false;
           _allowCDNTransition = false;
           _adamTransitioning = false;
           _adamNavInternal = false;
@@ -6259,9 +6653,10 @@
           const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
           _adamGotoTarget = targetIdx;
           _adamGotoTargetId = targetSongId ?? null;
-          await mk.setQueue({ songs: allIds }).catch(() => {
+          const sqDesc = targetSongId ? { songs: allIds, startWith: { id: targetSongId } } : { songs: allIds };
+          await mk.setQueue(sqDesc).catch(() => {
           });
-          await mk.changeToMediaAtIndex(targetIdx).catch(() => {
+          await mk.play().catch(() => {
           });
         }
       }
@@ -6322,6 +6717,7 @@
       const ii = Math.max(0, _sessionContainers[ci].items.indexOf(target));
       if (_ADAM_DEBUG) console.log(`[MK-DBG] ${label} \u2192 owned change: ${items.length} track(s) ci=${ci} ii=${ii} target=${target}`);
       if (closeGate) closeGate();
+      _allowCDNTransition = true;
       return _adamGoto(ci, ii).then(() => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change dispatched`)).catch((err) => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change failed:`, err?.message || err));
     }
     function _normalizeStartId(desc) {
@@ -6567,10 +6963,10 @@
         let aacSetQueueDesc = null;
         let _domWalkIsMV = false;
         try {
-          let el = e.target;
+          let el2 = e.target;
           if (e.target?.closest?.('[class*="vertical-video"]')) _domWalkIsMV = true;
-          for (let depth = 0; depth < 12 && el; depth++) {
-            const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
+          for (let depth = 0; depth < 12 && el2; depth++) {
+            const did = el2.dataset?.id || el2.dataset?.contentId || el2.dataset?.songId;
             if (did) {
               const numId = did.startsWith("a.") ? did.slice(2) : did;
               if (/^\d{7,12}$/.test(numId)) {
@@ -6582,24 +6978,24 @@
                 break;
               }
             }
-            if (el.tagName === "A" && el.href) {
-              const mvM = el.href.match(/\/music-video\/[^/]+\/(\d{7,12})(?:[/?#]|$)/);
+            if (el2.tagName === "A" && el2.href) {
+              const mvM = el2.href.match(/\/music-video\/[^/]+\/(\d{7,12})(?:[/?#]|$)/);
               if (mvM) {
                 aacCatalogId = mvM[1];
                 _itemTypes.set(aacCatalogId, "music-videos");
                 aacSetQueueDesc = { musicVideo: aacCatalogId };
                 break;
               }
-              const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
+              const m = el2.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
               if (m) {
                 aacCatalogId = m[1];
                 break;
               }
             }
-            if (el.className && typeof el.className === "string" && el.className.includes("vertical-video")) {
+            if (el2.className && typeof el2.className === "string" && el2.className.includes("vertical-video")) {
               _domWalkIsMV = true;
             }
-            el = el.parentElement;
+            el2 = el2.parentElement;
           }
         } catch (_) {
         }
@@ -6672,10 +7068,20 @@
           const desc = a[0];
           if (_ADAM_DEBUG) console.log("[MK-DBG AAC] mk.setQueue() args=" + JSON.stringify(a).slice(0, 400));
           if (desc?.playlists && desc?.startWith?.id) {
-            const startCid = _normalizeStartId(desc);
-            if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 resolving pre-fetched tracks, startWith=" + startCid);
-            return _resolvePlaylistCatalogIds().then((catalogIds) => {
+            const startWithLid = desc.startWith?.id ?? null;
+            if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 resolving pre-fetched tracks, startWithLid=" + startWithLid);
+            const fetchResult = _pendingPlaylistFetch ? Promise.race([_pendingPlaylistFetch, new Promise((res) => setTimeout(() => res(null), 3e3))]) : Promise.resolve(null);
+            return fetchResult.then((result) => {
+              const tracks = result?.tracks || [];
+              const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
               if (catalogIds.length > 1) {
+                const _lidNumeric = startWithLid?.startsWith("a.") ? startWithLid.slice(2) : startWithLid;
+                let startCid = _pendingExternalClickCatalogId || (/^\d{6,}$/.test(_lidNumeric) ? _lidNumeric : null);
+                if (!startCid && startWithLid) {
+                  const match = tracks.find((t) => t.lid === startWithLid || t.lid === startWithLid.replace(/^[a-z]\./, ""));
+                  startCid = match?.cid ?? null;
+                }
+                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 " + catalogIds.length + " tracks, startCid=" + startCid);
                 return _aacOwnedGoto(catalogIds, startCid, "playlist/local");
               }
               if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 cache cold, passthrough");
@@ -6861,8 +7267,8 @@
         const _aacGateAudioEl = getMKAudio();
         const _aacGateEvts = ["pause", "play", "playing", "waiting", "stalled", "error", "emptied", "loadstart", "canplay", "canplaythrough", "ended"];
         const _aacGateEvtHandler = (ev) => {
-          const el = _aacGateAudioEl;
-          if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el?.paused + " readyState=" + el?.readyState + " src=" + (el?.src || "").slice(0, 60));
+          const el2 = _aacGateAudioEl;
+          if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el2?.paused + " readyState=" + el2?.readyState + " src=" + (el2?.src || "").slice(0, 60));
         };
         if (_aacGateAudioEl) _aacGateEvts.forEach((t) => _aacGateAudioEl.addEventListener(t, _aacGateEvtHandler));
         const _aacGateStateListener = () => _ADAM_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
@@ -6916,9 +7322,9 @@
         _pendingExternalClickCatalogId = null;
         _pendingExternalClickQueueIdx = -1;
         try {
-          let el = e.target;
-          for (let depth = 0; depth < 12 && el; depth++) {
-            const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
+          let el2 = e.target;
+          for (let depth = 0; depth < 12 && el2; depth++) {
+            const did = el2.dataset?.id || el2.dataset?.contentId || el2.dataset?.songId;
             if (did) {
               const numId = did.startsWith("a.") ? did.slice(2) : did;
               if (/^\d{7,12}$/.test(numId)) {
@@ -6926,14 +7332,14 @@
                 break;
               }
             }
-            if (el.tagName === "A" && el.href) {
-              const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
+            if (el2.tagName === "A" && el2.href) {
+              const m = el2.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
               if (m) {
                 _pendingExternalClickCatalogId = m[1];
                 break;
               }
             }
-            el = el.parentElement;
+            el2 = el2.parentElement;
           }
         } catch (_) {
         }
@@ -6987,24 +7393,29 @@
           const desc = a[0];
           if (desc?.playlists && desc?.startWith?.id) {
             const targetId = desc.startWith.id;
-            const targetNumId = targetId.startsWith("a.") ? targetId.slice(2) : targetId;
-            const isLibraryTrack = targetId.startsWith("a.");
-            const effectiveCatalogId = _pendingExternalClickCatalogId || (/^\d{6,}$/.test(targetNumId) ? targetNumId : null);
-            if (isLibraryTrack && effectiveCatalogId) {
-              const catalogId = effectiveCatalogId;
+            const isLibraryTrack = targetId.startsWith("a.") || targetId.startsWith("i.");
+            if (isLibraryTrack) {
+              const startWithLid = targetId;
+              const targetNumId = targetId.startsWith("a.") ? targetId.slice(2) : targetId;
+              const domCatalogId = _pendingExternalClickCatalogId || (/^\d{6,}$/.test(targetNumId) ? targetNumId : null);
               const fetchPromise = _pendingPlaylistFetch ? Promise.race([_pendingPlaylistFetch, new Promise((res) => setTimeout(() => res(null), 3e3))]) : Promise.resolve(null);
               return fetchPromise.then((result) => {
                 const tracks = result?.tracks || [];
                 const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
                 if (catalogIds.length > 1) {
+                  let catalogId = domCatalogId;
+                  if (!catalogId && startWithLid) {
+                    const match = tracks.find((t) => t.lid === startWithLid || t.lid === startWithLid.replace(/^[a-z]\./, ""));
+                    catalogId = match?.cid ?? null;
+                  }
                   if (_ADAM_DEBUG) console.log("[MK-DBG] setQueue \u2192 local cache: " + catalogIds.length + " tracks, startWith=" + catalogId);
                   const pDesc = { songs: catalogIds };
-                  if (catalogIds.includes(catalogId)) pDesc.startWith = { id: catalogId };
+                  if (catalogId && catalogIds.includes(catalogId)) pDesc.startWith = { id: catalogId };
                   const p2 = _mkApiSaved.setQueue.call(mk, pDesc);
                   if (p2?.then) p2.then(() => _ADAM_DEBUG && console.log("[MK-DBG] local cache resolved"), (e2) => _ADAM_DEBUG && console.log("[MK-DBG] local cache rejected:", e2?.message || String(e2)));
                   return p2;
                 }
-                if (_ADAM_DEBUG) console.log("[MK-DBG] setQueue \u2192 passthrough (cache cold) catalogId=" + catalogId);
+                if (_ADAM_DEBUG) console.log("[MK-DBG] setQueue \u2192 passthrough (cache cold) startWithLid=" + startWithLid);
                 const p = _mkApiSaved.setQueue.apply(mk, a);
                 if (p?.then) p.then(() => _ADAM_DEBUG && console.log("[MK-DBG] passthrough resolved"), (e2) => _ADAM_DEBUG && console.log("[MK-DBG] passthrough rejected:", e2?.message || String(e2)));
                 return p;
@@ -7110,14 +7521,14 @@
         mk.changeToMediaAtIndex = (idx) => {
           console.log("[VLC-MK] mk.changeToMediaAtIndex(" + idx + ")");
           const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
-          if (p?.then) p.then((r) => console.log("[VLC-MK] ctmi(" + idx + ") resolved"), (e2) => console.log("[VLC-MK] ctmi(" + idx + ") rejected:", e2?.message || e2));
+          if (p?.then) p.then(() => console.log("[VLC-MK] ctmi(" + idx + ") resolved"), (e2) => console.log("[VLC-MK] ctmi(" + idx + ") rejected:", e2?.message || e2));
           return p;
         };
         const _gateAudioEl = getMKAudio();
         const _gateEvts = ["pause", "play", "playing", "waiting", "stalled", "error", "emptied", "loadstart", "canplay", "canplaythrough", "ended"];
         const _gateEvtHandler = (ev) => {
-          const el = _gateAudioEl;
-          if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el?.paused + " readyState=" + el?.readyState + " src=" + (el?.src || "").slice(0, 60));
+          const el2 = _gateAudioEl;
+          if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el2?.paused + " readyState=" + el2?.readyState + " src=" + (el2?.src || "").slice(0, 60));
         };
         if (_gateAudioEl) _gateEvts.forEach((t) => _gateAudioEl.addEventListener(t, _gateEvtHandler));
         const _gateStateListener = () => _ADAM_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
@@ -7143,14 +7554,14 @@
           _pendingExternalClickCatalogId = null;
           _pendingExternalClickQueueIdx = -1;
           _pendingPlaylistFetch = null;
-          const el = getMKAudio();
-          if (el && _vlcMode) {
-            el.load = () => {
+          const el2 = getMKAudio();
+          if (el2 && _vlcMode) {
+            el2.load = () => {
             };
-            Object.defineProperty(el, "paused", { get: () => _vlcPaused, configurable: true });
-            Object.defineProperty(el, "currentTime", { get: () => _vlcPosMs / 1e3, set: () => {
+            Object.defineProperty(el2, "paused", { get: () => _vlcPaused, configurable: true });
+            Object.defineProperty(el2, "currentTime", { get: () => _vlcPosMs / 1e3, set: () => {
             }, configurable: true });
-            startVLCPoll(el);
+            startVLCPoll(el2);
           }
           _allowCDNTransition = false;
           _externalPlayGateTimer = null;
@@ -7205,7 +7616,7 @@
     _scSetup();
     _xfSetup();
     _hotkeysSetup();
-    _installHoverPrewarm(mk);
+    _installHoverPrewarm();
     mk.addEventListener("queueItemsDidChange", () => {
       const activeCur = _sessionContainers[_sessionContainerIdx];
       if (!activeCur) return;
@@ -7236,10 +7647,31 @@
         const targetId = _adamGotoTargetId || extractItemId(targetItem);
         if (targetId && itemId !== targetId) {
           console.log("[Adam] NPIDF filtered: spurious event for", item2?.attributes?.name, "(advancing to idx", _adamGotoTarget, "target id", targetId, ")");
+          if (_allowCDNTransition || _mkApiSaved) {
+            if (_mkApiSaved) {
+              mk.play = _mkApiSaved.play;
+              mk.setQueue = _mkApiSaved.setQueue;
+              mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex;
+              if (typeof _savedGateTracingCleanup === "function") {
+                _savedGateTracingCleanup();
+                _savedGateTracingCleanup = null;
+              }
+              _mkApiSaved = null;
+            }
+            _allowCDNTransition = false;
+            clearTimeout(_externalPlayGateTimer);
+            _externalPlayGateTimer = null;
+            if (_adamPendingCI >= 0 && !_adamAdvancing) {
+              const rCI = _adamPendingCI, rII = _adamPendingII;
+              console.log("[Adam] NPIDF filter: gate closed \u2014 retrying _adamGoto ci=", rCI, "ii=", rII);
+              setTimeout(() => _adamGoto(rCI, rII), 250);
+            }
+          }
           return;
         }
         _adamGotoTarget = null;
         _adamGotoTargetId = null;
+        _adamInGotoTransition = false;
         _adamTransitioning = false;
         clearTimeout(_adamAdvancingTimer);
         _adamAdvancingTimer = null;
@@ -7390,15 +7822,15 @@
   setup().catch((e) => console.error("[Adam Engine] setup:", e));
   (function initSearchSuggestionsPortal() {
     let portaled = null;
-    function positionPortal(el) {
+    function positionPortal(el2) {
       const bar = document.querySelector('[class*="search-input-wrapper"]');
       if (!bar) return;
       const r = bar.getBoundingClientRect();
-      el.style.setProperty("position", "fixed", "important");
-      el.style.setProperty("top", r.bottom + 6 + "px", "important");
-      el.style.setProperty("left", r.left + "px", "important");
-      el.style.setProperty("width", r.width + "px", "important");
-      el.style.setProperty("z-index", "9999", "important");
+      el2.style.setProperty("position", "fixed", "important");
+      el2.style.setProperty("top", r.bottom + 6 + "px", "important");
+      el2.style.setProperty("left", r.left + "px", "important");
+      el2.style.setProperty("width", r.width + "px", "important");
+      el2.style.setProperty("z-index", "9999", "important");
     }
     function doPortal(sugg) {
       if (portaled === sugg) return;
@@ -7684,10 +8116,10 @@
     (document.head || document.documentElement).appendChild(style);
     function markPageArt() {
       const vw = innerWidth, vh = innerHeight;
-      for (const el of document.querySelectorAll(".artwork-component:not([data-adam-page-art])")) {
-        if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute("data-adam-page-art", "");
+      for (const el2 of document.querySelectorAll(".artwork-component:not([data-adam-page-art])")) {
+        if (el2.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
+        const r = el2.getBoundingClientRect();
+        if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el2.setAttribute("data-adam-page-art", "");
       }
     }
     function ensureBgLayers() {
@@ -7908,7 +8340,6 @@
   };
   (function setupEngineSettings() {
     if (!window.adamBridge) return;
-    let injected = false;
     const FF = "font-family:-apple-system,SF Pro Text,system-ui,sans-serif;";
     function dot(ok) {
       const d = document.createElement("span");
@@ -7975,6 +8406,55 @@
     async function fetchDRM() {
       const r = await fetch(`${ENGINE}/api/v1/drm/status`);
       return r.json();
+    }
+    function buildAccountSection(drm, onRefresh) {
+      const { wrap, body } = makeSection("Engine Account");
+      const drmState = drm?.state ?? drm ?? {};
+      const managerOk = drmState?.manager === "ready";
+      const processOk = drmState?.process === "running";
+      const fairplayOk = drmState?.fairplay === "ready";
+      const cbcsOk = drm?.capabilities?.cbcs === true;
+      const isSignedIn = cbcsOk || fairplayOk;
+      function renderState() {
+        body.innerHTML = "";
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:10px;padding:11px 0;";
+        row.appendChild(dot(isSignedIn));
+        const text = document.createElement("div");
+        text.style.cssText = "flex:1;";
+        const main = document.createElement("div");
+        main.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.85);";
+        main.textContent = isSignedIn ? "Signed in" : "Not signed in";
+        text.appendChild(main);
+        if (!isSignedIn) {
+          const sub = document.createElement("div");
+          sub.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;";
+          if (!managerOk) {
+            sub.textContent = "DRM engine not ready. Check engine logs.";
+          } else if (!processOk) {
+            sub.textContent = "DRM backend not loaded. Restart the app.";
+          } else {
+            sub.textContent = "Sign in to enable lossless and hi-res playback";
+          }
+          text.appendChild(sub);
+        }
+        row.appendChild(text);
+        const btn = makeBtn(isSignedIn ? "Sign Out" : "Sign In\u2026");
+        btn.onclick = isSignedIn ? async () => {
+          btn.disabled = true;
+          btn.textContent = "Signing out\u2026";
+          await fetch(`${ENGINE}/api/v1/drm/logout`, { method: "POST" }).catch(() => {
+          });
+          window.adamBridge?.drmClearCredentials().catch(() => {
+          });
+          onRefresh();
+        } : () => _accountSheet().openSignIn();
+        row.appendChild(btn);
+        body.appendChild(row);
+      }
+      _onAccountSignedIn = onRefresh;
+      renderState();
+      return wrap;
     }
     function getDialog() {
       let dlg = document.getElementById("adam-settings-dialog");
@@ -8107,8 +8587,8 @@
         const opt = qualityOpts.find((o) => o.value === value);
         btnLabel.textContent = opt ? opt.label : value;
         const sv = String(value);
-        menu.querySelectorAll(".adam-qdrop-item").forEach((el) => {
-          el.classList.toggle("selected", el.dataset.value === sv);
+        menu.querySelectorAll(".adam-qdrop-item").forEach((el2) => {
+          el2.classList.toggle("selected", el2.dataset.value === sv);
         });
         if (save) {
           window.adamBridge?.setTweak(prefKey, value);
@@ -8384,7 +8864,7 @@
         const opt = options.find((o) => o.value === v);
         btnLabel.textContent = opt ? opt.label : v;
         const sv = String(v);
-        menu.querySelectorAll(".adam-qdrop-item").forEach((el) => el.classList.toggle("selected", el.dataset.value === sv));
+        menu.querySelectorAll(".adam-qdrop-item").forEach((el2) => el2.classList.toggle("selected", el2.dataset.value === sv));
         if (save) onSave(v);
       }
       options.forEach(({ value, label }) => {
@@ -8516,7 +8996,7 @@
       rowWrap.append(topRow, customWrap, exampleEl);
       return rowWrap;
     }
-    function _buildEngineStatusSection(drm, coreFP) {
+    function _buildEngineStatusSection(drm) {
       const { wrap, body: stBody } = makeSection("Engine Status");
       function spinner() {
         const s = document.createElement("span");
@@ -8532,8 +9012,8 @@
         const fpOk = fp === "ready";
         const fpLoading = fp === "unknown" && procLoading;
         const cbcs = d?.capabilities?.cbcs === true;
-        const sessOk = st.session === "valid" || cbcs;
-        const sessText = st.session === "valid" ? "valid" : cbcs ? "active (cbcs)" : st.session ?? "unknown";
+        const sessOk = cbcs || fpOk;
+        const sessText = cbcs ? "active (cbcs)" : fpOk ? "valid" : "none";
         const sessLoading = !sessOk && (procLoading || proc === "running");
         return [
           { label: "DRM process", ok: procOk, loading: procLoading, text: proc },
@@ -8553,21 +9033,14 @@
         if (!noDot) v.appendChild(loading ? spinner() : dot(ok));
         v.appendChild(document.createTextNode(text));
       }
-      const hasCoreFP = coreFP !== void 0;
       const valEls = [];
       renderStatusRows(drm).forEach((row, i, arr) => {
-        const isLast = !hasCoreFP && i === arr.length - 1;
+        const isLast = i === arr.length - 1;
         const v = statusVal("", row.noDot ? void 0 : row.ok);
         applyStatusRow(v, row);
         valEls.push({ el: v, noDot: !!row.noDot });
         stBody.appendChild(makeRow(row.label, v, row.subtitle, isLast));
       });
-      if (hasCoreFP) {
-        const cfAvail = coreFP?.available === true;
-        const cfVal = statusVal(cfAvail ? "detected" : "not found", cfAvail);
-        const cfSub = cfAvail ? void 0 : "Place CoreFP.dll at ~/.config/Adam/LibCoreFP/";
-        stBody.appendChild(makeRow("CoreFP (FPS)", cfVal, cfSub, true));
-      }
       const refreshRow = document.createElement("div");
       refreshRow.style.cssText = "padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;";
       const refreshBtn = makeBtn("Refresh");
@@ -8933,7 +9406,7 @@
         _onLosslessChange = fn;
       } };
     }
-    async function _buildCacheSection(prefs) {
+    async function _buildCacheSection() {
       const { wrap, body: cBody } = makeSection("Playback Cache");
       const cacheStats = await fetch(`${ENGINE}/api/v1/cache/stats`).then((r) => r.json()).catch(() => null);
       const mvCacheInfo = await fetch(`${ENGINE}/api/v1/cache/mv`).then((r) => r.json()).catch(() => null);
@@ -9245,23 +9718,7 @@
       function makeMiniBtn(_, onClick) {
         return _adamMiniBtn(onClick);
       }
-      function dlSubhead(text) {
-        return _dlSubhead(text);
-      }
-      function dlDropdown(opts, val, onSave) {
-        return _dlDropdown(opts, val, onSave);
-      }
       const losslessAllowed = drmSignedIn && prefs["lossless-enabled"] !== false;
-      const qualityOpts = losslessAllowed ? [
-        { value: "high-quality", label: "High Quality (AAC 256 kbps)" },
-        { value: "lossless", label: "Lossless (ALAC up to 24-bit / 48 kHz)" },
-        { value: "hi-res-lossless", label: "Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)" }
-      ] : [
-        { value: "high-quality", label: "High Quality (AAC 256 kbps)" }
-      ];
-      function makeQualityDropdown(prefKey) {
-        return _adamMakeQualityDropdown(prefKey, prefs, qualityOpts);
-      }
       let previewEl = null;
       function updatePreview() {
         if (!previewEl) return;
@@ -9436,7 +9893,7 @@
       dlBody.appendChild(makeRow("Retry after", retryToDd, null, false));
       return { wrap, applyLossless: applyDlLossless };
     }
-    async function _buildPlaybackSection(prefs, drmSignedIn) {
+    async function _buildPlaybackSection(prefs) {
       const { wrap, body } = makeSection("Playback");
       const resumeRaw = await window.adamBridge?.storeRead("resumeEnabled").catch(() => null);
       const resumeOn = resumeRaw !== "false" && resumeRaw !== false;
@@ -9888,7 +10345,7 @@
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("adam-opening"), { once: true });
       }
-      const [drm, [, tools, prefs, caps]] = await Promise.all([
+      const [drm, [, tools, prefs]] = await Promise.all([
         fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
         _settingsPreload ?? _warmSettingsCache()
       ]);
@@ -9897,12 +10354,11 @@
         _restoreProxy();
         return;
       }
-      const drmState = drm?.state ?? drm ?? {};
       const drmSignedIn = accountSignedIn(drm);
       const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
         _buildThemeSection(prefs),
-        _buildCacheSection(prefs),
-        _buildPlaybackSection(prefs, drmSignedIn),
+        _buildCacheSection(),
+        _buildPlaybackSection(prefs),
         _buildScrobbleSection().then((r) => r.wrap),
         _buildHistorySection(),
         _buildLibrarySection()
@@ -9911,7 +10367,8 @@
         _restoreProxy();
         return;
       }
-      dlg.appendChild(_buildEngineStatusSection(drm, caps?.coreFP));
+      dlg.appendChild(buildAccountSection(drm, openSettings));
+      dlg.appendChild(_buildEngineStatusSection(drm));
       dlg.appendChild(_buildDisplaySection(prefs));
       dlg.appendChild(themeWrap);
       const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);
@@ -10059,7 +10516,6 @@
       const ALL_CON = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(con).join(",\n");
       const ALL_SVG = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(svg).join(",\n");
       const EMBED_LI = li(EMBED_TITLE);
-      const EMBED_CON = con(EMBED_TITLE);
       const s = document.createElement("style");
       s.id = "adam-ctx-icons";
       s.textContent = `
@@ -10150,19 +10606,19 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       });
     }
     function resolveTrackInfo(target) {
-      let el = target;
-      for (let i = 0; i < 25 && el && el !== document.body; i++) {
-        const directHref = el.href || el.getAttribute?.("href") || "";
+      let el2 = target;
+      for (let i = 0; i < 25 && el2 && el2 !== document.body; i++) {
+        const directHref = el2.href || el2.getAttribute?.("href") || "";
         if (directHref) {
           const info = _parseAMHref(directHref);
           if (info) return info;
         }
-        const childLink = el.querySelector?.('a[href*="music.apple.com"]');
+        const childLink = el2.querySelector?.('a[href*="music.apple.com"]');
         if (childLink) {
           const info = _parseAMHref(childLink.href);
           if (info) return info;
         }
-        el = el.parentElement;
+        el2 = el2.parentElement;
       }
       return _parseAMHref(location.href);
     }
@@ -10508,8 +10964,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       if (clearEl) clearEl.style.display = done > 0 ? "" : "none";
       jobs.sort((a, b) => (a.queuePos ?? 0) - (b.queuePos ?? 0));
       const newIds = new Set(jobs.map((j) => j.jobId));
-      list.querySelectorAll("[data-job-id]").forEach((el) => {
-        if (!newIds.has(el.dataset.jobId)) el.remove();
+      list.querySelectorAll("[data-job-id]").forEach((el2) => {
+        if (!newIds.has(el2.dataset.jobId)) el2.remove();
       });
       for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
@@ -10773,16 +11229,16 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       }
     }
     function _tickCountdowns() {
-      document.querySelectorAll(".adam-dl-countdown").forEach((el) => {
-        const jobId = el.closest("[data-job-id]")?.dataset.jobId;
+      document.querySelectorAll(".adam-dl-countdown").forEach((el2) => {
+        const jobId = el2.closest("[data-job-id]")?.dataset.jobId;
         if (!jobId) return;
         const entry = _failedAt.get(jobId);
         if (!entry) {
-          el.textContent = "";
+          el2.textContent = "";
           return;
         }
         const secs = Math.max(0, Math.ceil((entry.deadline - Date.now()) / 1e3));
-        el.textContent = secs > 0 ? `Auto-retry in ${secs}s` : "Retrying\u2026";
+        el2.textContent = secs > 0 ? `Auto-retry in ${secs}s` : "Retrying\u2026";
       });
     }
     function startPolling() {

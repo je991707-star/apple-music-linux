@@ -76,6 +76,7 @@ type OpenRequest struct {
 
 	// Quality / capability hints — providers pick the best match they support.
 	Lossless bool
+	HiRes    bool // true = hi-res ALAC permitted when Lossless is set; false = cap at 44100/16-bit
 	Atmos    bool
 	Video    bool // request a music video if available
 

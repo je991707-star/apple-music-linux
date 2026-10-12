@@ -8,7 +8,10 @@ import (
 
 func TestAuthCoordinatorRejectsUnsolicitedAndDuplicateReplies(t *testing.T) {
 	var auth *AuthCoordinator
-	auth = NewAuthCoordinator(func(DRMSnapshot) {
+	auth = NewAuthCoordinator(func(s DRMSnapshot) {
+		if s.Challenge == nil {
+			return // the "answered" update that withdraws the challenge
+		}
 		if err := auth.SubmitReply("123456"); err != nil {
 			t.Fatalf("reply immediately after prompt: %v", err)
 		}

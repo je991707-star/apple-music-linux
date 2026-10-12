@@ -32,9 +32,4 @@ func colorTag(color, tag string) string {
 	return color + _cBold + tag + _cReset
 }
 
-// Colored tag helpers — use these in log.Printf calls.
-func tagOK(tag string) string    { return colorTag(_cGreen, tag) }
-func tagInfo(tag string) string  { return colorTag(_cCyan, tag) }
-func tagWarn(tag string) string  { return colorTag(_cYellow, tag) }
-func tagErr(tag string) string   { return colorTag(_cRed, tag) }
-func tagVideo(tag string) string { return colorTag(_cPink, tag) }
+func tagInfo(tag string) string { return colorTag(_cCyan, tag) }

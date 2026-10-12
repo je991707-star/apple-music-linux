@@ -29,8 +29,6 @@ type mockBackend struct {
 	running     bool
 	startErr    error // error to return from Start
 	authErr     error // error to return from Authenticate
-	decryptErr  error // error to return from Decrypt
-	decryptResp drm.DecryptResponse
 	accountResp drm.AccountInfo
 	accountErr  error
 	m3u8URL     string
@@ -101,14 +99,6 @@ func (b *mockBackend) Stop() error {
 	b.stopCalled++
 	b.mu.Unlock()
 	return nil
-}
-
-func (b *mockBackend) Decrypt(ctx context.Context, req drm.DecryptRequest) (drm.DecryptResponse, error) {
-	b.mu.Lock()
-	err := b.decryptErr
-	resp := b.decryptResp
-	b.mu.Unlock()
-	return resp, err
 }
 
 func (b *mockBackend) GetM3U8(ctx context.Context, adamID uint64) (string, error) {
@@ -192,6 +182,10 @@ func makeSession(t *testing.T, baseDir string) {
 	}
 	if err := os.WriteFile(filepath.Join(dbDir, "accounts.sqlitedb"), []byte("mock_session"), 0644); err != nil {
 		t.Fatalf("makeSession write: %v", err)
+	}
+	// The backend writes this once hybris_fairplay_init succeeds; it is what HasSession checks.
+	if err := os.WriteFile(filepath.Join(baseDir, "session-ready"), []byte("1"), 0600); err != nil {
+		t.Fatalf("makeSession marker: %v", err)
 	}
 }
 
@@ -290,37 +284,6 @@ func TestManagerMergeEmitSession(t *testing.T) {
 	}
 	if snap.State.Authentication != drm.AuthLoggedIn {
 		t.Errorf("Authentication after ensureRunning: got %s, want logged_in", snap.State.Authentication)
-	}
-}
-
-// TestManagerErrNotAuthenticated verifies that DRM operations return an error
-// when there is no session — not a panic, nil pointer, or wrong error.
-func TestManagerErrNotAuthenticated(t *testing.T) {
-	backend := newMockBackend()
-	mgr, _ := newUnitManager(t, backend) // no makeSession → HasSession() == false
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	if _, err := mgr.GetAccount(ctx); err == nil {
-		t.Error("GetAccount without session: expected error, got nil")
-	}
-	if _, err := mgr.GetM3U8(ctx, 12345); err == nil {
-		t.Error("GetM3U8 without session: expected error, got nil")
-	}
-	if _, err := mgr.Decrypt(ctx, drm.DecryptRequest{AdamID: "x", KeyURI: "k", Samples: nil}); err == nil {
-		t.Error("Decrypt without session: expected error, got nil")
-	}
-	if _, err := mgr.DialCBCS(ctx); err == nil {
-		t.Error("DialCBCS without session: expected error, got nil")
-	}
-
-	// Backend must never have been started.
-	backend.mu.Lock()
-	sc := backend.startCalled
-	backend.mu.Unlock()
-	if sc != 0 {
-		t.Errorf("backend.Start called %d times without a session — must not be called", sc)
 	}
 }
 
@@ -772,32 +735,33 @@ func TestSessionManagerHasSession(t *testing.T) {
 	baseDir := t.TempDir()
 	sm := drm.NewSessionManager(baseDir)
 
-	// No DB at all.
 	if sm.HasSession() {
-		t.Error("HasSession must be false when mpl_db is absent")
+		t.Error("HasSession must be false for an empty profile")
 	}
 
-	// DB directory exists but file is empty.
+	// The Android library creates 4 KB SQLite stubs even when nobody is logged in,
+	// so a non-empty login database alone is not a session.
 	dbDir := filepath.Join(baseDir, "mpl_db")
 	os.MkdirAll(dbDir, 0755)
-	dbPath := filepath.Join(dbDir, "accounts.sqlitedb")
-	os.WriteFile(dbPath, []byte{}, 0644)
+	os.WriteFile(filepath.Join(dbDir, "accounts.sqlitedb"), make([]byte, 4096), 0644)
 	if sm.HasSession() {
-		t.Error("HasSession must be false for a zero-byte DB file")
+		t.Error("HasSession must be false for a login database without the session-ready marker")
 	}
 
-	// DB has content.
-	os.WriteFile(dbPath, []byte("content"), 0644)
+	marker := filepath.Join(baseDir, "session-ready")
+	os.WriteFile(marker, []byte("1"), 0600)
 	if !sm.HasSession() {
-		t.Error("HasSession must be true for a non-empty DB file")
+		t.Error("HasSession must be true once the session-ready marker exists")
 	}
 
-	// ClearSession removes the DB.
 	if err := sm.ClearSession(); err != nil {
 		t.Fatalf("ClearSession: %v", err)
 	}
 	if sm.HasSession() {
 		t.Error("HasSession must be false after ClearSession")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("ClearSession must remove the session-ready marker: %v", err)
 	}
 }
 
@@ -886,87 +850,6 @@ func TestDRMStateStrings(t *testing.T) {
 	}
 }
 
-// TestDecryptWaitsForLeaseRecovery verifies that Decrypt() pauses when lease
-// recovery is active and retries once the recovery gate is opened.
-func TestDecryptWaitsForLeaseRecovery(t *testing.T) {
-	backend := newMockBackend()
-	backend.running = true
-	// First Decrypt call fails (simulates connection-refused during recovery).
-	call := 0
-	backend.decryptErr = errors.New("connection refused")
-
-	mgr, _ := newUnitManager(t, backend)
-
-	// Drive the manager into RecoveryRefreshing state.
-	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-		State: drm.DRMState{
-			Process:  drm.ProcessRunning,
-			FairPlay: drm.FairPlayReady,
-			Recovery: drm.RecoveryRefreshing,
-		},
-		Message: "RECOVERY",
-	}})
-	time.Sleep(20 * time.Millisecond) // let watchEvents apply the state
-
-	// After 50ms, end recovery by emitting RUNNING (RecoveryIdle).
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		backend.mu.Lock()
-		call++
-		backend.decryptErr = nil // second attempt succeeds
-		backend.decryptResp = drm.DecryptResponse{Samples: [][]byte{{0xAB}}}
-		backend.mu.Unlock()
-		backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-			State: drm.DRMState{
-				Process:  drm.ProcessRunning,
-				FairPlay: drm.FairPlayReady,
-				Recovery: drm.RecoveryIdle,
-			},
-			Message: "RUNNING",
-		}})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := mgr.Decrypt(ctx, drm.DecryptRequest{AdamID: "test", KeyURI: "uri"})
-	if err != nil {
-		t.Fatalf("Decrypt: unexpected error after recovery: %v", err)
-	}
-	if len(resp.Samples) == 0 || resp.Samples[0][0] != 0xAB {
-		t.Errorf("Decrypt: unexpected response %v", resp.Samples)
-	}
-}
-
-// TestDecryptTimesOutIfRecoveryStalls verifies that Decrypt returns an error
-// when the recovery gate never opens within the context deadline.
-func TestDecryptTimesOutIfRecoveryStalls(t *testing.T) {
-	backend := newMockBackend()
-	backend.running = true
-	backend.decryptErr = errors.New("connection refused")
-
-	mgr, _ := newUnitManager(t, backend)
-
-	// Drive into recovery — never emit RUNNING, so the gate stays open.
-	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-		State: drm.DRMState{
-			Process:  drm.ProcessRunning,
-			FairPlay: drm.FairPlayReady,
-			Recovery: drm.RecoveryRefreshing,
-		},
-		Message: "RECOVERY",
-	}})
-	time.Sleep(20 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	_, err := mgr.Decrypt(ctx, drm.DecryptRequest{AdamID: "test", KeyURI: "uri"})
-	if err == nil {
-		t.Fatal("Decrypt: expected timeout error, got nil")
-	}
-}
-
 // TestManagerDisableHiRes verifies the embedder opt-out: lossless capabilities
 // stay on, but HiRes is reported false.
 func TestManagerDisableHiRes(t *testing.T) {
@@ -988,5 +871,31 @@ func TestManagerDisableHiRes(t *testing.T) {
 	}
 	if caps.HiRes {
 		t.Error("HiRes must be false when DisableHiRes is set")
+	}
+}
+
+func TestManagerErrNotAuthenticated(t *testing.T) {
+	backend := newMockBackend()
+	mgr, _ := newUnitManager(t, backend) // no makeSession → HasSession() == false
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := mgr.GetAccount(ctx); err == nil {
+		t.Error("GetAccount without session: expected error, got nil")
+	}
+	if _, err := mgr.GetM3U8(ctx, 12345); err == nil {
+		t.Error("GetM3U8 without session: expected error, got nil")
+	}
+	if _, err := mgr.DialCBCS(ctx); err == nil {
+		t.Error("DialCBCS without session: expected error, got nil")
+	}
+
+	// Backend must never have been started.
+	backend.mu.Lock()
+	sc := backend.startCalled
+	backend.mu.Unlock()
+	if sc != 0 {
+		t.Errorf("backend.Start called %d times without a session — must not be called", sc)
 	}
 }

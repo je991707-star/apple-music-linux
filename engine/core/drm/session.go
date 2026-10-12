@@ -2,6 +2,7 @@ package drm
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,12 +75,13 @@ func (s *SessionManager) web() (mut, storefront string) {
 	return fn()
 }
 
-// HasSession reports whether an account is available: either the legacy login database
-// (mpl_db/accounts.sqlitedb) exists and has content, or the web player has supplied a
-// media-user-token. It does NOT guarantee the session is currently usable — use IsSessionValid.
+// HasSession reports whether an account is available: either the session-ready
+// marker written by adamplay_backend after a successful hybris_fairplay_init exists,
+// or the web player has supplied a media-user-token (AAC only).
+// It does NOT guarantee the session is currently usable — use IsSessionValid.
 func (s *SessionManager) HasSession() bool {
-	path := filepath.Join(s.baseDir, "mpl_db", "accounts.sqlitedb")
-	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+	marker := filepath.Join(s.baseDir, "session-ready")
+	if _, err := os.Stat(marker); err == nil {
 		return true
 	}
 	mut, _ := s.web()
@@ -150,25 +152,80 @@ type SessionInfo struct {
 }
 
 // ClearSession removes mpl_db/, STOREFRONT_ID, MUSIC_TOKEN, and drm-state.
+// It writes a logout-pending marker before deleting files so that a crash
+// or Ctrl+C mid-logout is completed by CompletePendingLogout on next startup.
 // The backend process must be stopped before calling ClearSession to avoid
 // storeservicescore writing the files back during deletion.
 func (s *SessionManager) ClearSession() error {
+	marker := filepath.Join(s.baseDir, "logout-pending")
+	// Write marker first; any crash after this point will be recovered on restart.
+	_ = os.WriteFile(marker, []byte("1"), 0o600)
+
 	paths := []string{
 		filepath.Join(s.baseDir, "mpl_db"),
 		filepath.Join(s.baseDir, "STOREFRONT_ID"),
 		filepath.Join(s.baseDir, "MUSIC_TOKEN"),
 		filepath.Join(s.baseDir, "drm-state"),
+		filepath.Join(s.baseDir, "session-ready"),
+		filepath.Join(s.baseDir, deviceIDFile), // the next login gets its own device ID
+		filepath.Join(s.baseDir, "2fa.txt"),
+		// Apple's device trust: the ADI provisioning and FairPlay's device files. Left
+		// behind, Apple recognises the machine on the next sign-in and skips 2FA, so a
+		// sign-out must forget them for every sign-in to start as a new device.
+		filepath.Join(s.baseDir, "adi.pb"),
+		filepath.Join(s.baseDir, "IC-Info.sids"),
+		filepath.Join(s.baseDir, "fsi.pdat"),
 	}
+	paths = append(paths, fairPlayKeyFiles(s.baseDir)...)
 	var lastErr error
 	for _, p := range paths {
 		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
 			lastErr = err
 		}
 	}
+	_ = os.Remove(marker)
+
 	s.mu.Lock()
 	s.lastSuccess = time.Time{}
 	s.mu.Unlock()
 	return lastErr
+}
+
+// fairPlayKeyFiles lists FairPlay's key store files in dir, which it names by a
+// 40-digit upper-case hex hash (e.g. 33F633BF6AC7D676168B84C3594A7941AF2BEC09).
+func fairPlayKeyFiles(dir string) []string {
+	entries, _ := os.ReadDir(dir)
+	var out []string
+	for _, e := range entries {
+		if n := e.Name(); !e.IsDir() && isUpperHex(n, 40) {
+			out = append(out, filepath.Join(dir, n))
+		}
+	}
+	return out
+}
+
+func isUpperHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// CompletePendingLogout checks for a logout-pending marker left by a previous
+// process that was killed mid-ClearSession, and completes the deletion if found.
+// Call this at startup before hybris_fairplay_init.
+func (s *SessionManager) CompletePendingLogout() {
+	marker := filepath.Join(s.baseDir, "logout-pending")
+	if _, err := os.Stat(marker); err != nil {
+		return
+	}
+	log.Printf("[drm] found logout-pending marker — completing interrupted logout")
+	_ = s.ClearSession()
 }
 
 // StateFilePath returns the path of the drm-state file written by main.c.

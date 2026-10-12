@@ -35,10 +35,4 @@ CGO_ENABLED=1 CGO_LDFLAGS="-L$LINKDIR -Wl,-rpath,\$ORIGIN" \
     go build -tags adamplay_backend "$@" -o "$OUT/engine" ./cmd
 cp "$REPO/drm/libdrm_client.so" "$OUT/"
 
-# Deploy corefp_helper Wine subprocess if built (optional — Wine required at runtime).
-if [ -f "$REPO/drm/corefp_helper/corefp_helper.exe.so" ]; then
-    cp "$REPO/drm/corefp_helper/corefp_helper.exe.so" "$OUT/"
-    echo "corefp_helper.exe.so → $OUT"
-fi
-
 echo "engine + DRM libs → $OUT"

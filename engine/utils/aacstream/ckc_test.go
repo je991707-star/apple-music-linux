@@ -23,7 +23,7 @@ func TestAfterRequestRejectsErrorCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := AfterRequest(resp); err == nil {
+	if _, _, err := AfterRequest(resp); err == nil {
 		t.Fatal("AfterRequest accepted a response with non-zero ErrorCode")
 	}
 }
@@ -40,7 +40,7 @@ func TestAfterRequestAcceptsValidResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	license, iv, _, err := AfterRequest(resp)
+	license, iv, err := AfterRequest(resp)
 	if err != nil {
 		t.Fatalf("AfterRequest returned unexpected error: %v", err)
 	}

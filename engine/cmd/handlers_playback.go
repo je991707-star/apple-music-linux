@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,98 +10,17 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"engine/core/diskcache"
 	"engine/core/pipeline"
 	"engine/core/playback"
 	"engine/core/prefetch"
-	"engine/utils/aacstream"
+	"engine/internal/vlog"
 )
-
-// ── MV WebCodecs growing-file seek (ALAC-style) ──────────────────────────────
-//
-// The direct /video-es path streams the decrypted MV fMP4 once into a growing
-// ephemeral cache file while serving the renderer, and builds a live time→byte
-// fragment index. Seeks into already-downloaded media are served from the file
-// (no Apple CDN re-download); only seeks past the download head fall back to the
-// network. The producer is owned by the MV SESSION (not the HTTP request), so it
-// keeps filling the file across seek requests and stops on session release.
-
-type mvGrowingState struct {
-	spw       *diskcache.StreamingPutWriter
-	ix        *aacstream.MVLiveIndex
-	cancel    context.CancelFunc
-	done      chan struct{} // closed after the producer goroutine exits (Commit/Discard done)
-	assetID   string
-	qualifier string
-}
-
-var (
-	mvGrowing   sync.Map   // sessionID → *mvGrowingState (mv-es WebCodecs path)
-	mvGrowingMu sync.Mutex // serializes producer creation (one BeginStreamingPut per session)
-)
-
-// getOrStartMVGrowing returns the session's growing-file producer, starting it on
-// first use with a session-lifetime context. Returns nil if a streaming put can't
-// be opened (caller then uses the stateless network fallback).
-func (s *APIServer) getOrStartMVGrowing(id, assetID, qualifier string) *mvGrowingState {
-	if v, ok := mvGrowing.Load(id); ok {
-		return v.(*mvGrowingState)
-	}
-	mvGrowingMu.Lock()
-	defer mvGrowingMu.Unlock()
-	if v, ok := mvGrowing.Load(id); ok { // double-check under lock
-		return v.(*mvGrowingState)
-	}
-	spw, err := s.diskCache.BeginStreamingPut(assetID, qualifier)
-	if err != nil || spw == nil {
-		return nil
-	}
-	ix := aacstream.NewMVLiveIndex()
-	pctx, cancel := context.WithCancel(s.shutdownCtx) // outlives HTTP requests but not the server
-	st := &mvGrowingState{spw: spw, ix: ix, cancel: cancel, done: make(chan struct{}), assetID: assetID, qualifier: qualifier}
-	mvGrowing.Store(id, st)
-	go func() {
-		// Single whole-track stream to the growing file; the live index records
-		// fragment (time → byte). Producer outlives individual HTTP requests.
-		defer close(st.done) // signal teardown that the writer is fully done
-		err := s.pm.Stream(pctx, id, pipeline.KindVideo, io.MultiWriter(spw, ix))
-		if err != nil {
-			spw.Discard()
-		} else {
-			spw.Commit()
-		}
-	}()
-	log.Printf("%s producer started id=%s assetID=%s q=%s", tagVideo("[mv-es]"), id, assetID, qualifier)
-	return st
-}
-
-// stopMVGrowing cancels a session's growing-file producer and removes the scratch
-// file. The mv-es file is a per-session seek scratch (persistent MV caching, when
-// enabled, is the dec-cache's separate job), so it is always removed on release.
-func (s *APIServer) stopMVGrowing(id string) {
-	if v, ok := mvGrowing.LoadAndDelete(id); ok {
-		st := v.(*mvGrowingState)
-		st.cancel()
-		// Wait for the producer to fully exit (Discard/Commit done) before removing
-		// the scratch file, so Remove() never races an active writer. Bounded so a
-		// stuck producer can't hang session teardown.
-		select {
-		case <-st.done:
-		case <-time.After(5 * time.Second):
-			log.Printf("%s producer stop timed out id=%s (removing anyway)", tagWarn("[mv-es]"), id)
-		}
-		s.diskCache.Remove(st.assetID, st.qualifier)
-		log.Printf("%s producer stopped + scratch removed id=%s assetID=%s", tagInfo("[mv-es]"), id, st.assetID)
-	}
-}
 
 // parseRangeStart extracts the start offset from an HTTP Range header value.
 // Handles "bytes=X-" and "bytes=X-Y". Returns 0 for unrecognised formats.
@@ -261,6 +178,7 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 			Token:       token,
 			MUT:         mut,
 			Lossless:    req.Capabilities.Lossless,
+			HiRes:       req.Capabilities.HiRes,
 			Video:       req.Capabilities.Video,
 			Atmos:       req.Capabilities.Atmos,
 			Language:    s.lang(r),
@@ -468,17 +386,17 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 // background. The context is detached from any client so the cache still
 // commits when the listener disconnects mid-track (skip).
 func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWriter) {
-	log.Printf("[cache] startCacheDownload START: session=%s", id)
+	vlog.Printf("[cache] startCacheDownload START: session=%s", id)
 	downloadCtx, cancel := context.WithTimeout(s.shutdownCtx, 15*time.Minute) // shutdownCtx: from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
 	go func() {
 		defer cancel()
 		defer s.alac.done(id)
-		log.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
+		vlog.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
 		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, s.alac.writer(downloadCtx, id, spw)); err != nil {
 			log.Printf("[cache] startCacheDownload pm.Stream ERROR: session=%s err=%v", id, err)
 			spw.Discard()
 		} else {
-			log.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
+			vlog.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
 			spw.Commit()
 		}
 	}()
@@ -526,8 +444,6 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// Stop the mv-es WebCodecs growing-file producer and remove its scratch file.
-	s.stopMVGrowing(id)
 	// Cancel any active vseg (segmented video) producer for this session.
 	s.stopVsegSession(id)
 	// If this session's MV faststart file was written under "caching disabled",
@@ -556,223 +472,6 @@ func (s *APIServer) handlePlaybackContext(w http.ResponseWriter, r *http.Request
 	}
 	jobID := s.scheduler.Submit(payload)
 	writeJSON(w, http.StatusAccepted, map[string]string{"jobId": jobID})
-}
-
-var (
-	ffmpegOnce sync.Once
-	ffmpegPath string
-)
-
-// transcodeVideoForMSE remuxes the decrypted fMP4 through FFmpeg with -c:v copy:
-// selects only the first video stream (drops audio and caption tracks), re-fragments
-// for MSE (frag_keyframe+empty_moov+default_base_moof), and normalises the container
-// without re-encoding so the original codec string (e.g. avc1.640028) is preserved
-// and matches the SourceBuffer declaration in the renderer. Near-zero CPU overhead.
-// Falls back to direct pass-through if FFmpeg is not in PATH.
-// transcodeVideoForMSE remuxes decrypted fMP4 to a fragmented MSE-friendly form.
-// tsOffsetSec re-anchors the output onto the real timeline: make_zero shifts the
-// first output timestamp to 0, then -output_ts_offset adds tsOffsetSec back, so a
-// seek stream starting at segment time T outputs fragments at real time T instead
-// of 0. Pass the actual segment start for seeks (so the client's currentTime lands
-// inside the buffered range, matching ServeMVDecFrom) and 0 for full plays (whose
-// cached output must start at 0 to stay consistent with the fragment index).
-func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer, tsOffsetSec float64, durationSec ...float64) error {
-	ffmpegOnce.Do(func() {
-		ffmpegPath, _ = exec.LookPath("ffmpeg")
-		if ffmpegPath == "" {
-			log.Printf("[video] ffmpeg not found, streaming raw fMP4 (CHUNK_DEMUXER errors possible)")
-		}
-	})
-	if ffmpegPath == "" {
-		return src(dst)
-	}
-	args := []string{
-		"-loglevel", "warning",
-		"-i", "pipe:0",
-		"-map", "0:v:0", // first video stream only — drops audio and caption tracks
-		"-c:v", "copy", // preserve original codec (avc1.640028); no re-encode
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets",
-		"-avoid_negative_ts", "make_zero", // B-frames: shift DTS so minimum is 0
-	}
-	if tsOffsetSec > 0 {
-		// Re-anchor make_zero's 0-based output back onto the real timeline so a
-		// seek's fragments carry their true presentation times.
-		args = append(args, "-output_ts_offset", strconv.FormatFloat(tsOffsetSec, 'f', 6, 64))
-	}
-	if len(durationSec) > 0 && durationSec[0] > 0 {
-		// Tell FFmpeg the total duration so it writes a valid mvhd duration into the
-		// moov box. Without this, empty_moov produces duration=0 and the browser's
-		// <video> element shows an indeterminate seek bar.
-		args = append(args, "-t", strconv.FormatFloat(durationSec[0], 'f', 3, 64))
-	}
-	args = append(args, "-f", "mp4", "pipe:1")
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	cmd.Stdout = dst
-
-	t0ff := time.Now()
-	runErr, srcErr := runFFmpegFromSource(cmd, src, "[ffmpeg-video]")
-
-	ctxErr := ctx.Err()
-	if runErr != nil {
-		if ctxErr != nil {
-			log.Printf("[ffmpeg-video] killed by context after %.2fs: %v", time.Since(t0ff).Seconds(), ctxErr)
-			return ctxErr
-		}
-		return fmt.Errorf("ffmpeg video remux: %w", runErr)
-	}
-	if ctxErr != nil {
-		// FFmpeg exited cleanly but context was already cancelled — treat as cancel.
-		log.Printf("[ffmpeg-video] exited OK but ctx cancelled after %.2fs", time.Since(t0ff).Seconds())
-		return ctxErr
-	}
-	if srcErr != nil {
-		return fmt.Errorf("video source: %w", srcErr)
-	}
-	return nil
-}
-
-// transcodeVideoFaststart remuxes the decrypted fMP4 into a NON-fragmented,
-// faststart MP4 written to outPath (a real seekable file — faststart's moov
-// relocation needs a seekable output, so this cannot stream to a pipe). Unlike
-// transcodeVideoForMSE's empty_moov fragmented output, this produces a complete
-// moov with a full sample table, which is what Chrome's <video src> file demuxer
-// requires — an empty_moov fragmented file fails with MEDIA_ERR_SRC_NOT_SUPPORTED.
-func transcodeVideoFaststart(ctx context.Context, src func(io.Writer) error, outPath string, durationSec float64) error {
-	ffmpegOnce.Do(func() {
-		ffmpegPath, _ = exec.LookPath("ffmpeg")
-	})
-	if ffmpegPath == "" {
-		return fmt.Errorf("ffmpeg not found")
-	}
-	args := []string{
-		"-loglevel", "warning",
-		"-i", "pipe:0",
-		"-map", "0:v:0", // first video stream only
-		"-c:v", "copy", // preserve avc1.640028; no re-encode
-		"-movflags", "+faststart", // moov at front, full sample table (seekable file)
-	}
-	if durationSec > 0 {
-		args = append(args, "-t", strconv.FormatFloat(durationSec, 'f', 3, 64))
-	}
-	args = append(args, "-y", "-f", "mp4", outPath)
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-
-	runErr, srcErr := runFFmpegFromSource(cmd, src, "[ffmpeg-video-fs]")
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if runErr != nil {
-		return fmt.Errorf("ffmpeg faststart remux: %w", runErr)
-	}
-	if srcErr != nil {
-		return fmt.Errorf("video source: %w", srcErr)
-	}
-	return nil
-}
-
-// runFFmpegFromSource runs cmd with src streamed into its stdin and its stderr
-// logged line by line under logPrefix, returning FFmpeg's and the source's
-// errors.
-//
-// FFmpeg may stop reading before the source is exhausted (-t reached, an
-// error, or a context kill). The source would then block forever writing to a
-// pipe nobody reads, so once FFmpeg exits the pipe is closed to release it; a
-// source error caused by that closure is not reported. The source records its
-// error before closing the pipe, so a genuine failure that ended FFmpeg's
-// input is always seen.
-func runFFmpegFromSource(cmd *exec.Cmd, src func(io.Writer) error, logPrefix string) (runErr, srcErr error) {
-	pr, pw := io.Pipe()
-	cmd.Stdin = pr
-
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err), nil
-	}
-	cmd.Stderr = stderrW
-
-	srcErrCh := make(chan error, 1)
-	go func() {
-		err := src(pw)
-		srcErrCh <- err // before closing: FFmpeg sees EOF only after the error is recorded
-		pw.CloseWithError(err)
-	}()
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		sc := bufio.NewScanner(stderrR)
-		for sc.Scan() {
-			log.Printf("%s %s", logPrefix, sc.Text())
-		}
-	}()
-
-	runErr = cmd.Run()
-	stderrW.Close()
-	<-stderrDone
-	stderrR.Close()
-
-	select {
-	case srcErr = <-srcErrCh: // the source finished on its own; its error is real
-	default:
-		pr.CloseWithError(io.ErrClosedPipe) // FFmpeg stopped reading first: release the source
-		<-srcErrCh
-	}
-	return runErr, srcErr
-}
-
-// mvCDNClient is a dedicated HTTP client for proxying requests to Apple's
-// progressive video CDN (mvod.itunes.apple.com). Uses a 30s timeout to avoid
-// hanging indefinitely on stalled CDN connections.
-var mvCDNClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
-
-// mvProgressiveTTL is the maximum age of a cached progressive URL/downloadKey
-// before the CDN proxy handler proactively refreshes them from the DRM backend.
-// Apple's CDN URLs typically expire after ~15 minutes.
-const mvProgressiveTTL = 10 * time.Minute
-
-// prepareMVFaststart builds the faststart MP4 cache for a video session in the
-// background (download → decrypt → faststart remux → commit). Guarded by
-// diskCache.BeginPut's in-flight lock so only one job per asset runs.
-func (s *APIServer) prepareMVFaststart(id, assetID string, durationSec float64) {
-	const qualifier = "mv-dl"
-	pw, _ := s.diskCache.BeginPut(assetID, qualifier)
-	if pw == nil {
-		return // another goroutine is already preparing this asset
-	}
-	s.mvPreparing.Store(assetID, struct{}{})
-	tmpPath := pw.File.Name()
-	pw.File.Close() // ffmpeg writes the path itself; keep the in-flight lock via pw
-
-	log.Printf("%s prepare faststart start assetID=%s dur=%.1fs", tagVideo("[video-dl]"), assetID, durationSec)
-	ctx, cancel := context.WithTimeout(s.shutdownCtx, 20*time.Minute)
-	defer cancel()
-	err := transcodeVideoFaststart(ctx, func(dst io.Writer) error {
-		return s.pm.Stream(ctx, id, pipeline.KindVideo, dst)
-	}, tmpPath, durationSec)
-	s.mvPreparing.Delete(assetID)
-	if err != nil {
-		log.Printf("%s prepare faststart FAILED assetID=%s: %v", tagErr("[video-dl]"), assetID, err)
-		pw.Discard()
-		return
-	}
-	if err := pw.Commit(); err != nil {
-		log.Printf("%s prepare faststart commit FAILED assetID=%s: %v", tagErr("[video-dl]"), assetID, err)
-		return
-	}
-	// When MV caching is disabled in settings, the file must still exist on disk
-	// (native <video src> plays FROM it), but it must not persist. Mark it
-	// ephemeral so it's deleted when the session is released (track change / exit).
-	if !aacstream.MVCacheEnabled() {
-		s.mvEphemeral.Store(assetID, struct{}{})
-	}
-	if fi, e := os.Stat(func() string { p, _ := s.diskCache.Path(assetID, qualifier); return p }()); e == nil {
-		log.Printf("%s prepare faststart DONE assetID=%s size=%d ephemeral=%v", tagOK("[video-dl]"), assetID, fi.Size(), !aacstream.MVCacheEnabled())
-	}
 }
 
 // streamMedia runs fn into a firstByteWriter so that:
@@ -839,124 +538,4 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += int64(n)
 	return n, err
-}
-
-// boxCoalescer buffers incoming bytes and forwards only COMPLETE top-level MP4
-// boxes to the wrapped writer. Layered over firstByteWriter (which flushes every
-// Write), this collapses one-flush-per-network-chunk down to one-flush-per-box,
-// so FFmpeg's heavily fragmented output no longer triggers thousands of tiny
-// flush syscalls — while the player still receives each moof/mdat whole (never a
-// partial fragment, so no stall). Call Flush() after the stream ends to emit any
-// trailing bytes (a final partial box, or a size==0 "to EOF" box).
-//
-// MSE-only: used solely by the MV video path. The audio path keeps per-write
-// flushing because it can carry ALAC→VLC, which must not be touched.
-// maxCoalescedBox bounds how much a single box may be buffered. FFmpeg's
-// fragments are far smaller; a larger (or corrupt 64-bit) size switches the
-// coalescer to passthrough instead of buffering it whole in memory.
-const maxCoalescedBox = 64 << 20
-
-type boxCoalescer struct {
-	w        io.Writer
-	buf      []byte
-	pass     bool  // once set, stop framing and stream directly (never buffer)
-	writesIn int   // Write() calls received (≈ network/pipe chunks)
-	boxesOut int   // downstream flushes emitted (one per whole box)
-	bytesOut int64 // total bytes forwarded
-}
-
-func (c *boxCoalescer) Write(p []byte) (int, error) {
-	c.writesIn++
-	if c.pass {
-		n, err := c.w.Write(p)
-		c.bytesOut += int64(n)
-		return len(p), err
-	}
-	c.buf = append(c.buf, p...)
-	for len(c.buf) >= 8 {
-		size := int(binary.BigEndian.Uint32(c.buf[:4]))
-		if size == 1 { // 64-bit largesize lives in bytes[8:16]
-			if len(c.buf) < 16 {
-				break // need the largesize field before we can measure the box
-			}
-			size = int(binary.BigEndian.Uint64(c.buf[8:16]))
-		}
-		if size < 8 || size > maxCoalescedBox {
-			// size==0 ("extends to EOF"), malformed, or too large to buffer: we
-			// can't (or won't) frame further.
-			// Flush what we have and switch to direct passthrough so the rest of
-			// the stream is never buffered unboundedly in memory.
-			if err := c.enterPassthrough(); err != nil {
-				return 0, err
-			}
-			return len(p), nil
-		}
-		if len(c.buf) < size {
-			break // box not fully buffered yet
-		}
-		if _, err := c.w.Write(c.buf[:size]); err != nil {
-			return 0, err
-		}
-		c.boxesOut++
-		c.bytesOut += int64(size)
-		c.buf = c.buf[size:]
-	}
-	return len(p), nil
-}
-
-// enterPassthrough flushes the current buffer and disables framing, so any
-// remaining (unframeable) bytes stream directly instead of accumulating.
-func (c *boxCoalescer) enterPassthrough() error {
-	c.pass = true
-	if len(c.buf) == 0 {
-		return nil
-	}
-	n, err := c.w.Write(c.buf)
-	c.boxesOut++
-	c.bytesOut += int64(n)
-	c.buf = nil
-	return err
-}
-
-// Flush emits any bytes buffered past the last complete box.
-func (c *boxCoalescer) Flush() error {
-	if len(c.buf) == 0 {
-		return nil
-	}
-	n, err := c.w.Write(c.buf)
-	c.boxesOut++
-	c.bytesOut += int64(n)
-	c.buf = nil
-	return err
-}
-
-// streamMediaCoalesced is streamMedia with fragment-aligned flushing for the MV
-// video path. fn writes an fMP4 byte stream into a boxCoalescer that forwards
-// whole boxes to a firstByteWriter (header-defer + flush). It must NOT be used
-// for audio — that path can serve ALAC to VLC and relies on per-write flushing.
-func streamMediaCoalesced(w http.ResponseWriter, r *http.Request, fn func(io.Writer) error, ct string) {
-	bw := &firstByteWriter{w: w, ct: ct}
-	bc := &boxCoalescer{w: bw}
-	err := fn(bc)
-	if err != nil {
-		if r.Context().Err() != nil {
-			return // client disconnected — not an error
-		}
-		if !bw.started {
-			// No complete box was ever emitted — report a clean error instead of
-			// committing 200 headers over a sub-fragment of garbage.
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		bc.Flush() //nolint:errcheck — emit the trailing partial fragment of an already-started stream
-		slog.Error("stream error (partial)", "err", err)
-		return
-	}
-	if ferr := bc.Flush(); ferr != nil && r.Context().Err() == nil {
-		slog.Error("stream flush error", "err", ferr)
-	}
-	// Proof line: flushes collapsed to one-per-box. boxesOut ≪ writesIn confirms
-	// coalescing is active; boxesOut == the fragment count for the track.
-	log.Printf("[video] coalesced flushes: %d boxes from %d writes (%d bytes)",
-		bc.boxesOut, bc.writesIn, bc.bytesOut)
 }
