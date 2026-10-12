@@ -8,7 +8,7 @@ on:
       tag:
         description: Release tag to attach the packages to (the draft is created if missing)
         required: true
-        default: v1.4.0
+        default: v1.5.0
 
 permissions:
   contents: write
@@ -69,6 +69,7 @@ jobs:
         with:
           lfs: false
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: UCRT64
           path-type: inherit
@@ -87,7 +88,7 @@ jobs:
         run: choco install vlc --no-progress -y
       - name: Build the installer
         shell: pwsh
-        run: scripts\build-windows.ps1 -Msys C:\msys64\ucrt64\bin
+        run: scripts\build-windows.ps1 -Msys "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
       - name: Attach to a draft release
         shell: pwsh
         env:

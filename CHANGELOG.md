@@ -2,10 +2,10 @@
 
 All notable changes to Adam (formerly Apple Music Linux), from the first release. The format follows Keep a
 Changelog, and releases are numbered MAJOR.MINOR.PATCH (the early ones were published as
-pre-releases). Narrative release notes for 1.4.0 are in releases/v1.4.0.md; earlier ones are on
+pre-releases). Narrative release notes for 1.4.0 and 1.5.0 are in releases/; earlier ones are on
 the project's Releases page.
 
-## Unreleased
+## 1.5.0 - 2026-10-13
 
 ### Lossless (ALAC)
 - **Lossless playback works again, decrypted the way the upstream downloader does.** Every FairPlay key, including the shared prefetch key that encrypts each track's first segment, now goes through Apple's own key exchange (`getKdContext`) and sample decryptor. Previously the first segment was passed through or decrypted with an all-zero key, and the track key was requested from Widevine under an all-zero key ID, which garbled the audio. Only the key tags on segments 0 and 1 are used, as upstream does. Streaming to the disk cache and VLC is unchanged, so playback still starts before the download finishes.
@@ -15,6 +15,12 @@ the project's Releases page.
 - **Each install now has its own device identity.** Every install used to present the same hard-coded Android ID to Apple. A new install generates a random one (stored in `drm/files/device-id`); an install that is already signed in keeps the old one until its next sign-out, so the upgrade does not log anyone out.
 - **Fixed:** decode times were patched before decrypting, which shifted every sample by 4 bytes when a fragment carried a 32-bit `tfdt`; a parser panic on a malformed fragment could crash the whole engine (now it fails that stream only); a stale "Kernel restriction detected" dialog could pop up on unrelated engine output; the Cavern reader trusted chunk sizes from its socket.
 - **Removed** the unused CoreFP/Wine route, the old native FairPlay licence exchange and about 18,000 lines of other unreachable code.
+
+### Sign-in for lossless
+- **An Apple-style sign-in sheet.** Settings → Account → Sign In… opens a sheet over Settings in the style of macOS's Apple Account sheets: email and password (with a button that shows the password for a few seconds), then a six-digit verification-code screen that accepts typing, pasting and autofill. The code goes straight to Apple's FairPlay login; a wrong code clears the fields and asks again, and the sheet closes by itself once lossless is ready.
+- **Sign-in no longer hangs after the verification code.** The engine waited on a lock it already held once Apple accepted the code, so FairPlay never reported ready and the sheet stayed open.
+- **Every sign-in asks for the verification code.** Signing out now also forgets Apple's trust in this computer (`adi.pb` and FairPlay's device files) and restarts the engine, which dropped that trust from memory; before, Apple sometimes skipped the code after a sign-out.
+- **Challenges are numbered**, so a wrong code is told apart from the same request arriving again, and an answered challenge is withdrawn at once, so reloading the page during sign-in does not ask for the same code twice.
 
 ### Reliability and sign-in
 Ported from the pull request by Flavio Giacchetti ([silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1)), adapted to Adam (Windows included, `adam` names).
@@ -43,7 +49,7 @@ Ported from the pull request by Flavio Giacchetti ([silentone12725/apple-music-l
 ### Windows
 - **Windows 10/11 x64 support.** NSIS installer built by `scripts/build-windows.ps1`; the DRM library is a MinGW DLL (`drm_linux.c` + libcrypto) and the engine builds with cgo and libvlc.
 - **System integration.** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `adam://` links, Discord Rich Presence over the named pipe, Mica backdrop and a Windows-native config location.
-- **DRM backend renamed `adamplay`** (`AdamplayBackend`, build tag `adamplay_backend`, was `native_backend`); the hybris/Android runtime was removed.
+- **DRM backend renamed `adamplay`** (`AdamplayBackend`, build tag `adamplay_backend`, was `native_backend`). Windows has no Android runtime, so it stays AAC-only.
 
 ### Playback lifecycle and mixer
 Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1), adapted to Adam.
@@ -60,8 +66,7 @@ Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone127
 - **Device identity:** an existing or earlier identity is used before anything else; generating one is opt-in (`ADAM_GENERATE_IDENTITY=1`) because the license server rejects self-made ones. Key contexts are wiped and freed.
 
 ### Fixes
-- **Settings no longer has an Engine Account sign-in.** The DRM layer runs on the web session, so the separate sign-in (and its Apple ID and verification-code forms) was removed; Engine Status stays, and the lossless and download tooltips now say the DRM session must be ready.
-- **Lossless works from the web sign-in alone.** The DRM layer used to start only if a legacy login database from the removed Android wrapper existed, so a profile that only signed in on the web never got FairPlay and the Lossless toggle stayed greyed out. The web player's token now counts as the session: it starts the backend, backs account lookups when there are no credential files, and the Lossless and Streaming quality controls are always usable. Status is reported honestly: `process: stopped` while idle, and session/auth are no longer claimed by the backend itself.
+- **Lossless needs its own Apple Account sign-in.** FairPlay keeps a session separate from the web player's, so the web sign-in covers AAC, the catalog and the library, and lossless needs the sign-in under Settings → Account. Status is reported honestly: `process: stopped` while idle, and session/auth are no longer claimed by the backend itself.
 - Export: titles containing a dot no longer lose the file extension; the final move never overwrites a file the policy protects; job phases only move forward and finished jobs stay finished; relative output folders are made absolute.
 - Seek requests from a skipped track are refused (409); `NaN`/`Inf` seek times, negative cache sizes and oversized samples or SOFA headers are rejected; the engine accepts only its own loopback origin (`ADAM_ALLOW_LOCAL_ORIGINS=1` allows others).
 - Library: query failures are logged, playlist paging cannot loop forever. Prefetch: closed-queue pushes are handed back; stale context jobs are cancelled. Opening an asset can no longer wedge after a provider panic. SSE: `waitFor` no longer leaks listeners and reconnects back off after short-lived connections. Imported theme presets are validated.

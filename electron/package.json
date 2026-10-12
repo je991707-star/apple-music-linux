@@ -1,6 +1,6 @@
 {
   "name": "adam",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Adam, an Apple Music desktop client for Linux and Windows",
   "license": "MIT",
   "main": "main.mjs",
