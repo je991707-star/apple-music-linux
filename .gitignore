@@ -189,5 +189,3 @@ drm/*.o
 # No trailing slash: in a dev checkout drm/rootfs is often a symlink.
 /drm/rootfs
 /drm/native/
-/drm/hybris-linker/
-/drm/libhybris-core.so

@@ -62,6 +62,10 @@
       {
         "from": "../drm/stubs/out",
         "to": "android-stubs"
+      },
+      {
+        "from": "../drm/hybris-linker",
+        "to": "hybris-linker"
       }
     ],
     "linux": {

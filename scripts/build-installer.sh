@@ -101,6 +101,7 @@ else
     cp "$REPO/assets/tray-icon.png" "$R/tray-icon.png"
     rm -rf "$R/vlc" && cp -r "$RES_SRC/vlc" "$R/vlc"
     rm -rf "$R/ffmpeg" && cp -a "$REPO/third_party/ffmpeg" "$R/ffmpeg"
+    rm -rf "$R/hybris-linker" && cp -r "$DRM/hybris-linker" "$R/hybris-linker"
     # the renderer bundles were refreshed in step 3 (build-renderer.sh updates this directory)
 fi
 # electron-builder recreates linux-unpacked after build-renderer.sh refreshed it. Always ship fresh
@@ -121,7 +122,8 @@ for f in engine libdrm_client.so \
          ffmpeg/bin/ffmpeg ffmpeg/lib/libavcodec.so.63 ffmpeg/lib/libavutil.so.61 ffmpeg/lib/libavformat.so.63 \
          tray-icon.png icon.png app.asar \
          fetch-fairplay-libs.sh fairplay-libs.lock \
-         android-stubs/libandroid.so android-stubs/libOpenSLES.so android-stubs/libdl.so; do
+         android-stubs/libandroid.so android-stubs/libOpenSLES.so android-stubs/libdl.so \
+         hybris-linker/q.so; do
     [ -e "$RES/$f" ] || die "packaged resources/$f missing — the installed app would not work"
 done
 [ ! -e "$RES/libdrm-native.so" ] || die "stale resources/libdrm-native.so is packaged (old wrapper library)"
