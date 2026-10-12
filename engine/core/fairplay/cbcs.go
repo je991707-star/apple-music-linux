@@ -234,12 +234,14 @@ func CBCSSource(adamID string, dialer CBCSDialer, fileURL string, keyURIs []stri
 }
 
 type cbcsSource struct {
-	adamID     string
-	dialer     CBCSDialer
-	fileURL    string
-	keyURIs    []string
-	kidBase64  string // KID from playlist for license acquisition
-	durationMs int    // 0 = leave moov duration unchanged
+	adamID       string
+	dialer       CBCSDialer
+	fileURL      string
+	keyURIs      []string
+	kidBase64    string // KID from playlist for license acquisition
+	durationMs   int    // 0 = leave moov duration unchanged
+	lastArmedKey string // key URI most recently sent via sendKeyHandshake
+	tencIV       []byte // DefaultConstantIV from tenc box (set after init segment is parsed)
 }
 
 // Stream implements pipeline.Source.  It wraps streamAttempt in a retry loop
@@ -398,6 +400,7 @@ type cbcsSkipSource struct {
 	durationMs int
 	startFrag  int
 	startKey   string
+	tencIV     []byte // DefaultConstantIV from tenc box (set after init segment is parsed)
 }
 
 func (s *cbcsSkipSource) Stream(ctx context.Context, w io.Writer) error {
@@ -548,7 +551,7 @@ func patchAlacFragmentSeq(frag *mp4.Fragment, seqNum int, accumulatedTfdt uint64
 // sendInitialKey sends the seek start key to the decryption socket before the
 // first kept fragment is decrypted.
 func (s *cbcsSkipSource) sendInitialKey(rw *bufio.ReadWriter) error {
-	return sendKeyHandshake(rw, s.adamID, s.startKey)
+	return sendKeyHandshake(rw, s.adamID, s.startKey, s.tencIV)
 }
 
 // sendSeekFragKey switches decryption keys at fragment i when a new key URI is
@@ -576,6 +579,9 @@ func (s *cbcsSkipSource) sendSeekFragKey(i int, rw *bufio.ReadWriter) error {
 	if err := alacstream.SendString(rw, keyURI); err != nil {
 		return fmt.Errorf("cbcs seek: send key %d: %w", i, err)
 	}
+	if err := alacstream.SendBytes(rw, s.tencIV); err != nil {
+		return fmt.Errorf("cbcs seek: send IV %d: %w", i, err)
+	}
 	return nil
 }
 
@@ -583,26 +589,30 @@ func (s *cbcsSkipSource) sendSeekFragKey(i int, rw *bufio.ReadWriter) error {
 // Errors are intentionally ignored — key delivery is best-effort and a
 // failure here manifests as a decrypt error on the next fragment.
 func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
-	if i >= len(s.keyURIs) || s.keyURIs[i] == "" {
+	// Fragment 0 key was pre-armed by the initial sendKeyHandshake in streamAttempt.
+	if i == 0 || i >= len(s.keyURIs) || s.keyURIs[i] == "" {
 		return
 	}
-	if i != 0 {
-		alacstream.SwitchKeys(rw)
-	}
-	// Use the real KID from the playlist if available, otherwise use the key URI as-is
+	// Compute the key URI we would send — same KID logic as the pre-arm.
 	keyURI := s.keyURIs[i]
 	if s.kidBase64 != "" {
-		// Replace the placeholder KID in the key URI with the real one
-		// Format: skd://itunes.apple.com/pXXXX/cN,kidBase64
 		if idx := strings.LastIndex(keyURI, ","); idx >= 0 {
 			keyURI = keyURI[:idx+1] + s.kidBase64
 		} else {
 			keyURI = keyURI + "," + s.kidBase64
 		}
-		log.Printf("[cbcs] sendFragKey: using real KID: %s", s.kidBase64)
 	}
+	// Skip SwitchKeys when the key hasn't changed from what we pre-armed.
+	// For Apple Music ALAC, keyURIs[1] is the same key as prewarmKey, so
+	// this avoids a redundant hybris_open_kd_ctx_from_uri call (~2s stall).
+	if keyURI == s.lastArmedKey {
+		return
+	}
+	alacstream.SwitchKeys(rw)
 	alacstream.SendString(rw, keyAdamID(s.adamID, s.keyURIs[i]))
 	alacstream.SendString(rw, keyURI)
+	alacstream.SendBytes(rw, s.tencIV)
+	s.lastArmedKey = keyURI
 }
 
 // effectiveKeyURI returns the key in force at fragment i: the last non-empty
@@ -614,6 +624,70 @@ func effectiveKeyURI(keyURIs []string, i int) string {
 		}
 	}
 	return ""
+}
+
+// isSentinelKeyURI reports whether uri is Apple's placeholder init sentinel.
+// Apple uses P000000000 (uppercase, all-zeros) in ALAC playlists to mark the
+// init segment as needing no decryption, and p000000001 (lowercase, near-zero)
+// as a dummy URI in the DRM warm-up path. Both cause SIGABRT in the Android
+// library and must never reach hybris_open_kd_ctx_from_uri.
+func isSentinelKeyURI(uri string) bool {
+	lower := strings.ToLower(uri)
+	return strings.Contains(lower, "/p000000000/") ||
+		strings.Contains(lower, "/p000000001/")
+}
+
+// firstNonSentinelKey returns the first key in keyURIs that encrypts real
+// audio content (i.e. not the init-segment sentinel). Returns "" if all
+// keys are empty or sentinel.
+func firstNonSentinelKey(keyURIs []string) string {
+	for _, k := range keyURIs {
+		if k != "" && !isSentinelKeyURI(k) {
+			return k
+		}
+	}
+	return ""
+}
+
+// FirstAudioKeyURI returns the first key URI in keyURIs that encrypts real
+// audio content (not Apple's init-segment sentinel). Use it to pre-warm the
+// hybris SQLite key cache before the CBCS pipeline needs the key.
+func FirstAudioKeyURI(keyURIs []string) string { return firstNonSentinelKey(keyURIs) }
+
+// WarmCBCSKey opens a throwaway CBCS connection, sends the key handshake, and
+// closes the connection. This triggers hybris_open_kd_ctx_from_uri in the DRM
+// backend, which fetches the FairPlay key from Apple's server and caches it in
+// the Android SQLite store (mpl_db/). Subsequent CBCS connections for the same
+// key URI return the cached key in <10 ms instead of ~2 s.
+//
+// Call it in a goroutine as soon as adamID and keyURI are known — before the
+// CDN download starts. The 2 s hybris call then overlaps with the CDN download.
+func WarmCBCSKey(ctx context.Context, dialer CBCSDialer, adamID, keyURI string) {
+	if dialer == nil || adamID == "" || keyURI == "" || isSentinelKeyURI(keyURI) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conn, err := dialer.DialCBCS(ctx)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	// Wire protocol: [1-byte len][adamID][1-byte len][keyURI][1-byte ivLen=0]
+	// Writing this atomically ensures serveCBCS reads all three fields before
+	// the connection closes, triggering hybris even though we never send a
+	// fragment.  The IV is empty (len=0) because we do not have the tenc IV
+	// at this call site; serveCBCS only uses it for XOR-fixing decrypted
+	// samples, so it is safe to omit here.
+	effID := keyAdamID(adamID, keyURI)
+	msg := make([]byte, 0, 3+len(effID)+len(keyURI))
+	msg = append(msg, byte(len(effID)))
+	msg = append(msg, effID...)
+	msg = append(msg, byte(len(keyURI)))
+	msg = append(msg, keyURI...)
+	msg = append(msg, 0) // ivLen = 0
+	conn.Write(msg) // nolint: errcheck — close handles cleanup
+	// conn.Close() fires: serveCBCS exits cleanly after hybris returns.
 }
 
 // keyAdamID is the adamID sent with a key URI: the shared prefetch key is
@@ -628,7 +702,8 @@ func keyAdamID(adamID, uri string) string {
 // sendKeyHandshake selects uri on a connection that has no key yet (fresh or
 // just reconnected). Unlike a mid-stream switch it must not be preceded by
 // SwitchKeys: the server's first read on a new connection is the adamID.
-func sendKeyHandshake(rw *bufio.ReadWriter, adamID, uri string) error {
+// tencIV is the DefaultConstantIV from the tenc box (nil → empty field sent).
+func sendKeyHandshake(rw *bufio.ReadWriter, adamID, uri string, tencIV []byte) error {
 	if uri == "" {
 		return nil
 	}
@@ -637,6 +712,9 @@ func sendKeyHandshake(rw *bufio.ReadWriter, adamID, uri string) error {
 	}
 	if err := alacstream.SendString(rw, uri); err != nil {
 		return fmt.Errorf("cbcs: send key: %w", err)
+	}
+	if err := alacstream.SendBytes(rw, tencIV); err != nil {
+		return fmt.Errorf("cbcs: send IV: %w", err)
 	}
 	return nil
 }
@@ -727,6 +805,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			s.startKey = s.startKey + "," + kidB64
 		}
 	}
+	s.tencIV = alacstream.TencConstantIVFromTracks(tracks)
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
 		return fmt.Errorf("cbcs seek: encode init: %w", err)
@@ -761,7 +840,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		reconnected := dc.refreshIfNeeded()
 		accumulatedTfdt = patchAlacFragment(frag, accumulatedTfdt)
 		if reconnected {
-			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
+			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i), s.tencIV); err != nil {
 				return fmt.Errorf("cbcs seek: key after proactive reconnect %d: %w", i, err)
 			}
 		} else if err := s.sendSeekFragKey(i, dc.rw); err != nil {
@@ -789,7 +868,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			dc.lastUsed = time.Now()
 
 			copy(frag.Mdat.Data, mdatBackup)
-			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
+			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i), s.tencIV); err != nil {
 				return fmt.Errorf("cbcs seek: key after reconnect %d: %w", i, err)
 			}
 
@@ -872,6 +951,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			}
 		}
 	}
+	s.tencIV = alacstream.TencConstantIVFromTracks(tracks)
 
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
@@ -879,6 +959,26 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	}
 	if err := outBuf.Flush(); err != nil {
 		return fmt.Errorf("cbcs: flush init: %w", err)
+	}
+
+	// Pre-arm the DRM socket with the first key that actually encrypts audio.
+	// keyURIs[0] is often Apple's sentinel (P000000000/s1/e1) which marks the
+	// init segment as needing no decryption — that key is a pass-through in
+	// the DRM backend.  The real CBCS key (e.g. p1357827811/c23) sits at a
+	// higher index.  If we pre-arm with the sentinel, fragment 0 bypasses
+	// decryption and VLC receives raw ciphertext → ALAC decoder garbage.
+	// Use the first non-sentinel key so fragment 0 is decrypted correctly.
+	prewarmKey := effectiveKeyURI(s.keyURIs, 0)
+	if isSentinelKeyURI(prewarmKey) {
+		if realKey := firstNonSentinelKey(s.keyURIs); realKey != "" {
+			prewarmKey = realKey
+		}
+	}
+	if prewarmKey != "" {
+		if err := sendKeyHandshake(dc.rw, s.adamID, prewarmKey, s.tencIV); err != nil {
+			return fmt.Errorf("cbcs: initial key handshake: %w", err)
+		}
+		s.lastArmedKey = prewarmKey
 	}
 
 	var accumulatedTfdt uint64
@@ -898,9 +998,11 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		reconnected := dc.refreshIfNeeded()
 		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
 		if reconnected {
-			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
+			newKey := effectiveKeyURI(s.keyURIs, i)
+			if err := sendKeyHandshake(dc.rw, s.adamID, newKey, s.tencIV); err != nil {
 				return fmt.Errorf("cbcs: key after proactive reconnect %d: %w", i, err)
 			}
+			s.lastArmedKey = newKey
 		} else {
 			s.sendFragKey(i, dc.rw)
 		}
@@ -931,9 +1033,11 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			dc.lastUsed = time.Now()
 
 			copy(frag.Mdat.Data, mdatBackup)
-			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
+			reconnKey := effectiveKeyURI(s.keyURIs, i)
+			if err := sendKeyHandshake(dc.rw, s.adamID, reconnKey, s.tencIV); err != nil {
 				return fmt.Errorf("cbcs: key after reconnect %d: %w", i, err)
 			}
+			s.lastArmedKey = reconnKey
 
 			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
 				return fmt.Errorf("cbcs: decrypt fragment %d after reconnect: %w", i, err2)

@@ -38,7 +38,7 @@ func TestServeCBCSKeySwitchKeepsConnection(t *testing.T) {
 	var opened []string
 	done := make(chan error, 1)
 	go func() {
-		done <- serveCBCS(context.Background(), server, func(adamID, uri string) (func([]byte) error, error) {
+		done <- serveCBCS(context.Background(), server, func(adamID, uri string, _ []byte) (func([]byte) error, error) {
 			opened = append(opened, adamID+"|"+uri)
 			k := byte(len(opened)) // key 1 XORs with 1, key 2 with 2
 			return func(b []byte) error {
@@ -53,12 +53,14 @@ func TestServeCBCSKeySwitchKeepsConnection(t *testing.T) {
 
 	writeShort(t, client, "0")
 	writeShort(t, client, "skd://prefetch")
+	writeShort(t, client, "") // iv: empty
 	if got := roundTrip(t, client, []byte{0, 0}); got[0] != 1 {
 		t.Fatalf("first key not applied: %v", got)
 	}
 	client.Write([]byte{0, 0, 0, 0}) // alacstream.SwitchKeys
 	writeShort(t, client, "1440833098")
 	writeShort(t, client, "skd://real")
+	writeShort(t, client, "") // iv: empty
 	if got := roundTrip(t, client, []byte{0, 0}); got[0] != 2 {
 		t.Fatalf("second key not applied after switch: %v", got)
 	}
@@ -82,8 +84,9 @@ func TestServeCBCSKeyOpenFailureEndsSession(t *testing.T) {
 	go func() {
 		writeShort(t, client, "1")
 		writeShort(t, client, "skd://bad")
+		writeShort(t, client, "") // iv: empty
 	}()
-	err := serveCBCS(context.Background(), server, func(string, string) (func([]byte) error, error) {
+	err := serveCBCS(context.Background(), server, func(string, string, []byte) (func([]byte) error, error) {
 		return nil, errors.New("no kd ctx")
 	})
 	if err == nil {

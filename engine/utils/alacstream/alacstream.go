@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -167,8 +169,8 @@ func runAttempt(ctx context.Context, dial DialFunc, adamId string, playlistUrl s
 	return nil
 }
 
-// sendFragmentKey sends the decryption key URI for fragment i via the DRM connection.
-func sendFragmentKey(rw *bufio.ReadWriter, key *m3u8.Key, i int, adamId string) {
+// sendFragmentKey sends the decryption key URI (and tenc IV) for fragment i via the DRM connection.
+func sendFragmentKey(rw *bufio.ReadWriter, key *m3u8.Key, i int, adamId string, tencIV []byte) {
 	if key == nil {
 		return
 	}
@@ -181,6 +183,8 @@ func sendFragmentKey(rw *bufio.ReadWriter, key *m3u8.Key, i int, adamId string) 
 		SendString(rw, adamId)
 	}
 	SendString(rw, key.URI)
+	// Send the tenc constant IV so the DRM server can fix the hybris first-block IV mismatch.
+	SendBytes(rw, tencIV)
 }
 
 // flushDecryptedOutput flushes outBuf; if output was buffered in memory, writes
@@ -230,6 +234,10 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		return err
 	}
 
+	// Extract tenc constant IV once from the init segment — used to fix the
+	// first 16 bytes of each decrypted ALAC sample (hybris decrypts with IV=0).
+	tencIV := TencConstantIVFromTracks(tracks)
+
 	// Append the KID (from the tenc box) to each playlist segment's key URI.
 	// DialCBCS splits on the first comma to get (uriPrefix, kidBase64), and
 	// uses kidBase64 to call AcquireKey. Without the KID the key context is
@@ -278,7 +286,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		if segment == nil {
 			return errors.New("segment number out of sync")
 		}
-		sendFragmentKey(rw, segment.Key, i, adamId)
+		sendFragmentKey(rw, segment.Key, i, adamId, tencIV)
 		// flushes the buffer
 		err = DecryptFragment(frag, tracks, rw)
 		if err != nil {
@@ -290,6 +298,21 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		}
 	}
 	return flushDecryptedOutput(outBuf, outfile, &buffer, totalLen, MaxMemorySize)
+}
+
+// TencConstantIVFromTracks extracts the DefaultConstantIV from the first
+// encrypted track's tenc box. Returns nil if not present or not exactly 16 bytes
+// (ALAC stsd has two enca children; the second sinf may carry malformed IV data).
+func TencConstantIVFromTracks(tracks map[uint32]mp4.DecryptTrackInfo) []byte {
+	for _, ti := range tracks {
+		if ti.Sinf != nil && ti.Sinf.Schi != nil && ti.Sinf.Schi.Tenc != nil {
+			iv := ti.Sinf.Schi.Tenc.DefaultConstantIV
+			if len(iv) == 16 {
+				return iv
+			}
+		}
+	}
+	return nil
 }
 
 // kidBase64FromTracks extracts the DefaultKID from the first encrypted track's
@@ -523,6 +546,21 @@ func SendString(conn io.Writer, uri string) error {
 	return err
 }
 
+// SendBytes sends a [uint8 len][bytes] field (max 255 bytes).
+func SendBytes(conn io.Writer, b []byte) error {
+	if len(b) > 255 {
+		b = b[:255]
+	}
+	_, err := conn.Write([]byte{byte(len(b))})
+	if err != nil {
+		return err
+	}
+	if len(b) > 0 {
+		_, err = conn.Write(b)
+	}
+	return err
+}
+
 func cbcsFullSubsampleDecrypt(data []byte, conn *bufio.ReadWriter) error {
 	// Drops 4 last bits -> multiple of 16
 	// It wouldn't hurt to send the remaining bytes also because the decryption
@@ -654,8 +692,25 @@ func cbcsDecryptSample(sample []byte, conn *bufio.ReadWriter,
 }
 
 // Decrypt an array of cbcs-encrypted samples in-place
+// cbcsDecryptLogOnce logs tenc and senc info once per fragment call to aid debugging.
+var cbcsDecryptLogOnce struct {
+	done bool
+}
+
 func cbcsDecryptSamples(samples []mp4.FullSample, conn *bufio.ReadWriter,
 	tenc *mp4.TencBox, senc *mp4.SencBox) error {
+
+	if !cbcsDecryptLogOnce.done {
+		cbcsDecryptLogOnce.done = true
+		ivStr := "(no IVs)"
+		if len(senc.IVs) > 0 {
+			ivStr = hex.EncodeToString(senc.IVs[0])
+		}
+		constIV := hex.EncodeToString(tenc.DefaultConstantIV)
+		log.Printf("[alac] CBCS TRACE: tenc CryptByteBlock=%d SkipByteBlock=%d PerSampleIVSize=%d ConstantIV=%s senc.IVs[0]=%s nSamples=%d",
+			tenc.DefaultCryptByteBlock, tenc.DefaultSkipByteBlock,
+			tenc.DefaultPerSampleIVSize, constIV, ivStr, len(samples))
+	}
 
 	if len(senc.SubSamples) != 0 && len(senc.SubSamples) < len(samples) {
 		return fmt.Errorf("senc has %d subsample entries for %d samples", len(senc.SubSamples), len(samples))
