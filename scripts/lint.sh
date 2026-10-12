@@ -11,8 +11,10 @@ run() { "$@" || fail=1; }
 
 step "Go: gofmt -s"
 cd "$repo/engine"
-[ "$fix" = 1 ] && gofmt -s -w .
-out=$(gofmt -s -l .); [ -z "$out" ] || { echo "$out"; fail=1; }
+# Generated files (protoc output) stay as generated: gofmt's alignment changes between Go releases.
+gosrc=$(git ls-files '*.go' | xargs grep -L '^// Code generated .* DO NOT EDIT\.$')
+[ "$fix" = 1 ] && gofmt -s -w $gosrc
+out=$(gofmt -s -l $gosrc); [ -z "$out" ] || { echo "$out"; fail=1; }
 
 step "Go: vet"
 run go vet ./...

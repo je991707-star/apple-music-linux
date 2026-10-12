@@ -29,8 +29,9 @@ jobs:
           cache-dependency-path: engine/go.sum
       - name: Install libvlc headers
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc-plugin-base
+      # Generated files (protoc output) are left as generated: gofmt's alignment changes between Go releases.
       - name: gofmt
-        run: test -z "$(gofmt -s -l . | tee /dev/stderr)"
+        run: test -z "$(gofmt -s -l $(git ls-files '*.go' | xargs grep -L '^// Code generated .* DO NOT EDIT\.$') | tee /dev/stderr)"
       - run: go vet ./...
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
@@ -86,6 +87,7 @@ jobs:
         with:
           lfs: false
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: UCRT64
           path-type: inherit
@@ -104,7 +106,7 @@ jobs:
         run: choco install vlc --no-progress -y
       - name: Build the DRM DLL, engine and VLC subset
         shell: pwsh
-        run: scripts\build-windows.ps1 -Msys C:\msys64\ucrt64\bin -SkipInstaller
+        run: scripts\build-windows.ps1 -Msys "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" -SkipInstaller
       - name: Windows platform tests
         working-directory: electron
         shell: pwsh
