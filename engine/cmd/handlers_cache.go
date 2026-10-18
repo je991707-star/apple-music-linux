@@ -15,6 +15,10 @@ func (s *APIServer) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	if err := cfg.Validate(); err != nil {
+		http.Error(w, "invalid cache config: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	s.scheduler.SetCacheConfig(cfg)
 	if s.diskCache != nil {
 		s.diskCache.SetConfig(cfg.PersistLimitMB, cfg.PersistTTLDays)

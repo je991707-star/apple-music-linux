@@ -4,8 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"engine/core/media"
+	"engine/core/pipeline"
+	"engine/core/playback"
 )
 
 // The session-open circuit breaker fails EVERY subsequent open (songs included)
@@ -147,3 +155,71 @@ func TestContentFailuresDoNotAccumulate(t *testing.T) {
 		t.Fatal("breaker stayed closed after 3 transport failures; genuine outages must still fast-fail")
 	}
 }
+
+type mvAudioTestProvider struct {
+	stream func(io.Writer) error
+}
+
+func (p mvAudioTestProvider) Open(context.Context, media.OpenRequest) (*media.Session, error) {
+	return &media.Session{Kind: "mv", Tracks: []media.Track{{
+		Kind: pipeline.KindAudio, Codec: pipeline.CodecAAC,
+		Open: func(context.Context) (*pipeline.Stream, error) {
+			return &pipeline.Stream{Kind: pipeline.KindAudio, Source: mvAudioTestSource(p.stream)}, nil
+		},
+	}}}, nil
+}
+
+type mvAudioTestSource func(io.Writer) error
+
+func (f mvAudioTestSource) Stream(_ context.Context, w io.Writer) error { return f(w) }
+
+func TestMVAudioStreamDefersHeadersUntilFirstByte(t *testing.T) {
+	streamErr := errors.New("upstream failed")
+	for _, tc := range []struct {
+		name       string
+		stream     func(io.Writer) error
+		wantStatus int
+		wantBody   string
+		wantType   string
+	}{
+		{"failure before bytes", func(io.Writer) error { return streamErr }, http.StatusBadGateway, `"error":"upstream failed"`, "application/json"},
+		{"successful stream", func(w io.Writer) error { _, err := io.WriteString(w, "audio"); return err }, http.StatusOK, "audio", "audio/mp4"},
+		{"failure after bytes", func(w io.Writer) error { _, _ = io.WriteString(w, "partial"); return streamErr }, http.StatusOK, "partial", "audio/mp4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &APIServer{pm: playback.NewWithProvider(mvAudioTestProvider{stream: tc.stream})}
+			sess, err := s.pm.Open(context.Background(), playback.OpenRequest{AssetID: "mv-test", Video: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.pm.Release(sess.ID)
+			r := httptest.NewRequest(http.MethodGet, "/audio", nil)
+			r.SetPathValue("id", sess.ID)
+			w := httptest.NewRecorder()
+			s.handlePlaybackAudio(w, r)
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d; body=%q", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if got := w.Header().Get("Content-Type"); got != tc.wantType {
+				t.Errorf("Content-Type = %q, want %q", got, tc.wantType)
+			}
+			if got := w.Body.String(); tc.wantStatus == http.StatusOK && got != tc.wantBody || tc.wantStatus != http.StatusOK && !strings.Contains(got, tc.wantBody) {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestCountingWriterCountsBytesActuallyWritten(t *testing.T) {
+	w := &countingWriter{w: &shortWriter{}}
+	if n, err := w.Write([]byte("audio")); n != 2 || err != nil {
+		t.Fatalf("Write = %d, %v; want 2, nil", n, err)
+	}
+	if w.n != 2 {
+		t.Fatalf("count = %d, want 2", w.n)
+	}
+}
+
+type shortWriter struct{}
+
+func (*shortWriter) Write([]byte) (int, error) { return 2, nil }

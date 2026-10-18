@@ -245,9 +245,13 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 	// For seeks, pm.StreamFrom serves the correct fMP4 fragment directly from the CDN.
 	// INTERCEPT: wrap writer for MV sessions to count/log bytes sent to browser.
 	if sess.Type == "mv" {
-		cw := &countingWriter{w: w}
+		// Keep the counting wrapper inside streamMedia's firstByteWriter. Writing
+		// directly to w would commit a 200 before streamMedia can turn a
+		// pre-first-byte pipeline error into a useful 502 response.
+		cw := &countingWriter{}
 		log.Printf("[INTERCEPT] MV audio stream START id=%s codec=%s", id, sess.Codec)
 		streamMedia(w, r, func(dst io.Writer) error {
+			cw.w = dst
 			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, cw)
 		}, "audio/mp4")
 		log.Printf("[INTERCEPT] MV audio stream END id=%s totalBytes=%d", id, cw.n)
