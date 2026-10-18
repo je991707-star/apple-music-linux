@@ -376,7 +376,7 @@ func TestManagerLogoutResetsState(t *testing.T) {
 		drm.RestartPolicy{})
 
 	ctx := context.Background()
-	if err := mgr.Logout(ctx); err != nil {
+	if _, err := mgr.Logout(ctx); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 
@@ -477,7 +477,7 @@ func TestManagerCapabilitiesOnFairPlayReady(t *testing.T) {
 	backend.running = true
 	backend.mu.Unlock()
 	ctx := context.Background()
-	if err := mgr.Logout(ctx); err != nil {
+	if _, err := mgr.Logout(ctx); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	snap = mgr.Status()

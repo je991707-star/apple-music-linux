@@ -428,6 +428,7 @@
     return n;
   }
   function createAccountSheet({ signIn, submitCode, onDone = () => {
+  }, onCancel = () => {
   }, doc = globalThis.document }) {
     let dlg = null, view = null, busy = false;
     let challengeId = null, submittedId = null, dismissedId = null;
@@ -636,8 +637,10 @@
       primary = null;
     }
     function cancel() {
+      const running = view === "code" || view === "signin" && busy;
       if (view === "code") dismissedId = challengeId;
       close();
+      if (running) onCancel();
     }
     function onSnapshot(snap) {
       const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId });
@@ -665,9 +668,31 @@
     return { openSignIn: () => showSignIn(), onSnapshot, close, isOpen: () => view !== null };
   }
 
+  // src/engine/sign-out.js
+  var SIGN_OUT_TEXT = {
+    marker: "Couldn't sign out: the engine isn't responding and the sign-out couldn't be recorded. Try again.",
+    credentials: "Signed out of the engine, but the saved sign-in couldn't be removed. Try again.",
+    durability: "Signed out. If Adam is still signed in after a restart, sign out again."
+  };
+  var SIGN_OUT_TIMEOUT_MS = 6e4;
+  async function signOutFlow({ engine, scope = "account", fetchFn = fetch, clearCredentials, timeoutMs = SIGN_OUT_TIMEOUT_MS }) {
+    const route = scope === "device" ? "forget-device" : "logout";
+    const r = await fetchFn(`${engine.replace(/\/+$/, "")}/api/v1/drm/${route}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(timeoutMs)
+    }).catch(() => null);
+    const engineOk = !!r?.ok;
+    if (!clearCredentials) return engineOk ? { ok: true } : { ok: false, message: SIGN_OUT_TEXT.marker };
+    const res = await clearCredentials({ reload: true, backstop: engineOk ? null : scope }).catch(() => ({ ok: false, error: "marker" }));
+    if (!res?.ok) return { ok: false, message: res?.error === "credentials" ? SIGN_OUT_TEXT.credentials : SIGN_OUT_TEXT.marker };
+    return { ok: true, note: res.warning === "durability" ? SIGN_OUT_TEXT.durability : "" };
+  }
+
   // src/engine-playback.js
   var _accountSheetInstance = null;
   var _onAccountSignedIn = null;
+  var _accountNote = null;
+  var _pendingCredentials = null;
   function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
       signIn: async (email, password) => {
@@ -677,8 +702,7 @@
           body: JSON.stringify({ email, password })
         });
         if (!r.ok) return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
-        window.adamBridge?.drmSaveCredentials({ email, password }).catch(() => {
-        });
+        _pendingCredentials = { email, password };
         return { ok: true };
       },
       submitCode: async (code) => {
@@ -689,7 +713,20 @@
         });
         return r.ok;
       },
-      onDone: () => _onAccountSignedIn?.()
+      onDone: () => {
+        if (_pendingCredentials) window.adamBridge?.drmSaveCredentials(_pendingCredentials).catch(() => {
+        });
+        _pendingCredentials = null;
+        _onAccountSignedIn?.();
+      },
+      onCancel: () => {
+        _pendingCredentials = null;
+        fetch(`${ENGINE}/api/v1/drm/logout`, { method: "POST" }).catch(() => {
+        });
+        window.adamBridge?.drmClearCredentials({ reload: false }).catch(() => {
+        });
+        _onAccountSignedIn?.();
+      }
     });
   }
   try {
@@ -8438,19 +8475,58 @@
           }
           text.appendChild(sub);
         }
+        if (isSignedIn) {
+          const sub = document.createElement("div");
+          sub.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;";
+          sub.textContent = "Signing out removes your account from this computer. Signing in again here normally needs no code.";
+          text.appendChild(sub);
+        }
         row.appendChild(text);
         const btn = makeBtn(isSignedIn ? "Sign Out" : "Sign In\u2026");
-        btn.onclick = isSignedIn ? async () => {
-          btn.disabled = true;
-          btn.textContent = "Signing out\u2026";
-          await fetch(`${ENGINE}/api/v1/drm/logout`, { method: "POST" }).catch(() => {
-          });
-          window.adamBridge?.drmClearCredentials().catch(() => {
-          });
-          onRefresh();
-        } : () => _accountSheet().openSignIn();
+        btn.onclick = isSignedIn ? () => runSignOut("account", btn, "Signing out\u2026") : () => _accountSheet().openSignIn();
         row.appendChild(btn);
         body.appendChild(row);
+        const forgetRow = document.createElement("div");
+        forgetRow.style.cssText = "display:flex;align-items:center;gap:10px;padding:0 0 11px 18px;";
+        const forgetText = document.createElement("div");
+        forgetText.style.cssText = FF + "flex:1;font-size:11px;color:rgba(255,255,255,0.38);";
+        forgetText.textContent = "Forget this device: Apple will treat this computer as new.";
+        const forget = makeBtn("Forget This Device\u2026");
+        forget.style.fontSize = "12px";
+        forget.style.padding = "4px 10px";
+        let armed = false;
+        forget.onclick = () => {
+          if (!armed) {
+            armed = true;
+            forget.textContent = "Forget Device";
+            forget.style.background = "#fc3c44";
+            forget.onmouseenter = forget.onmouseleave = null;
+            forgetText.textContent = "The next sign-in will ask for a verification code. Click again to confirm.";
+            return;
+          }
+          runSignOut("device", forget, "Forgetting\u2026");
+        };
+        forgetRow.append(forgetText, forget);
+        body.appendChild(forgetRow);
+        if (_accountNote) {
+          const note = document.createElement("div");
+          note.style.cssText = FF + "font-size:11px;padding:0 0 11px 18px;color:" + (_accountNote.error ? "#ff6961" : "rgba(255,255,255,0.45)") + ";";
+          note.textContent = _accountNote.text;
+          body.appendChild(note);
+          _accountNote = null;
+        }
+      }
+      async function runSignOut(scope, button, busyText) {
+        button.disabled = true;
+        button.textContent = busyText;
+        const res = await signOutFlow({
+          engine: ENGINE,
+          scope,
+          clearCredentials: window.adamBridge?.drmClearCredentials
+        });
+        if (res.message) _accountNote = { text: res.message, error: true };
+        else if (res.note) _accountNote = { text: res.note, error: false };
+        onRefresh();
       }
       _onAccountSignedIn = onRefresh;
       renderState();

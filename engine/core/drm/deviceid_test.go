@@ -54,8 +54,9 @@ func TestCorruptDeviceIDIsReplaced(t *testing.T) {
 	}
 }
 
-// Logout drops the ID, so the next login (including a legacy install's) gets a unique one.
-func TestLogoutGivesTheNextLoginAFreshID(t *testing.T) {
+// Sign-out keeps the device ID, as Apple's own apps do (a legacy install keeps the
+// legacy ID Apple already trusts); only Forget This Device gives a fresh one.
+func TestLogoutKeepsTheIDAndForgetDeviceRenewsIt(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "session-ready"), []byte("1"), 0o600)
 	if androidIDOf(t, dir) != legacyAndroidID {
@@ -64,7 +65,17 @@ func TestLogoutGivesTheNextLoginAFreshID(t *testing.T) {
 	if err := NewSessionManager(dir).ClearSession(); err != nil {
 		t.Fatal(err)
 	}
+	if id := androidIDOf(t, dir); id != legacyAndroidID {
+		t.Fatalf("sign-out changed the device ID to %q", id)
+	}
+	s := NewSessionManager(dir)
+	if err := s.MarkLogoutPending(scopeDevice); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompletePendingLogout(); err != nil {
+		t.Fatal(err)
+	}
 	if id := androidIDOf(t, dir); id == legacyAndroidID || !androidIDRe.MatchString(id) {
-		t.Fatalf("after logout got %q, want a fresh unique ID", id)
+		t.Fatalf("after forgetting the device got %q, want a fresh unique ID", id)
 	}
 }

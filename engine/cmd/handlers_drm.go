@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"engine/core/drm"
@@ -107,11 +109,7 @@ func (s *APIServer) handleDRMLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.dm.Logout(r.Context()); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.dm.Status())
+	s.writeSignOut(w, s.dm.Logout)
 }
 
 func (s *APIServer) handleDRMClearSession(w http.ResponseWriter, r *http.Request) {
@@ -119,9 +117,52 @@ func (s *APIServer) handleDRMClearSession(w http.ResponseWriter, r *http.Request
 		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.dm.ClearSession(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// The same full sign-out as POST /drm/logout: clearing the files while the
+	// backend runs would leave the account signed in inside the Android libraries.
+	s.writeSignOut(w, s.dm.Logout)
+}
+
+type signOutResponse struct {
+	drm.DRMSnapshot
+	ServerSignOut string `json:"serverSignOut"`
+}
+
+// writeSignOut runs a sign-out and answers. When the sign-out must finish in the
+// next process, the answer is flushed first and then the engine exits; the Electron
+// lifecycle restarts it and the new process completes the recorded sign-out.
+func (s *APIServer) writeSignOut(w http.ResponseWriter, run func(context.Context) (drm.SignOutResult, error)) {
+	res, err := run(s.shutdownCtx)
+	status := http.StatusOK
+	if err != nil {
+		status = http.StatusInternalServerError
+	}
+	writeJSON(w, status, signOutResponse{DRMSnapshot: s.dm.Status(), ServerSignOut: res.ServerSignOut})
+	if res.Restart {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		go func() { time.Sleep(200 * time.Millisecond); os.Exit(3) }()
+	}
+}
+
+func (s *APIServer) handleDRMForgetDevice(w http.ResponseWriter, r *http.Request) {
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	s.writeSignOut(w, s.dm.ForgetDevice)
+}
+
+// handleDRMResend is the resend-code probe: it answers the pending code challenge
+// with no code. What Apple does next is reported over SSE.
+func (s *APIServer) handleDRMResend(w http.ResponseWriter, r *http.Request) {
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.dm.ResendCode(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.dm.Status())
 }

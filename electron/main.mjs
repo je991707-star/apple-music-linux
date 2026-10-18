@@ -26,6 +26,7 @@ import { resolveThemeMode } from './theme-mode.mjs';
 import { glassModuleDirs, loadGlassModule, createGlassController } from './glass.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
+import { validBackstop, writeBackstop, clearCredentialsFlow } from './drm-signout.mjs';
 import { parseByteRange } from './range.mjs';
 import { shouldShowOffline, offlineHash } from './load-failure.mjs';
 import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
@@ -78,6 +79,26 @@ async function _storeLoad() {
 }
 
 let _storeWrite = Promise.resolve(); // serialises flushes: two overlapping writes must not interleave
+// _storeFlushNow writes the store now and resolves to whether that write succeeded.
+function _storeFlushNow() {
+    if (_storeFlushTimer) { clearTimeout(_storeFlushTimer); _storeFlushTimer = null; }
+    let ok = false;
+    _storeWrite = _storeWrite.then(async () => {
+        try {
+            if (!_storeCache) { ok = true; return; }
+            mkdirSync(CONFIG_DIR, { recursive: true });
+            const enc = safeStorage.isEncryptionAvailable();
+            const json = JSON.stringify(_storeCache);
+            await writeFileAtomic(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
+            _storeDirty = false;
+            ok = true;
+        } catch (e) {
+            _storeDirty = true;
+            console.warn('[Adam] store flush failed:', e.message);
+        }
+    });
+    return _storeWrite.then(() => ok);
+}
 function _storeFlush() {
     if (_storeFlushTimer) return;
     _storeFlushTimer = setTimeout(() => {
@@ -325,15 +346,20 @@ function ensureEngineConfig() {
     if (changed) writeFileSync(cfgPath, content);
 }
 
+// The engine's Apple session directory (session files, device trust, session lock).
+function drmFilesDirPath() {
+    return app.isPackaged
+        ? path.join(CONFIG_DIR, 'drm', 'files')
+        : path.join(__dirname, '..', 'drm', 'files');
+}
+
 const engineLifecycle = createEngineLifecycle({
     isQuitting: () => isQuitting,
     prepare: async () => {
         if (!existsSync(ENGINE_BIN)) {
             throw new Error(`Engine binary not found at ${ENGINE_BIN}`);
         }
-        const drmFilesDir = app.isPackaged
-            ? path.join(CONFIG_DIR, 'drm', 'files')
-            : path.join(__dirname, '..', 'drm', 'files');
+        const drmFilesDir = drmFilesDirPath();
         // Only an orphan of this exact engine (binary, data directory, port) is recovered, and
         // the session lock file is never deleted: a replacement inode would let two engines
         // own the session at once.
@@ -1561,8 +1587,9 @@ ipcMain.once('app:ui-ready', async () => {
         const statusRes = await fetch(`https://127.0.0.1:${ENGINE_PORT}/api/v1/drm/status`, { agent }).catch(() => null);
         if (!statusRes?.ok) return;
         const status = await statusRes.json().catch(() => null);
-        const fp = status?.state?.fairplay;
-        if (fp === 'ready') return; // already authenticated (session reuse succeeded)
+        // Only when the engine has no Apple session. A session it is still loading must not
+        // be replaced by a fresh sign-in, which would ask Apple for another verification code.
+        if (status?.state?.fairplay === 'ready' || status?.state?.session === 'valid') return;
         console.log('[Adam] Auto-authenticating with saved DRM credentials');
         const authRes = await fetch(`https://127.0.0.1:${ENGINE_PORT}/api/v1/drm/authenticate`, {
             method: 'POST', agent,
@@ -2361,16 +2388,33 @@ ipcMain.handle('drm:save-credentials', async (_, c) => {
     return { ok: true };
 });
 
-ipcMain.handle('drm:clear-credentials', async () => {
-    const store = await _storeLoad();
-    delete store.drm_email;
-    delete store.drm_password;
-    _storeDirty = true; _storeFlush();
-    // Sign-out: Apple's FairPlay libraries stay loaded in the engine and keep the
-    // signed-out session's device trust in memory, so the next sign-in would skip
-    // 2FA. A fresh engine process makes every sign-in start as a new device.
-    engineLifecycle.reload();
-    return { ok: true };
+// Sign-out ({ reload: true }, the default) or an abandoned sign-in ({ reload: false }).
+// backstop ('account' | 'device') is passed only when the engine route failed; it is
+// recorded first, and if that fails nothing else happens (drm-signout.mjs).
+ipcMain.handle('drm:clear-credentials', async (_, opts) => {
+    const backstop = opts?.backstop ?? null;
+    if (backstop !== null && !validBackstop(backstop)) console.warn('[Adam] Ignoring invalid sign-out scope:', backstop);
+    const res = await clearCredentialsFlow({
+        reload: opts?.reload !== false,
+        backstop,
+        record: (scope) => {
+            const r = writeBackstop(drmFilesDirPath(), scope);
+            if (!r.committed || !r.durable) console.warn('[Adam] Sign-out backstop:', r);
+            return r;
+        },
+        deleteCredentials: async () => {
+            const store = await _storeLoad();
+            delete store.drm_email;
+            delete store.drm_password;
+            _storeDirty = true;
+            return _storeFlushNow();
+        },
+        // A fresh engine process: Apple's libraries keep the signed-out account in
+        // memory otherwise, and a recorded backstop is completed on start.
+        reloadEngine: () => engineLifecycle.reload(),
+    });
+    if (!res.ok) console.warn('[Adam] Sign-out did not complete:', res.error);
+    return res;
 });
 
 ipcMain.handle('lastfm:status', async () => {

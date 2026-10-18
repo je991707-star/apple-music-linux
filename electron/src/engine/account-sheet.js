@@ -87,9 +87,11 @@ function el(doc, tag, props = {}, ...children) {
 /**
  * Create the sheet. `signIn(email, password)` resolves to { ok, error };
  * `submitCode(code)` resolves to true when the engine accepted the code;
- * `onDone()` runs after sign-in finishes. Feed DRM snapshots to `onSnapshot`.
+ * `onDone()` runs after sign-in finishes; `onCancel()` runs when the user cancels a
+ * sign-in the engine is already running (waiting for Apple or for the code), so it can
+ * be stopped. Feed DRM snapshots to `onSnapshot`.
  */
-export function createAccountSheet({ signIn, submitCode, onDone = () => {}, doc = globalThis.document }) {
+export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCancel = () => {}, doc = globalThis.document }) {
     let dlg = null, view = null, busy = false;
     let challengeId = null, submittedId = null, dismissedId = null;
     let inputs = [], msg = null, primary = null;
@@ -267,8 +269,10 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, doc 
     }
 
     function cancel() {
+        const running = view === 'code' || (view === 'signin' && busy);
         if (view === 'code') dismissedId = challengeId;
         close();
+        if (running) onCancel();
     }
 
     function onSnapshot(snap) {

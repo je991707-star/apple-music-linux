@@ -50,6 +50,8 @@ type SessionManager struct {
 
 	mu          sync.Mutex
 	lastSuccess time.Time
+	hooks       *fileHooks // test-only replacement of the sign-out file operations
+	unsynced    bool       // sign-out files removed but the directory sync failed
 }
 
 // NewSessionManager creates a SessionManager rooted at baseDir.
@@ -75,17 +77,21 @@ func (s *SessionManager) web() (mut, storefront string) {
 	return fn()
 }
 
-// HasSession reports whether an account is available: either the session-ready
-// marker written by adamplay_backend after a successful hybris_fairplay_init exists,
-// or the web player has supplied a media-user-token (AAC only).
+// HasSession reports whether an Apple account is signed in: the session-ready
+// marker written by adamplay_backend after a successful hybris_fairplay_init exists.
+// A web-player token alone is not a session: lossless needs the in-app sign-in, and
+// counting the token made a signed-out engine report "signed in" again (and start
+// the backend) as soon as the page sent it. The token is still read for
+// MUSIC_TOKEN/STOREFRONT_ID (ReadMusicToken, ReadStorefrontID).
 // It does NOT guarantee the session is currently usable — use IsSessionValid.
+//
+// A pending sign-out (an engine marker or a backstop from the main process) means
+// no session: it is about to be removed and must not be used meanwhile.
 func (s *SessionManager) HasSession() bool {
-	marker := filepath.Join(s.baseDir, "session-ready")
-	if _, err := os.Stat(marker); err == nil {
-		return true
+	if _, err := os.Stat(filepath.Join(s.baseDir, "session-ready")); err != nil {
+		return false
 	}
-	mut, _ := s.web()
-	return mut != ""
+	return !s.hasPending()
 }
 
 // RecordSuccess records the timestamp of a successful DRM operation.
@@ -151,44 +157,16 @@ type SessionInfo struct {
 	MusicToken   string
 }
 
-// ClearSession removes mpl_db/, STOREFRONT_ID, MUSIC_TOKEN, and drm-state.
-// It writes a logout-pending marker before deleting files so that a crash
-// or Ctrl+C mid-logout is completed by CompletePendingLogout on next startup.
-// The backend process must be stopped before calling ClearSession to avoid
-// storeservicescore writing the files back during deletion.
+// ClearSession signs out the account on disk in one complete pass: it records the
+// request, removes the account files (and the device files if a pending request asks
+// for that) and then the request itself. The device identity stays, so Apple keeps
+// recognising the machine. An error keeps the request, and the next pass finishes it.
+// The backend must be stopped first, or storeservicescore writes the files back.
 func (s *SessionManager) ClearSession() error {
-	marker := filepath.Join(s.baseDir, "logout-pending")
-	// Write marker first; any crash after this point will be recovered on restart.
-	_ = os.WriteFile(marker, []byte("1"), 0o600)
-
-	paths := []string{
-		filepath.Join(s.baseDir, "mpl_db"),
-		filepath.Join(s.baseDir, "STOREFRONT_ID"),
-		filepath.Join(s.baseDir, "MUSIC_TOKEN"),
-		filepath.Join(s.baseDir, "drm-state"),
-		filepath.Join(s.baseDir, "session-ready"),
-		filepath.Join(s.baseDir, deviceIDFile), // the next login gets its own device ID
-		filepath.Join(s.baseDir, "2fa.txt"),
-		// Apple's device trust: the ADI provisioning and FairPlay's device files. Left
-		// behind, Apple recognises the machine on the next sign-in and skips 2FA, so a
-		// sign-out must forget them for every sign-in to start as a new device.
-		filepath.Join(s.baseDir, "adi.pb"),
-		filepath.Join(s.baseDir, "IC-Info.sids"),
-		filepath.Join(s.baseDir, "fsi.pdat"),
+	if err := s.MarkLogoutPending(scopeAccount); err != nil {
+		return err
 	}
-	paths = append(paths, fairPlayKeyFiles(s.baseDir)...)
-	var lastErr error
-	for _, p := range paths {
-		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
-			lastErr = err
-		}
-	}
-	_ = os.Remove(marker)
-
-	s.mu.Lock()
-	s.lastSuccess = time.Time{}
-	s.mu.Unlock()
-	return lastErr
+	return s.runPendingPass()
 }
 
 // fairPlayKeyFiles lists FairPlay's key store files in dir, which it names by a
@@ -216,16 +194,16 @@ func isUpperHex(s string, n int) bool {
 	return true
 }
 
-// CompletePendingLogout checks for a logout-pending marker left by a previous
-// process that was killed mid-ClearSession, and completes the deletion if found.
-// Call this at startup before hybris_fairplay_init.
-func (s *SessionManager) CompletePendingLogout() {
-	marker := filepath.Join(s.baseDir, "logout-pending")
-	if _, err := os.Stat(marker); err != nil {
-		return
+// CompletePendingLogout finishes every sign-out request left on disk (an engine
+// marker from an interrupted sign-out, or a main-process backstop) with the scope
+// it asked for. It returns an error while any request remains; callers must not
+// start or reuse a session then.
+func (s *SessionManager) CompletePendingLogout() error {
+	if !s.hasPending() {
+		return nil
 	}
-	log.Printf("[drm] found logout-pending marker — completing interrupted logout")
-	_ = s.ClearSession()
+	log.Printf("[drm] completing a pending sign-out")
+	return s.runPendingPass()
 }
 
 // StateFilePath returns the path of the drm-state file written by main.c.

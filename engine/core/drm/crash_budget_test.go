@@ -51,7 +51,7 @@ func TestLogoutToleratesNilSink(t *testing.T) {
 	stub := &logoutStub{crashStub{events: make(chan DRMEvent)}}
 	m := NewDRMManager(stub, NewSessionManager(t.TempDir()), nil, BackendConfig{}, DefaultRestartPolicy)
 	m.mergeAndEmit(DRMSnapshot{State: DRMState{Recovery: RecoveryRefreshing}})
-	if err := m.Logout(context.Background()); err != nil {
+	if _, err := m.Logout(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -2,6 +2,7 @@ package drm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -79,7 +80,19 @@ type DRMManager struct {
 	// warming ensures one background backend start at a time when the web session appears.
 	warming atomic.Bool
 
-	authMu   sync.Mutex // serialises Authenticate: concurrent logins would Stop/Start the backend under each other
+	// authSem (one slot) is held by every backend start and by a sign-out once the
+	// sign-in it aborted has returned: concurrent starts would Stop/Start the backend
+	// under each other, and a sign-out must never stop or wipe under a start.
+	authSem chan struct{}
+	// signOutSem serialises sign-out requests. gateMu guards gate and cleanup; it
+	// is held only for decisions, never across a wait or a backend call.
+	signOutSem     chan struct{}
+	gateMu         sync.Mutex
+	gate           gateState
+	cleanup        *cleanupOp
+	timing         signOutTiming
+	restartPending atomic.Bool
+
 	backend  DRMBackend
 	session  *SessionManager
 	auth     *AuthCoordinator
@@ -118,16 +131,31 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 		sink:         sink,
 		shutdownCtx:  shutCtx,
 		shutdownStop: shutStop,
+		authSem:      make(chan struct{}, 1),
+		signOutSem:   make(chan struct{}, 1),
+		timing:       defaultSignOutTiming,
 	}
 	m.auth = NewAuthCoordinator(func(snap DRMSnapshot) {
 		m.mergeAndEmit(snap)
 	})
 	backend.SetAuthSource(m.auth)
 	m.setManagerState(ManagerReady)
-	// Complete any interrupted logout before reading session state.
-	// A Ctrl+C between Stop() and ClearSession() leaves a logout-pending marker;
-	// this ensures the next startup doesn't show a stale "session=valid".
-	session.CompletePendingLogout()
+	// Complete a sign-out left on disk (interrupted, or recorded by the main process)
+	// before reading session state, so the next start never shows a stale session.
+	// Bounded: if it does not finish in time the gate stays closed and the pass
+	// completes in the background.
+	m.gateMu.Lock()
+	var replay *cleanupOp
+	if session.hasPending() {
+		replay = m.startCleanupLocked()
+	}
+	m.gateMu.Unlock()
+	if replay != nil {
+		if err := waitOp(context.Background(), replay, m.timing.ReplayWait); err != nil {
+			slog.Warn("drm: pending sign-out not complete at start", "err", err)
+			m.snapshot.Message = "sign-out incomplete"
+		}
+	}
 	// Reflect session state at startup so GET /api/v1/drm/status shows the
 	// correct state immediately — before any playback request fires ensureRunning.
 	if !backend.Running() {
@@ -214,9 +242,10 @@ func (m *DRMManager) SetMUTSource(fn func() string) {
 	m.getWebMUT = fn
 }
 
-// NoteWebSession is called when the web player supplies or changes its token. It reports the session
-// as valid and, if the backend is not running yet, starts it in the background so FairPlay (and with it
-// lossless) becomes available without any separate sign-in.
+// NoteWebSession is called when the web player supplies or changes its token. When the app is signed in
+// (session-ready), it reports the session as valid and, if the backend is not running yet, starts it in the
+// background, or retries FairPlay with the fresh token. A web token alone does nothing: after a sign-out
+// the page keeps sending it, and it must not sign the engine back in.
 func (m *DRMManager) NoteWebSession() {
 	if m.closed.Load() || !m.session.HasSession() {
 		return
@@ -259,38 +288,60 @@ func (m *DRMManager) NoteWebSession() {
 // Returns ErrNotAuthenticated if no session exists.
 // Never authenticates — that is Authenticate()'s job.
 func (m *DRMManager) ensureRunning(ctx context.Context) error {
-	if m.backend.Running() {
+	// The gate first, even for a running backend: once a sign-out has begun no DRM
+	// operation may reuse the session.
+	m.gateMu.Lock()
+	signingOut := m.gate == gateSigningOut
+	clear := m.gate == gateOpen && m.cleanup == nil && !m.session.hasPending()
+	m.gateMu.Unlock()
+	if signingOut {
+		return ErrLogoutPending
+	}
+	if clear && m.backend.Running() {
 		return nil
 	}
-	// Complete any logout that was interrupted by a process kill (e.g. Ctrl+C
-	// between Stop() and ClearSession()). Must run before HasSession() so a
-	// stale mpl_db from an incomplete logout doesn't trigger a bogus session reuse.
-	m.session.CompletePendingLogout()
-	if !m.session.HasSession() {
-		return ErrNotAuthenticated
-	}
-	startCtx, cancel := context.WithTimeout(ctx, m.policy.StartupTimeout)
-	defer cancel()
-
-	if err := m.backend.Start(startCtx, m.cfg); err != nil {
-		// A concurrent ensureRunning / handleCrash goroutine may have started
-		// the backend between our Running() check and this call — that is fine.
-		if !m.backend.Running() {
+	return m.startGuarded(ctx, true, func(ctx context.Context) error {
+		if m.backend.Running() {
+			return nil
+		}
+		if !m.session.HasSession() {
+			return ErrNotAuthenticated
+		}
+		startCtx, cancel := context.WithTimeout(ctx, m.policy.StartupTimeout)
+		defer cancel()
+		if err := m.backend.Start(startCtx, m.cfg); err != nil {
 			m.mergeAndEmit(DRMSnapshot{
 				State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
 				Message: fmt.Sprintf("session restore failed: %v", err),
 			})
 			return err
 		}
-	}
-	m.lastStart.Store(time.Now().UnixNano())
-	// Session DB is present — reflect that immediately so the UI shows the
-	// correct state without waiting for a wrapper-emitted event.
-	m.mergeAndEmit(DRMSnapshot{
-		State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
-		Message: "session reuse — mpl_db present",
+		m.lastStart.Store(time.Now().UnixNano())
+		// Session DB is present — reflect that immediately so the UI shows the
+		// correct state without waiting for a wrapper-emitted event.
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			Message: "session reuse — mpl_db present",
+		})
+		return nil
 	})
-	return nil
+}
+
+// startGuarded is the only way a backend start runs: it holds authSem for the whole
+// start, and starts only once the sign-out gate is open (replaying a pending
+// sign-out first when replay is set). A start that passed the gate just before a
+// sign-out closed it still holds authSem, so that sign-out waits for it.
+func (m *DRMManager) startGuarded(ctx context.Context, replay bool, start func(context.Context) error) error {
+	select {
+	case m.authSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer release(m.authSem)
+	if err := m.awaitClearGate(ctx, replay); err != nil {
+		return err
+	}
+	return start(ctx)
 }
 
 // ── Authentication intent API ─────────────────────────────────────────────────
@@ -307,8 +358,17 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 //   - !HasSession(): credentials are stored; wrapper's credentialHandler
 //     fires Challenge(ChallengeCredentials) and AuthCoordinator replies.
 func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error {
-	m.authMu.Lock()
-	defer m.authMu.Unlock()
+	err := m.startGuarded(ctx, true, func(ctx context.Context) error { return m.authenticate(ctx, creds) })
+	if errors.Is(err, ErrLogoutPending) {
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Authentication: AuthFailed},
+			Message: "Finish signing out first, then sign in again.",
+		})
+	}
+	return err
+}
+
+func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error {
 	m.auth.SetCredentials(creds) // stored in AuthCoordinator; used if challenged
 	m.setManagerState(ManagerInitializing)
 
@@ -365,48 +425,6 @@ func (m *DRMManager) SubmitChallenge(_ context.Context, reply string) error {
 	return m.auth.SubmitReply(reply)
 }
 
-// Logout stops the backend and clears the session.
-// Stop() is sufficient — AdamplayBackend holds no persistent process state.
-// SessionManager.ClearSession removes the persisted mpl_db and derived files.
-func (m *DRMManager) Logout(ctx context.Context) error {
-	m.setManagerState(ManagerShuttingDown)
-	if err := m.backend.Stop(); err != nil {
-		return fmt.Errorf("logout stop: %w", err)
-	}
-	if err := m.session.ClearSession(); err != nil {
-		return fmt.Errorf("clear session: %w", err)
-	}
-	// emitMu only around copy+send: holding it across backend.Stop would
-	// deadlock with a login blocked on a 2FA challenge (Stop waits for Start,
-	// Start waits for the challenge, the challenge's emit waits for emitMu).
-	m.emitMu.Lock()
-	defer m.emitMu.Unlock()
-	m.mu.Lock()
-	m.snapshot.State = DRMState{
-		Manager:        ManagerReady,
-		Process:        ProcessStopped,
-		Authentication: AuthLoggedOut,
-		FairPlay:       FairPlayUnknown,
-		Session:        SessionEmpty,
-		Recovery:       RecoveryUnknown,
-	}
-	m.snapshot.Capabilities = CapabilityState{}
-	snap := m.snapshot
-	m.mu.Unlock()
-
-	if m.sink != nil {
-		m.sink(snap)
-	}
-	return nil
-}
-
-// ClearSession clears the session without stopping the backend.
-// The backend must be stopped before calling this, otherwise storeservicescore
-// will re-create the session files.
-func (m *DRMManager) ClearSession() error {
-	return m.session.ClearSession()
-}
-
 // DialCBCS implements fairplay.CBCSDialer. It auto-starts the backend if a
 // valid session exists, then opens one CBCS decryption connection.
 // Called by fairplay.CBCSSource for each ALAC or Atmos stream attempt.
@@ -432,6 +450,12 @@ func (m *DRMManager) Shutdown() {
 	m.shutdownStop() // cancel any in-progress handleCrash sleep or restart
 	m.setManagerState(ManagerShuttingDown)
 	m.closed.Store(true) // after the state is set: setManagerState refuses anything but shutting_down from here
+	if m.restartPending.Load() {
+		// A sign-out is waiting for this process to end, possibly because a start is
+		// stuck in native code holding the backend: stopping could hang, and the next
+		// process completes the sign-out anyway.
+		return
+	}
 	if m.backend.Running() {
 		_ = m.backend.Stop()
 	}
@@ -510,17 +534,27 @@ func (m *DRMManager) handleCrash() {
 	case <-time.After(delay):
 	}
 
-	ctx, cancel := context.WithTimeout(m.shutdownCtx, m.policy.StartupTimeout)
-	defer cancel()
-
-	if err := m.backend.Start(ctx, m.cfg); err != nil {
-		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
-			Message: fmt.Sprintf("restart failed: %v", err),
-		})
-		return
+	// A crash restart is a start like any other: never during a sign-out, and never
+	// to reuse a session a pending sign-out is about to remove.
+	err := m.startGuarded(m.shutdownCtx, false, func(ctx context.Context) error {
+		if m.backend.Running() {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(ctx, m.policy.StartupTimeout)
+		defer cancel()
+		if err := m.backend.Start(ctx, m.cfg); err != nil {
+			m.mergeAndEmit(DRMSnapshot{
+				State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
+				Message: fmt.Sprintf("restart failed: %v", err),
+			})
+			return err
+		}
+		m.lastStart.Store(time.Now().UnixNano())
+		return nil
+	})
+	if errors.Is(err, ErrLogoutPending) {
+		slog.Info("drm: crash restart skipped during sign-out")
 	}
-	m.lastStart.Store(time.Now().UnixNano())
 }
 
 // ── State helpers ─────────────────────────────────────────────────────────────

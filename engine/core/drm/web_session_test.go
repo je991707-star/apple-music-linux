@@ -9,21 +9,20 @@ import (
 	"time"
 )
 
-func TestSessionFallsBackToTheWebToken(t *testing.T) {
+func TestWebTokenIsReadButIsNotASession(t *testing.T) {
 	dir := t.TempDir()
 	s := NewSessionManager(dir)
 	if s.HasSession() || s.ReadMusicToken() != "" {
 		t.Fatal("an empty profile has no session")
 	}
 
-	tok := ""
+	tok := "web-token"
 	s.SetWebSession(func() (string, string) { return tok, "us" })
 	if s.HasSession() {
-		t.Fatal("no token yet, so still no session")
+		t.Fatal("a web-player token alone must not count as a sign-in")
 	}
-	tok = "web-token"
-	if !s.HasSession() || s.ReadMusicToken() != "web-token" || s.ReadStorefrontID() != "us" {
-		t.Fatalf("web token must count as a session: has=%v token=%q sf=%q", s.HasSession(), s.ReadMusicToken(), s.ReadStorefrontID())
+	if s.ReadMusicToken() != "web-token" || s.ReadStorefrontID() != "us" {
+		t.Fatalf("the web token must still be readable: token=%q sf=%q", s.ReadMusicToken(), s.ReadStorefrontID())
 	}
 
 	// Credential files, when present, still win over the web token.
@@ -94,15 +93,21 @@ func (c *startCounter) Start(context.Context, BackendConfig) error { c.starts.Ad
 
 func newWebManager(t *testing.T, tok *atomic.Pointer[string]) (*DRMManager, *startCounter) {
 	t.Helper()
+	m, stub, _ := newWebManagerIn(t, t.TempDir(), tok)
+	return m, stub
+}
+
+func newWebManagerIn(t *testing.T, dir string, tok *atomic.Pointer[string]) (*DRMManager, *startCounter, string) {
+	t.Helper()
 	stub := &startCounter{crashStub: crashStub{events: make(chan DRMEvent)}}
-	m := NewDRMManager(stub, NewSessionManager(t.TempDir()), nil, BackendConfig{}, RestartPolicy{StartupTimeout: time.Second})
+	m := NewDRMManager(stub, NewSessionManager(dir), nil, BackendConfig{}, RestartPolicy{StartupTimeout: time.Second})
 	m.SetWebSession(func() (string, string) {
 		if p := tok.Load(); p != nil {
 			return *p, ""
 		}
 		return "", ""
 	})
-	return m, stub
+	return m, stub, dir
 }
 
 func TestInitialStatusIsStoppedNotUnknown(t *testing.T) {
@@ -117,25 +122,29 @@ func TestInitialStatusIsStoppedNotUnknown(t *testing.T) {
 	}
 }
 
-func TestWebTokenStartsTheBackendAndReportsTheSession(t *testing.T) {
+// A signed-out engine stays signed out while the page keeps sending its token;
+// only a real sign-in (session-ready) lets the token start the backend.
+func TestWebTokenStartsTheBackendOnlyWhenSignedIn(t *testing.T) {
 	var tok atomic.Pointer[string]
-	m, stub := newWebManager(t, &tok)
-
-	m.NoteWebSession() // no token: nothing to report and nothing to start
-	time.Sleep(50 * time.Millisecond)
-	if stub.starts.Load() != 0 || m.Status().State.Session != SessionEmpty {
-		t.Fatal("without a token the backend must stay stopped and the session empty")
-	}
+	m, stub, dir := newWebManagerIn(t, t.TempDir(), &tok)
 
 	v := "web-token"
 	tok.Store(&v)
+	m.NoteWebSession()
+	time.Sleep(50 * time.Millisecond)
+	if stub.starts.Load() != 0 || m.Status().State.Session != SessionEmpty || m.Status().State.Authentication != AuthLoggedOut {
+		t.Fatalf("a web token without a sign-in must not start the backend or report a session: starts=%d state=%+v",
+			stub.starts.Load(), m.Status().State)
+	}
+
+	os.WriteFile(filepath.Join(dir, "session-ready"), []byte("1"), 0o600)
 	m.NoteWebSession()
 	deadline := time.Now().Add(2 * time.Second)
 	for stub.starts.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if stub.starts.Load() != 1 {
-		t.Fatalf("the backend must start once the web token appears, starts=%d", stub.starts.Load())
+		t.Fatalf("a signed-in engine must start once the web token appears, starts=%d", stub.starts.Load())
 	}
 	st := m.Status().State
 	if st.Session != SessionValid || st.Authentication != AuthLoggedIn {
@@ -145,7 +154,8 @@ func TestWebTokenStartsTheBackendAndReportsTheSession(t *testing.T) {
 
 func TestNoteWebSessionAfterShutdownDoesNothing(t *testing.T) {
 	var tok atomic.Pointer[string]
-	m, stub := newWebManager(t, &tok)
+	m, stub, dir := newWebManagerIn(t, t.TempDir(), &tok)
+	os.WriteFile(filepath.Join(dir, "session-ready"), []byte("1"), 0o600)
 	v := "t"
 	tok.Store(&v)
 	m.Shutdown()
@@ -198,18 +208,19 @@ func TestAnsweredChallengeIsWithdrawn(t *testing.T) {
 	}
 }
 
-// A sign-out must forget Apple's device trust, or the next sign-in skips 2FA.
-func TestClearSessionForgetsDeviceTrust(t *testing.T) {
+// A sign-out removes the account and keeps the device identity, as Apple's own
+// apps do: otherwise every sign-in is a new device that must be verified again.
+func TestClearSessionKeepsDeviceIdentity(t *testing.T) {
 	dir := t.TempDir()
-	trust := []string{"adi.pb", "IC-Info.sids", "fsi.pdat", "33F633BF6AC7D676168B84C3594A7941AF2BEC09", "2fa.txt"}
-	keep := []string{"engine-session.lock", "33f633bf6ac7d676168b84c3594a7941af2bec09", "notes.txt"}
-	for _, n := range append(append([]string{}, trust...), keep...) {
+	account := []string{"33F633BF6AC7D676168B84C3594A7941AF2BEC09", "2fa.txt", "session-ready", "MUSIC_TOKEN"}
+	keep := []string{"adi.pb", "IC-Info.sids", "fsi.pdat", "device-id", "engine-session.lock", "33f633bf6ac7d676168b84c3594a7941af2bec09", "notes.txt"}
+	for _, n := range append(append([]string{}, account...), keep...) {
 		os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600)
 	}
 	if err := NewSessionManager(dir).ClearSession(); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range trust {
+	for _, n := range account {
 		if _, err := os.Stat(filepath.Join(dir, n)); !os.IsNotExist(err) {
 			t.Errorf("%s survived sign-out", n)
 		}

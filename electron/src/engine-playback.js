@@ -25,12 +25,15 @@ import { installTransportControls } from './engine/transport-controls.js';
 import { playbackMode, leaveLossless } from './engine/handoff.js';
 import { PLAY_STATE, isLegalPlayTransition } from './engine/playstate.js';
 import { createAccountSheet } from './engine/account-sheet.js';
+import { signOutFlow } from './engine/sign-out.js';
 
 // Apple Account sheet (FairPlay sign-in + verification code), shared by the SSE
 // handler and Settings. The engine runs Apple's sign-in and asks for the code
 // through a "two_factor" challenge, which this sheet answers.
 let _accountSheetInstance = null;
 let _onAccountSignedIn = null; // set by the open Settings dialog to refresh itself
+let _accountNote = null;       // { text, error } shown once under the account row after a sign-out
+let _pendingCredentials = null; // kept until Apple accepts the sign-in, then saved
 function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
         signIn: async (email, password) => {
@@ -40,8 +43,7 @@ function _accountSheet() {
                 body: JSON.stringify({ email, password }),
             });
             if (!r.ok) return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
-            // Saved via safeStorage so the engine can sign in again on its own after a restart.
-            window.adamBridge?.drmSaveCredentials({ email, password }).catch(() => {});
+            _pendingCredentials = { email, password };
             return { ok: true };
         },
         submitCode: async (code) => {
@@ -52,7 +54,21 @@ function _accountSheet() {
             });
             return r.ok;
         },
-        onDone: () => _onAccountSignedIn?.(),
+        onDone: () => {
+            // Saved via safeStorage only once Apple accepted them, so the engine can sign in
+            // again on its own after a restart; an abandoned sign-in leaves nothing behind.
+            if (_pendingCredentials) window.adamBridge?.drmSaveCredentials(_pendingCredentials).catch(() => {});
+            _pendingCredentials = null;
+            _onAccountSignedIn?.();
+        },
+        onCancel: () => {
+            // Stop the sign-in the engine is running (it would otherwise wait for the code)
+            // and forget saved credentials, so the next launch does not sign in on its own.
+            _pendingCredentials = null;
+            fetch(`${ENGINE}/api/v1/drm/logout`, { method: 'POST' }).catch(() => {});
+            window.adamBridge?.drmClearCredentials({ reload: false }).catch(() => {});
+            _onAccountSignedIn?.();
+        },
     });
 }
 
@@ -8881,16 +8897,63 @@ window.adamGetQueueInfo = function () {
                 }
                 text.appendChild(sub);
             }
+            if (isSignedIn) {
+                const sub = document.createElement('div');
+                sub.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;';
+                sub.textContent = 'Signing out removes your account from this computer. Signing in again here normally needs no code.';
+                text.appendChild(sub);
+            }
             row.appendChild(text);
             const btn = makeBtn(isSignedIn ? 'Sign Out' : 'Sign In…');
-            btn.onclick = isSignedIn ? async () => {
-                btn.disabled = true; btn.textContent = 'Signing out…';
-                await fetch(`${ENGINE}/api/v1/drm/logout`, { method: 'POST' }).catch(() => {});
-                window.adamBridge?.drmClearCredentials().catch(() => {});
-                onRefresh();
-            } : () => _accountSheet().openSignIn();
+            btn.onclick = isSignedIn ? () => runSignOut('account', btn, 'Signing out…')
+                : () => _accountSheet().openSignIn();
             row.appendChild(btn);
             body.appendChild(row);
+
+            // Forget This Device: like Windows' "Deauthorize This Computer". Two clicks,
+            // because the next sign-in then needs a verification code again.
+            const forgetRow = document.createElement('div');
+            forgetRow.style.cssText = 'display:flex;align-items:center;gap:10px;padding:0 0 11px 18px;';
+            const forgetText = document.createElement('div');
+            forgetText.style.cssText = FF + 'flex:1;font-size:11px;color:rgba(255,255,255,0.38);';
+            forgetText.textContent = 'Forget this device: Apple will treat this computer as new.';
+            const forget = makeBtn('Forget This Device…');
+            forget.style.fontSize = '12px';
+            forget.style.padding = '4px 10px';
+            let armed = false;
+            forget.onclick = () => {
+                if (!armed) {
+                    armed = true;
+                    forget.textContent = 'Forget Device';
+                    forget.style.background = '#fc3c44';
+                    forget.onmouseenter = forget.onmouseleave = null;
+                    forgetText.textContent = 'The next sign-in will ask for a verification code. Click again to confirm.';
+                    return;
+                }
+                runSignOut('device', forget, 'Forgetting…');
+            };
+            forgetRow.append(forgetText, forget);
+            body.appendChild(forgetRow);
+
+            if (_accountNote) {
+                const note = document.createElement('div');
+                note.style.cssText = FF + 'font-size:11px;padding:0 0 11px 18px;color:' +
+                    (_accountNote.error ? '#ff6961' : 'rgba(255,255,255,0.45)') + ';';
+                note.textContent = _accountNote.text;
+                body.appendChild(note);
+                _accountNote = null;
+            }
+        }
+
+        async function runSignOut(scope, button, busyText) {
+            button.disabled = true; button.textContent = busyText;
+            const res = await signOutFlow({
+                engine: ENGINE, scope,
+                clearCredentials: window.adamBridge?.drmClearCredentials,
+            });
+            if (res.message) _accountNote = { text: res.message, error: true };
+            else if (res.note) _accountNote = { text: res.note, error: false };
+            onRefresh();
         }
 
         _onAccountSignedIn = onRefresh;

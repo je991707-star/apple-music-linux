@@ -28,6 +28,10 @@ type AuthCoordinator struct {
 	mu      sync.Mutex
 	emitter func(DRMSnapshot) // set by DRMManager to emit snapshots to SSE
 	seq     uint64            // numbers each announced challenge (AuthChallenge.ID)
+	// cancelPending ends the challenge waiting in pending; aborted makes further
+	// verification-code challenges fail at once until the next SetCredentials.
+	cancelPending context.CancelFunc
+	aborted       bool
 }
 
 // NewAuthCoordinator creates an AuthCoordinator.
@@ -43,7 +47,24 @@ func NewAuthCoordinator(emitter func(DRMSnapshot)) *AuthCoordinator {
 func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 	a.mu.Lock()
 	a.stored = creds
+	a.aborted = false
 	a.mu.Unlock()
+}
+
+// Abort ends a sign-in in progress: it forgets the stored credentials, ends a
+// pending verification-code challenge (the backend gets no code and that sign-in
+// attempt fails) and refuses further code challenges until SetCredentials is
+// called again. Logout calls it first, because stopping the backend waits for a
+// sign-in that is blocked on a challenge.
+func (a *AuthCoordinator) Abort() {
+	a.mu.Lock()
+	a.stored = Credentials{}
+	a.aborted = true
+	cancel := a.cancelPending
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // SubmitReply delivers a challenge reply from the browser (e.g. a 2FA code).
@@ -58,6 +79,25 @@ func (a *AuthCoordinator) SubmitReply(reply string) error {
 	case a.pending <- reply:
 		// A challenge accepts exactly one reply.
 		a.pending = nil
+		return nil
+	default:
+		return fmt.Errorf("authentication challenge already answered")
+	}
+}
+
+// Resend answers the pending verification-code challenge with no code, so Apple
+// rejects that attempt and (if it behaves as for a wrong code) asks again and sends
+// a new code. Unlike Abort it keeps the credentials and the next challenge works.
+func (a *AuthCoordinator) Resend() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending == nil {
+		return fmt.Errorf("no authentication challenge pending")
+	}
+	select {
+	case a.pending <- "":
+		a.pending = nil
+		a.cancelPending = nil
 		return nil
 	default:
 		return fmt.Errorf("authentication challenge already answered")
@@ -108,12 +148,19 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 	// the browser sends right after the announcement is accepted and a stale or duplicate one
 	// (no challenge pending, or already answered) is rejected.
 	replies := make(chan string, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	a.mu.Lock()
+	if a.aborted {
+		a.mu.Unlock()
+		return "", fmt.Errorf("sign-in cancelled")
+	}
 	if a.pending != nil {
 		a.mu.Unlock()
 		return "", fmt.Errorf("authentication challenge already pending")
 	}
 	a.pending = replies
+	a.cancelPending = cancel
 	a.seq++
 	req.ID = a.seq
 	a.mu.Unlock()
@@ -121,6 +168,7 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		a.mu.Lock()
 		if a.pending == replies {
 			a.pending = nil
+			a.cancelPending = nil
 		}
 		a.mu.Unlock()
 	}()
