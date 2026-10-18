@@ -64,13 +64,14 @@ done
 # `git lfs pull` would otherwise package garbage.
 real_binary() { [ -s "$1" ] && ! head -c 64 "$1" | grep -q 'git-lfs'; }
 for f in "$ELECTRON/icon.png" "$REPO/assets/tray-icon.png" \
-         "$REPO/third_party/ffmpeg/bin/ffmpeg" "$REPO/third_party/ffmpeg/lib/libavcodec.so.63"; do
+         "$REPO/third_party/ffmpeg/bin/ffmpeg" "$REPO/third_party/ffmpeg/lib/libavcodec.so.63" \
+         "$DRM/libhybris-core.so" "$DRM/hybris-linker/q.so"; do
     real_binary "$f" || die "$f is missing or an unresolved Git LFS pointer (run 'git lfs pull')"
 done
 
 # ── 1. DRM client library ─────────────────────────────────────────────────────
-echo "[1/7] Building libdrm_client.so..."
-make -C "$DRM" libdrm_client.so >/dev/null
+echo "[1/7] Building libdrm_client.so and the Android stubs..."
+make -C "$DRM" libdrm_client.so android-stubs >/dev/null
 
 # ── 2. Go engine with in-process DRM (stripped) ──────────────────────────────
 # Built into electron/dist/resources, where electron-builder's extraResources picks up
