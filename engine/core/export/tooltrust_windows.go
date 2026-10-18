@@ -5,6 +5,7 @@ package export
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -16,3 +17,6 @@ func checkToolTrust(resolved string, info os.FileInfo) error {
 	}
 	return nil
 }
+
+// interruptProcess has no signal to send on Windows: the tool is ended at once.
+func interruptProcess(cmd *exec.Cmd) error { return cmd.Process.Kill() }

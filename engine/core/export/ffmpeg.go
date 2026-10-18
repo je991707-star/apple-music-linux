@@ -1,6 +1,7 @@
 package export
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,12 +48,12 @@ func findVLC(explicit string) (string, bool) {
 // without dropping fragments, unlike ffmpeg's mov demuxer.
 // The output FLAC has correct audio data but STREAMINFO.total_samples=0
 // (VLC streaming mode); tagFLAC re-encodes it to fix that.
-func runVLCToFLAC(vlcPath, src, dst string) error {
+func runVLCToFLAC(ctx context.Context, vlcPath, src, dst string) error {
 	// Escape VLC sout special characters in the dst path.
 	// '}' closes the option block; ':' and '#' are sout module separators.
 	sout := fmt.Sprintf("#transcode{acodec=flac,channels=2}:std{access=file,mux=raw,dst=%s}",
 		strings.NewReplacer("}", "\\}", ":", "\\:", "#", "\\#").Replace(dst))
-	cmd := exec.Command(vlcPath,
+	cmd := toolCommand(ctx, vlcPath,
 		"--intf", "dummy",
 		"--no-video",
 		"--sout", sout,
@@ -72,7 +73,7 @@ func runVLCToFLAC(vlcPath, src, dst string) error {
 // metadata tags, and optionally embeds a cover image from artPath.
 // Re-encoding (not -c copy) is required because the source may be WAV PCM and
 // ensures ffmpeg writes correct STREAMINFO.total_samples (fixes Duration: N/A).
-func tagFLAC(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
+func tagFLAC(ctx context.Context, ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	if err := lookFFmpeg(ffmpegPath); err != nil {
 		return err
 	}
@@ -145,7 +146,7 @@ func tagFLAC(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	}
 
 	args = append(args, "-f", "flac", "-y", dst)
-	cmd := exec.Command(ffmpegPath, args...)
+	cmd := toolCommand(ctx, ffmpegPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -157,11 +158,11 @@ func tagFLAC(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 // muxVideoAudio combines a video-only fMP4 and an audio-only fMP4 into a
 // single MP4 with -c copy.  Used for music-video exports where the session
 // returns separate video and audio streams.
-func muxVideoAudio(ffmpegPath, videoPath, audioPath, outPath string) error {
+func muxVideoAudio(ctx context.Context, ffmpegPath, videoPath, audioPath, outPath string) error {
 	if err := lookFFmpeg(ffmpegPath); err != nil {
 		return err
 	}
-	cmd := exec.Command(ffmpegPath,
+	cmd := toolCommand(ctx, ffmpegPath,
 		"-i", videoPath,
 		"-i", audioPath,
 		"-map", "0:v",
@@ -183,12 +184,12 @@ func muxVideoAudio(ffmpegPath, videoPath, audioPath, outPath string) error {
 
 // addSubtitleTrack adds an SRT subtitle track to an existing MP4 in-place.
 // Runs a second ffmpeg pass and atomically replaces inPath on success.
-func addSubtitleTrack(ffmpegPath, inPath, srtPath string) error {
+func addSubtitleTrack(ctx context.Context, ffmpegPath, inPath, srtPath string) error {
 	if err := lookFFmpeg(ffmpegPath); err != nil {
 		return err
 	}
 	tmp := inPath + ".sub.mp4"
-	cmd := exec.Command(ffmpegPath,
+	cmd := toolCommand(ctx, ffmpegPath,
 		"-i", inPath,
 		"-i", srtPath,
 		"-map", "0:v", "-map", "0:a", "-map", "1:s",
@@ -215,7 +216,7 @@ func addSubtitleTrack(ffmpegPath, inPath, srtPath string) error {
 // passed as a second -i input so ffmpeg embeds it as a METADATA_BLOCK_PICTURE,
 // which is more reliable than trying to copy the covr MP4 box across formats.
 // The caller is responsible for cleaning up dst on failure.
-func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
+func runFFmpeg(ctx context.Context, ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	if err := lookFFmpeg(ffmpegPath); err != nil {
 		return err
 	}
@@ -296,7 +297,7 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	}
 
 	args = append(args, "-y", dst)
-	cmd := exec.Command(ffmpegPath, args...)
+	cmd := toolCommand(ctx, ffmpegPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

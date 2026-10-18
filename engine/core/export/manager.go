@@ -78,6 +78,7 @@ type Manager struct {
 	seq      atomic.Int64    // monotonically increasing enqueue counter
 	roots    []string        // resolved OutputRoots
 	confined bool            // OutputRoots was set (even if nothing resolved: then nothing is allowed)
+	active   sync.WaitGroup  // the worker and every post-process goroutine, joined by Stop
 }
 
 type workItem struct {
@@ -114,7 +115,11 @@ func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 		stats = pm.ForegroundStats
 	}
 	m.bw = newBWController(stats, float64(opts.FloorBps))
-	go m.worker()
+	m.active.Add(1)
+	go func() {
+		defer m.active.Done()
+		m.worker()
+	}()
 	return m
 }
 
@@ -193,15 +198,32 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	return job, nil
 }
 
-// Stop closes the export queue and cancels every job, so a running export
-// stops downloading/transcoding during engine shutdown instead of racing it.
-// It does not wait for the worker. No new jobs should be enqueued afterwards.
+// stopWait bounds how long Stop waits for running exports to end. Cancelled jobs
+// stop their VLC/FFmpeg children (SIGTERM, then a kill after toolStopGrace), so
+// this stays under the Electron lifecycle's kill delay; a variable so a test can
+// lower it.
+var stopWait = 2500 * time.Millisecond
+
+// Stop closes the export queue, cancels every job (which also stops their VLC and
+// FFmpeg children) and waits, bounded by stopWait, for the worker and every
+// post-process goroutine, so no child keeps writing after the engine exits. No new
+// jobs should be enqueued afterwards.
 func (m *Manager) Stop() {
 	m.queue.Close()
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	for _, j := range m.jobs {
 		j.cancel()
+	}
+	m.mu.RUnlock()
+	done := make(chan struct{})
+	go func() {
+		m.active.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(stopWait):
+		log.Printf("export: stop timed out after %v with work still running", stopWait)
 	}
 }
 
@@ -644,7 +666,11 @@ func (m *Manager) execute(item *workItem) {
 
 	// ctx is the job's own context (not an HTTP request's), so post-processing
 	// already survives client disconnects; keeping it lets Cancel/Stop end it.
-	go m.runPostProcess(ctx, req, job, meta, tmpPath, finalPath)
+	m.active.Add(1)
+	go func() {
+		defer m.active.Done()
+		m.runPostProcess(ctx, req, job, meta, tmpPath, finalPath)
+	}()
 }
 
 // downloadToTemp opens a playback session, streams to a temp file, and returns
@@ -768,7 +794,7 @@ func (m *Manager) streamVideoAudio(ctx context.Context, req ExportRequest, job *
 	if ffPath == "" {
 		ffPath = "ffmpeg"
 	}
-	if err := muxVideoAudio(ffPath, videoTmp, audioTmp, tmpPath); err != nil {
+	if err := muxVideoAudio(ctx, ffPath, videoTmp, audioTmp, tmpPath); err != nil {
 		os.Remove(videoTmp)
 		os.Remove(audioTmp)
 		m.fail(job, fmt.Errorf("mux video+audio: %w (ffmpeg required)", err))
@@ -794,7 +820,7 @@ func fetchMVLyrics(ctx context.Context, sf, assetID, lang, token, mut, tmpPath s
 			if ffPath == "" {
 				ffPath = "ffmpeg"
 			}
-			if serr := addSubtitleTrack(ffPath, tmpPath, srtTmp); serr != nil {
+			if serr := addSubtitleTrack(ctx, ffPath, tmpPath, srtTmp); serr != nil {
 				log.Printf("export %s: subtitle embed warning: %v", assetID, serr)
 			}
 			os.Remove(srtTmp)
@@ -956,15 +982,15 @@ func convertFLAC(ctx context.Context, req ExportRequest, meta TrackMeta, tmpPath
 	converted := false
 	if hasVLC {
 		rawFlac := flacTmp + ".raw.flac"
-		if err := runVLCToFLAC(vlcBin, tmpPath, rawFlac); err != nil {
+		if err := runVLCToFLAC(ctx, vlcBin, tmpPath, rawFlac); err != nil {
 			log.Printf("export %s: vlc transcode failed: %v — trying ffmpeg", req.AssetID, err)
 			os.Remove(rawFlac) //nolint:errcheck
 		} else {
 			artArg := downloadArtworkToTemp(ctx, req, meta, rawFlac)
-			if tagErr := tagFLAC(ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
+			if tagErr := tagFLAC(ctx, ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
 				log.Printf("export %s: flac tag failed: %v — retrying without art", req.AssetID, tagErr)
 				os.Remove(flacTmp) //nolint:errcheck
-				if tagErr2 := tagFLAC(ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
+				if tagErr2 := tagFLAC(ctx, ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
 					log.Printf("export %s: flac tag failed (no art): %v — keeping raw", req.AssetID, tagErr2)
 					if renErr := os.Rename(rawFlac, flacTmp); renErr != nil {
 						os.Remove(rawFlac) //nolint:errcheck
@@ -986,7 +1012,7 @@ func convertFLAC(ctx context.Context, req ExportRequest, meta TrackMeta, tmpPath
 		}
 	}
 	if !converted {
-		if err := runFFmpeg(ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
+		if err := runFFmpeg(ctx, ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
 			log.Printf("export %s: flac conversion failed: %v — keeping .m4a", req.AssetID, err)
 			finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
 		} else {

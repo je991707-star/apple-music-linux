@@ -97,8 +97,8 @@ var maxRenameAttempts = 10000
 // "overwrite" replaces; "rename" takes the first free "name (N).ext"; anything
 // else (skip) keeps the existing file. The claim on the name is a hard link,
 // which fails atomically when the name is taken. Filesystems without hard links
-// fall back to a move that still refuses to replace an existing file (checked, not
-// atomic, there). Returns the path the content ended up at (the existing file's
+// fall back to moveNoReplace, which is just as atomic (renameat2 NOREPLACE, or an
+// O_EXCL claim plus copy). Returns the path the content ended up at (the existing file's
 // path when skipped).
 func moveNoClobber(tmp, final, policy string) (string, error) {
 	if policy == "overwrite" {
@@ -112,16 +112,20 @@ func moveNoClobber(tmp, final, policy string) (string, error) {
 			dest = fmt.Sprintf("%s (%d)%s", base, i, ext)
 		}
 		err := os.Link(tmp, dest)
-		if err != nil && !errors.Is(err, fs.ErrExist) {
-			// No hard links here (or another device): plain move, but never over an existing file.
-			if _, statErr := os.Lstat(dest); statErr != nil {
-				return dest, moveFile(tmp, dest)
-			}
-			err = fs.ErrExist
-		}
 		if err == nil {
 			os.Remove(tmp) //nolint:errcheck
 			return dest, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			// No hard links here (or another device): a move that atomically refuses an
+			// existing name, so a file created meanwhile is never replaced.
+			err = moveNoReplace(tmp, dest)
+			if err == nil {
+				return dest, nil
+			}
+			if !errors.Is(err, fs.ErrExist) {
+				return dest, err
+			}
 		}
 		if policy != "rename" { // skip: keep what is there
 			os.Remove(tmp) //nolint:errcheck
