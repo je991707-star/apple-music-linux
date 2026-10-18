@@ -30,14 +30,13 @@ jobs:
           cache: npm
           cache-dependency-path: electron/package-lock.json
       - name: Build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc zstd build-essential libcurl4-openssl-dev libssl-dev gcc-12 g++-12
-      # Electron 43's headers need a newer C++ front end than 22.04's default GCC 11 (abstract-socket,
-      # an optional native dependency of dbus-next, is rebuilt against them). GCC 12 uses the system
-      # libstdc++, so the glibc baseline is unchanged.
-      - name: Use GCC 12
-        run: |
-          echo "CC=gcc-12" >> "$GITHUB_ENV"
-          echo "CXX=g++-12" >> "$GITHUB_ENV"
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc zstd build-essential libcurl4-openssl-dev libssl-dev clang-15
+      # electron-builder rebuilds abstract-socket (optional dependency of dbus-next) against Electron
+      # 43's V8 headers, which GCC 11 and 12 reject ("expected identifier before '__attribute__'");
+      # V8 is written for Clang. Only C++ switches: the DRM library's C flags are GCC-specific with
+      # -Werror. Clang links against the system libstdc++, so the glibc baseline is unchanged.
+      - name: Use Clang for C++
+        run: echo "CXX=clang++-15" >> "$GITHUB_ENV"
       # VLC's avcodec/avformat plugins on 22.04 link libavcodec.so.58, which third_party/ffmpeg (FFmpeg 9)
       # does not provide; build that FFmpeg from Ubuntu's source package (bundle-vlc.sh picks it up).
       - name: FFmpeg for VLC's plugins
