@@ -266,7 +266,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		return nil, fmt.Errorf("open MV master playlist: %w", err)
 	}
 
-	log.Printf("[mv] assetID=%s masterURL=%s nVariants=%d h264Heights=%v",
+	log.Printf("[mv] assetID=%s masterURL=%s nVariants=%d videoHeights=%v",
 		req.AssetID, masterURL, len(master.Variants), master.VideoHeights())
 
 	audioURL, err := master.SelectAudioVariant(req.MVAudioPriorities)

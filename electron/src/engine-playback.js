@@ -1118,7 +1118,7 @@ function setPlayState(next, ctx) {
 // Use at every await point instead of inlining the comparison so the intent
 // is searchable and the check is impossible to misspell.
 function genStale(myGen) { return myGen !== _generation; }
-let _mvMaxHeight    = parseInt(localStorage.getItem('adam-mv-quality') || '1080', 10); // 480/720/1080/2160
+let _mvMaxHeight    = parseInt(localStorage.getItem('adam-mv-quality') || '2160', 10); // 480/720/1080/2160
 let _mvVideoHeights = []; // available variant heights from HLS master, set per-session
 
 // ── Quality badge ─────────────────────────────────────────────────────────────
@@ -1308,6 +1308,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     } else {
         if (badge) badge.style.display = 'none';
         document.getElementById('adam-quality-popup')?.style && (document.getElementById('adam-quality-popup').style.display = 'none');
+        window._syncNpBadge?.();
         window.adamBridge?.mprisUpdate?.({ qualityBadge: null });
         return;
     }
@@ -1479,7 +1480,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         if (scrubber) _attach(scrubber);
     }
 
-    setInterval(_check, 800);
+    setInterval(_check, 300);
     window._syncNpBadge = _syncBadge;
 })();
 
@@ -3931,10 +3932,10 @@ function _vlcHandleStateChange(state, prev, posMs, mkAudio) {
         if (prev !== 'paused' || fromSeek || wasLoading) mkAudio.dispatchEvent(new Event('playing'));
     }
     if (state === 'paused') {
-        // Suppress spurious pause events while waiting for VLC to resume
-        // after a seek — the poll may see a transient paused state between
-        // SetTime completing and VLC re-entering playing.
-        if (!_vlcPostSeek) {
+        // Suppress spurious pause events during initial load (opening→paused→playing)
+        // and during post-seek (SetTime→paused→playing). Both are transient VLC states
+        // that the user did not trigger and should not be surfaced to MusicKit.
+        if (!_vlcPostSeek && !_vlcLoading) {
             _vlcPaused = true;
             mkAudio.dispatchEvent(new Event('pause'));
             _startLyricsFreeze(mkAudio);
@@ -9962,60 +9963,6 @@ window.adamGetQueueInfo = function () {
         mvClearRow.appendChild(mvClearBtn);
         cBody.appendChild(mvClearRow);
 
-        // ── Pre-warm section divider ───────────────────────────────────────────
-        const pwSubhead = document.createElement('div');
-        pwSubhead.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:14px 0 4px;text-transform:uppercase;border-top:0.5px solid rgba(255,255,255,0.1);margin-top:2px;';
-        pwSubhead.textContent = 'Pre-warm';
-        cBody.appendChild(pwSubhead);
-
-        // Prewarm cache section
-        const prewarm = cacheStats?.prewarm;
-        const pwUsedMB  = Math.round((prewarm?.sizeBytes ?? 0) / (1024 * 1024));
-        const pwLimitMB = Math.round((prewarm?.limitBytes ?? 1024 * 1024 * 1024) / (1024 * 1024));
-        const pwPct = pwLimitMB > 0 ? Math.min(100, Math.round(pwUsedMB / pwLimitMB * 100)) : 0;
-
-        const pwBarWrap = document.createElement('div');
-        pwBarWrap.style.cssText = 'flex:1;';
-        const pwBarBg = document.createElement('div');
-        pwBarBg.style.cssText = 'height:4px;background:rgba(255,255,255,0.12);border-radius:2px;overflow:hidden;margin-bottom:4px;';
-        const pwBarFill = document.createElement('div');
-        pwBarFill.style.cssText = `height:100%;width:${pwPct}%;background:#fc3c44;border-radius:2px;`;
-        pwBarBg.appendChild(pwBarFill);
-        const pwBarLabel = document.createElement('div');
-        pwBarLabel.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.4);';
-        pwBarLabel.textContent = `${pwUsedMB} MB / ${pwLimitMB} MB`;
-        pwBarWrap.appendChild(pwBarBg); pwBarWrap.appendChild(pwBarLabel);
-        cBody.appendChild(makeRow('Pre-warm buffer', pwBarWrap, 'Next 2 tracks pre-loaded in memory', false));
-
-        const pwSzVal = document.createElement('span');
-        pwSzVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);min-width:62px;text-align:right;white-space:nowrap;flex-shrink:0;';
-        pwSzVal.textContent = `${pwLimitMB} MB`;
-        const pwSzSl = document.createElement('input');
-        pwSzSl.type = 'range'; pwSzSl.min = 100; pwSzSl.max = 4096; pwSzSl.step = 128; pwSzSl.value = pwLimitMB;
-        pwSzSl.style.cssText = 'flex:1;accent-color:#fc3c44;';
-        pwSzSl.oninput = () => { pwSzVal.textContent = `${pwSzSl.value} MB`; };
-        pwSzSl.onchange = () => {
-            const v = +pwSzSl.value;
-            window.adamBridge?.setPref('prewarmLimitMB', v);
-            fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prewarmLimitMB: v }) }).catch(() => {});
-        };
-        const pwSzResetBtn = _adamMiniBtn(() => {
-            pwSzSl.value = 1024; pwSzVal.textContent = '1024 MB';
-            window.adamBridge?.setPref('prewarmLimitMB', 1024);
-            fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prewarmLimitMB: 1024 }) }).catch(() => {});
-        });
-        const pwSzRow = document.createElement('div');
-        pwSzRow.style.cssText = 'display:flex;align-items:center;flex:1;gap:8px;';
-        pwSzRow.append(pwSzSl, pwSzVal, pwSzResetBtn);
-        cBody.appendChild(makeRow('Pre-warm size limit', pwSzRow, null, true));
-        const pwClearRow = document.createElement('div');
-        pwClearRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
-        const clearPrewarmBtn = makeBtn('Clear Pre-warm');
-        clearPrewarmBtn.onclick = () => {
-            fetch(`${ENGINE}/api/v1/cache/playback?what=prewarm`, { method: 'DELETE' }).then(() => openSettings()).catch(() => {});
-        };
-        pwClearRow.appendChild(clearPrewarmBtn);
-        cBody.appendChild(pwClearRow);
         return wrap;
     }
 
