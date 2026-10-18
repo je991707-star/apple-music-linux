@@ -31,6 +31,16 @@ jobs:
           cache-dependency-path: electron/package-lock.json
       - name: Build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc zstd build-essential libcurl4-openssl-dev libssl-dev
+      # VLC's avcodec/avformat plugins on 22.04 link libavcodec.so.58, which third_party/ffmpeg (FFmpeg 9)
+      # does not provide; build that FFmpeg from Ubuntu's source package (bundle-vlc.sh picks it up).
+      - name: FFmpeg for VLC's plugins
+        run: |
+          grep '^deb ' /etc/apt/sources.list | sed 's/^deb /deb-src /' | sudo tee /etc/apt/sources.list.d/deb-src.list >/dev/null
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends nasm patchelf zlib1g-dev dpkg-dev
+          scripts/build-vlc-ffmpeg.sh "$RUNNER_TEMP/vlc-ffmpeg"
+          echo "ADAM_VLC_FFMPEG_LIBDIR=$RUNNER_TEMP/vlc-ffmpeg" >> "$GITHUB_ENV"
+        env:
+          ADAM_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
       - run: npm ci
         working-directory: electron
       - name: Build the installer
