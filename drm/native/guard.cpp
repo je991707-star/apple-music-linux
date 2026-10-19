@@ -25,6 +25,7 @@ extern "C" {
 
 /* ── Thread-local recovery state ────────────────────────────────────────────*/
 
+#ifndef _WIN32
 static thread_local sigjmp_buf g_recovery_jmp;
 static thread_local bool g_recovery_valid = false;
 
@@ -145,3 +146,45 @@ extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
     g_recovery_valid = false;
     return result;
 }
+#else
+
+/* MinGW has the C signal API but not POSIX sigaction/sigsetjmp.  Keep the
+ * exception barrier available on Windows; abort recovery is intentionally not
+ * emulated because longjmp from a Windows signal handler is not reliable
+ * across the Android ELF guest stack. */
+extern "C" void *aml_open_kd_ctx_guarded(const char *adam, const char *uri)
+{
+    try {
+        return drm_lib_open_kd_ctx(adam, uri);
+    } catch (const std::exception &e) {
+        fprintf(stderr, "[guard] key context exception: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "[guard] key context: unknown C++ exception\n");
+    }
+    return nullptr;
+}
+
+extern "C" int aml_lib_login_guarded(const char *username, const char *password)
+{
+    try {
+        return drm_lib_login(username, password);
+    } catch (const std::exception &e) {
+        fprintf(stderr, "[guard] drm_lib_login exception: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "[guard] drm_lib_login: unknown C++ exception\n");
+    }
+    return -1;
+}
+
+extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
+{
+    try {
+        return drm_lib_init(cfg);
+    } catch (const std::exception &e) {
+        fprintf(stderr, "[guard] drm_lib_init exception: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "[guard] drm_lib_init: unknown C++ exception\n");
+    }
+    return -1;
+}
+#endif

@@ -14,9 +14,52 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dlfcn.h>
 #include <stdint.h>
 #include <pthread.h>
+
+#ifdef _WIN32
+/* The Windows loader path does not use POSIX dlopen/dlsym.  Keep only the
+ * flag values needed by the Android linker API. */
+#include <windows.h>
+#include <stdint.h>
+#ifndef RTLD_NOW
+#define RTLD_NOW 2
+#endif
+#ifndef RTLD_GLOBAL
+#define RTLD_GLOBAL 0x100
+#endif
+static int hybris_setenv(const char *name, const char *value, int overwrite)
+{
+    if (!overwrite && getenv(name) != NULL) return 0;
+    return _putenv_s(name, value != NULL ? value : "");
+}
+#define setenv hybris_setenv
+
+/* bionic's DT_INIT_ARRAY constructors begin with "mov rax, fs:[0]" to read
+ * the Android TLS base.  On Windows x86_64 the fs segment base is 0 in user
+ * mode, so that read faults at address 0 before any bionic state is set up.
+ *
+ * Fix: allocate a minimal TLS block and set the fs base to it via WRFSBASE
+ * (available in user mode on Windows 10 1511+ with FSGSBASE enabled in CR4).
+ *
+ * Slot layout (bionic/libc/private/bionic_tls.h, x86_64):
+ *   [0] self-ptr  — fs:[0] must equal &tls[0] (glibc-style self-referential)
+ *   [1] pthread*  — __get_thread() reads slot 1; code may dereference it
+ *   [5] canary    — 0 is safe during init; ABI doesn't verify it in ctors
+ */
+static __attribute__((aligned(64))) uint64_t g_bionic_tls_slots[32];
+static __attribute__((aligned(16))) uint64_t g_bionic_pthread_stub[64];
+
+static void setup_bionic_fs_base_win(void) {
+    memset(g_bionic_tls_slots,   0, sizeof(g_bionic_tls_slots));
+    memset(g_bionic_pthread_stub, 0, sizeof(g_bionic_pthread_stub));
+    g_bionic_tls_slots[0] = (uint64_t)(uintptr_t)g_bionic_tls_slots;    /* self */
+    g_bionic_tls_slots[1] = (uint64_t)(uintptr_t)g_bionic_pthread_stub; /* tid  */
+    __asm__ volatile("wrfsbase %0" :: "r"((uint64_t)(uintptr_t)g_bionic_tls_slots) : "memory");
+}
+#else
+#include <dlfcn.h>
+#endif
 
 #include "drm_hybris.h"
 #include "embedded_loader.h"
@@ -74,8 +117,6 @@ int hybris_backend_init(
     const char *lib64_dir,
     const char *hybris_core_path)
 {
-    (void)hybris_core_path;
-
     /* libhybris-core.so dlopens its Android linker shim (q.so) from
      * $HYBRIS_LINKER_DIR (default /tmp/hybris-linker); it must be set before
      * the embedded core is loaded. */
@@ -104,10 +145,30 @@ int hybris_backend_init(
     }
 
     /*
-     * Load libhybris-core.so and all Android .so dependencies from their
-     * embedded binary blobs via anonymous memfds — no rootfs directory needed.
+     * Install a dummy bionic fs base BEFORE any Android library loads.
+     * bionic's DT_INIT_ARRAY constructors (and any library loaded by the
+     * hybris core init) start with "mov rax, fs:[0]" to read the Android TLS
+     * base.  On Windows x86_64 the fs segment base is 0 in user mode, so
+     * that read faults at address 0.  Set it up once here so all subsequent
+     * android_dlopen calls see a valid fs base.
      */
+#ifdef _WIN32
+    fprintf(stderr, "[drm] calling setup_bionic_fs_base_win\n"); fflush(stderr);
+    setup_bionic_fs_base_win();
+    fprintf(stderr, "[drm] fs base set, tls[0]=%p\n", (void*)(uintptr_t)g_bionic_tls_slots[0]); fflush(stderr);
+#endif
+
+    /*
+     * Load libhybris-core.so and all Android .so dependencies. Linux loads the
+     * embedded core from an anonymous memfd; Windows loads the supplied native
+     * module and both paths hand Android libraries to android_dlopen().
+     */
+#ifdef _WIN32
+    if (embedded_loader_init_path(hybris_core_path) != 0) {
+#else
+    (void)hybris_core_path;
     if (embedded_loader_init() != 0) {
+#endif
         fprintf(stderr, "[hybris] embedded_loader_init failed: %s\n",
                 embedded_dlerror());
         pthread_mutex_unlock(&g_hybris.lock);
@@ -123,23 +184,38 @@ int hybris_backend_init(
     g_hybris.android_dlclose = NULL; /* not exposed by embedded loader */
 
     /* libandroidappmusic.so depends on libCoreFP.so; load it first. */
+    fprintf(stderr, "[drm] loading libCoreFP.so\n"); fflush(stderr);
     g_hybris.corefp_handle = g_hybris.android_dlopen("libCoreFP.so", RTLD_NOW);
+    fprintf(stderr, "[drm] libCoreFP.so handle=%p\n", g_hybris.corefp_handle); fflush(stderr);
     if (!g_hybris.corefp_handle)
         fprintf(stderr, "[hybris] libCoreFP.so: load failed\n");
 
     /* ── Load libandroidappmusic.so (proven path) ── */
     /* Must also load libstoreservicescore.so first (dependency) */
+    fprintf(stderr, "[drm] loading libstoreservicescore.so\n"); fflush(stderr);
     g_hybris.ssc_handle = g_hybris.android_dlopen("libstoreservicescore.so", RTLD_NOW | RTLD_GLOBAL);
+    fprintf(stderr, "[drm] libstoreservicescore.so handle=%p\n", g_hybris.ssc_handle); fflush(stderr);
     if (!g_hybris.ssc_handle)
         fprintf(stderr, "[hybris] libstoreservicescore.so: load failed (may still work)\n");
 
+    fprintf(stderr, "[drm] loading libandroidappmusic.so\n"); fflush(stderr);
     g_hybris.appmusic_handle = g_hybris.android_dlopen("libandroidappmusic.so", RTLD_NOW);
+    fprintf(stderr, "[drm] libandroidappmusic.so handle=%p\n", g_hybris.appmusic_handle); fflush(stderr);
     if (g_hybris.appmusic_handle) {
+#ifdef _WIN32
+        void *nfc_symbol = g_hybris.android_dlsym(
+            g_hybris.appmusic_handle, "NfcRKVnxuKZy04KWbdFu71Ou");
+        memcpy(&g_hybris.nfc_decrypt, &nfc_symbol,
+               sizeof(g_hybris.nfc_decrypt));
+#else
         g_hybris.nfc_decrypt = (nfc_decrypt_fn)
-                                   g_hybris.android_dlsym(g_hybris.appmusic_handle, "NfcRKVnxuKZy04KWbdFu71Ou");
+                                   g_hybris.android_dlsym(g_hybris.appmusic_handle,
+                                                          "NfcRKVnxuKZy04KWbdFu71Ou");
+#endif
 
         g_hybris.appmusic_available = (g_hybris.nfc_decrypt != NULL);
-        DRM_DEBUG("[hybris] libandroidappmusic.so: NfcRK=%p\n", (void *)g_hybris.nfc_decrypt);
+        DRM_DEBUG("[hybris] libandroidappmusic.so: NfcRK=%s\n",
+                  g_hybris.nfc_decrypt != NULL ? "resolved" : "missing");
     } else {
         fprintf(stderr, "[hybris] libandroidappmusic.so: load failed\n");
     }

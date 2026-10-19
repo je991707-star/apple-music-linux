@@ -18,6 +18,7 @@ extern int drm_lib_debug_enabled(void); /* drm_lib.c: ADAM_DRM_DEBUG */
 extern void *android_dlopen(const char *filename, int flag);
 extern void *android_dlsym(void *handle, const char *symbol);
 extern const char *android_dlerror(void);
+extern void android_update_LD_LIBRARY_PATH(const char *path);
 
 #define RTLD_NOW_GLOBAL 0x102
 
@@ -49,6 +50,32 @@ static void *sym(const char *name) {
     return p;
 }
 
+/* ── Windows: dummy bionic TLS so DT_INIT_ARRAY constructors don't fault ─── */
+#ifdef _WIN32
+/* bionic's DT_INIT_ARRAY constructors start with "mov rax, fs:[0]" to read
+ * the Android TLS base.  On Windows x86_64 the fs segment base is 0 in user
+ * mode, so that read faults at address 0 before any bionic state is set up.
+ *
+ * Fix: allocate a minimal TLS block and set the fs base to it via WRFSBASE
+ * (available in user mode on Windows 10 1511+ with FSGSBASE enabled in CR4).
+ *
+ * Slot layout (bionic/libc/private/bionic_tls.h, x86_64):
+ *   [0] self-ptr  — fs:[0] must equal &tls[0] (glibc-style self-referential)
+ *   [1] pthread*  — __get_thread() reads slot 1; code may dereference it
+ *   [5] canary    — 0 is safe during init; ABI doesn't verify it in ctors
+ */
+static __attribute__((aligned(64))) uint64_t bionic_tls_slots[32];
+static __attribute__((aligned(16))) uint64_t bionic_pthread_stub[64];
+
+static void setup_bionic_fs_base(void) {
+    memset(bionic_tls_slots,   0, sizeof(bionic_tls_slots));
+    memset(bionic_pthread_stub, 0, sizeof(bionic_pthread_stub));
+    bionic_tls_slots[0] = (uint64_t)(uintptr_t)bionic_tls_slots;   /* self */
+    bionic_tls_slots[1] = (uint64_t)(uintptr_t)bionic_pthread_stub; /* tid  */
+    __asm__ volatile("wrfsbase %0" :: "r"((uint64_t)(uintptr_t)bionic_tls_slots) : "memory");
+}
+#endif /* _WIN32 */
+
 /* ── init: load Android libs, patch vtables ─────────────────────────────── */
 /* Returns 0 on success, -1 if an Android lib cannot be loaded. It must not
  * exit: in library mode (libdrm-native.so inside the Go engine) that would
@@ -56,12 +83,33 @@ static void *sym(const char *name) {
 int hybris_init_libs(const char *lib64) {
     char path[512];
 
-    /* pre-load implicit system libs so verneed checks pass */
+    /* pre-load implicit system libs so verneed checks pass.
+     * On Windows the Q linker handles bionic (libc/libm/libdl) through its own
+     * protected namespace; explicit android_dlopen of them crashes, so skip. */
+#ifndef _WIN32
     static const char *preload[] = { "libdl.so", "libc.so", "libm.so", NULL };
     for (int i = 0; preload[i]; i++) {
         snprintf(path, sizeof(path), "%s/%s", lib64, preload[i]);
         android_dlopen(path, RTLD_NOW_GLOBAL);
     }
+#endif
+
+#ifdef _WIN32
+    /* Install a dummy fs base so bionic's DT_INIT_ARRAY constructors don't
+     * fault at fs:[0] — must happen before the first android_dlopen that
+     * triggers bionic loading (see setup_bionic_fs_base above). */
+    setup_bionic_fs_base();
+
+    /* On Windows the Android linker uses ':' as LD_LIBRARY_PATH separator,
+     * which conflicts with Windows drive letters ("C:\...").  Strip the drive
+     * letter so the library search path has no embedded ':', e.g.
+     * "C:\rootfs\system\lib64" → "\rootfs\system\lib64" (drive-relative).
+     * Windows resolves this to the same directory as the full path. */
+    {
+        const char *lib_search = (lib64[1] == ':') ? lib64 + 2 : lib64;
+        android_update_LD_LIBRARY_PATH(lib_search);
+    }
+#endif
 
     snprintf(path, sizeof(path), "%s/libstoreservicescore.so", lib64);
     h_ssc = android_dlopen(path, RTLD_NOW_GLOBAL);

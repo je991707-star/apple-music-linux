@@ -55,6 +55,34 @@ EMBED_BLOB_OBJS = $(BLOBS_DIR)/libhybris-core.so.o
 
 EMBEDDED_LOADER_OBJ = $(BLOBS_DIR)/embedded_loader.o
 
+# Windows/MSYS2 portability check. Windows loads the MinGW-built libhybris core
+# as a normal module, so it must not assemble or link the Linux embedded blob.
+MINGW_CC ?= x86_64-w64-mingw32-gcc
+MINGW_CXX ?= x86_64-w64-mingw32-g++
+WINDOWS_BUILD_DIR ?= build-windows
+WINDOWS_CFLAGS ?= -D_WIN32 -Wall -Wextra -Werror -pedantic -std=c11 -O2 -I.
+WINDOWS_LOADER_OBJ = $(WINDOWS_BUILD_DIR)/embedded_loader.o
+WINDOWS_NATIVE_CFLAGS ?= -D_WIN32 -DMyRelease -D_GNU_SOURCE -DDRM_LIB_BUILD \
+                        -include sys/time.h -O2 -g -fPIC -Wall \
+                        -Wno-unused-variable -Wno-unused-function \
+                        -Wno-unused-but-set-variable -Wno-format-truncation \
+                        -Wno-stringop-overflow -I. -I$(NATIVE_DIR)
+WINDOWS_NATIVE_CXXFLAGS ?= -D_WIN32 -DMyRelease -D_GNU_SOURCE -DDRM_LIB_BUILD \
+                          -O2 -g -fPIC -Wall -fexceptions -I. -I$(NATIVE_DIR)
+WINDOWS_LIBS ?= -lws2_32 -lwinpthread
+WINDOWS_TARGET = $(WINDOWS_BUILD_DIR)/libdrm_client.dll
+WINDOWS_OBJS = $(WINDOWS_BUILD_DIR)/drm_linux.o \
+               $(WINDOWS_BUILD_DIR)/drm_hybris.o \
+               $(WINDOWS_BUILD_DIR)/main.o \
+               $(WINDOWS_BUILD_DIR)/cmdline.o \
+               $(WINDOWS_BUILD_DIR)/hybris_stubs.o \
+               $(WINDOWS_BUILD_DIR)/drm_lib.o \
+               $(WINDOWS_BUILD_DIR)/cJSON.o \
+               $(WINDOWS_BUILD_DIR)/android_shim.o \
+               $(WINDOWS_BUILD_DIR)/main_cpp.o \
+               $(WINDOWS_BUILD_DIR)/guard_cpp.o \
+               $(WINDOWS_LOADER_OBJ)
+
 # Core source files
 SRCS = drm_linux.c
 HYBRIS_SRCS = drm_hybris.c
@@ -82,7 +110,8 @@ NATIVE_HEADERS = $(wildcard $(NATIVE_DIR)/*.h)
 
 $(NATIVE_DIR)/hybris_stubs.o: $(NATIVE_DIR)/hybris_stubs.c $(NATIVE_HEADERS)
 	$(CC) $(NATIVE_CFLAGS) -Dandroid_dlopen=aml_android_dlopen -Dandroid_dlsym=aml_android_dlsym \
-	      -Dandroid_dlerror=aml_android_dlerror -c -o $@ $<
+	      -Dandroid_dlerror=aml_android_dlerror \
+	      -Dandroid_update_LD_LIBRARY_PATH=aml_android_update_LD_LIBRARY_PATH -c -o $@ $<
 
 $(NATIVE_DIR)/%.o: $(NATIVE_DIR)/%.c $(NATIVE_HEADERS)
 	$(CC) $(NATIVE_CFLAGS) -c -o $@ $<
@@ -172,6 +201,7 @@ clean-objs:
 	rm -f $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(TEST_TARGET)
 	rm -rf $(STUB_DIR)
 	rm -rf $(BLOBS_DIR)
+	rm -rf $(WINDOWS_BUILD_DIR)
 
 # Everything `make` produced, including the library itself.
 clean: clean-objs
@@ -199,6 +229,69 @@ uninstall:
 test: $(TEST_TARGET)
 	@$(TEST_TARGET)
 
+# Compile the Windows loader branch without requiring credentials or Android
+# libraries. Run this in an MSYS2 MinGW shell, or override MINGW_CC in CI.
+$(WINDOWS_LOADER_OBJ): embedded_loader.c embedded_loader.h
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_CFLAGS) -c -o $@ $<
+
+windows-loader-check: $(WINDOWS_LOADER_OBJ)
+	@echo "Windows embedded loader compile check passed"
+
+$(WINDOWS_BUILD_DIR)/drm_linux.o: drm_linux.c drm_types.h
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_CFLAGS) -Wno-format-truncation -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/drm_hybris.o: drm_hybris.c drm_hybris.h embedded_loader.h native/drm_lib.h
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -Wno-pedantic -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/main.o: native/main.c $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/cmdline.o: native/cmdline.c $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/hybris_stubs.o: native/hybris_stubs.c $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) \
+		-Dandroid_dlopen=aml_android_dlopen \
+		-Dandroid_dlsym=aml_android_dlsym \
+		-Dandroid_dlerror=aml_android_dlerror \
+		-Dandroid_update_LD_LIBRARY_PATH=aml_android_update_LD_LIBRARY_PATH \
+		-c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/drm_lib.o: native/drm_lib.c $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/cJSON.o: native/cJSON.c $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/android_shim.o: native/android_shim.c embedded_loader.h
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/main_cpp.o: native/main.cpp $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CXX) $(WINDOWS_NATIVE_CXXFLAGS) -c -o $@ $<
+
+$(WINDOWS_BUILD_DIR)/guard_cpp.o: native/guard.cpp $(NATIVE_HEADERS)
+	@mkdir -p $(WINDOWS_BUILD_DIR)
+	$(MINGW_CXX) $(WINDOWS_NATIVE_CXXFLAGS) -c -o $@ $<
+
+$(WINDOWS_TARGET): $(WINDOWS_OBJS)
+	$(MINGW_CXX) -shared -o $@ $^ -Wl,--allow-shlib-undefined \
+		-Wl,--export-all-symbols $(WINDOWS_LIBS)
+
+windows-build: $(WINDOWS_TARGET)
+	@echo "Windows DRM client built: $(WINDOWS_TARGET)"
+
+windows-check: windows-loader-check windows-build
+
 # Our own C/C++ (style in /.clang-format). Vendored and third-party files are excluded.
 FORMAT_SRCS = drm_linux.c drm_hybris.c drm_hybris.h drm_types.h embedded_loader.c \
               embedded_loader.h stubs/empty_stub.c tests/test_drm_linux.c \
@@ -218,4 +311,4 @@ coverage: LDFLAGS_LIB += --coverage
 coverage: clean all
 
 .PHONY: all android-stubs clean clean-objs release clean-icu install uninstall test \
-        analyze format-check format coverage gen-blobs build-icu
+        windows-loader-check windows-build windows-check analyze format-check format coverage gen-blobs build-icu

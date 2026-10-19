@@ -33,16 +33,54 @@
 #include <stdarg.h>
 #include <ctype.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define SOCK_CLOEXEC 0
+#ifndef SO_REUSEPORT
+#define SO_REUSEPORT SO_REUSEADDR
+#endif
+#define read(fd, buffer, length) recv((SOCKET)(fd), (char *)(buffer), (int)(length), 0)
+#define write(fd, buffer, length) send((SOCKET)(fd), (const char *)(buffer), (int)(length), 0)
+#define close(fd) closesocket((SOCKET)(fd))
+static inline int hybris_windows_setsockopt(int fd, int level, int option,
+                                            const void *value, int length)
+{
+    return setsockopt((SOCKET)fd, level, option, (const char *)value, length);
+}
+#define setsockopt hybris_windows_setsockopt
+static inline int accept4(int fd, struct sockaddr *address, int *address_length,
+                          int flags)
+{
+    (void)flags;
+    return (int)accept((SOCKET)fd, address, address_length);
+}
+#ifndef EHOSTDOWN
+#define EHOSTDOWN ENETDOWN
+#endif
+#ifndef ENONET
+#define ENONET ENETDOWN
+#endif
+static inline int hybris_windows_setenv(const char *name, const char *value,
+                                        int overwrite)
+{
+    if (!overwrite && getenv(name) != NULL) return 0;
+    return _putenv_s(name, value != NULL ? value : "");
+}
+#define setenv hybris_windows_setenv
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <link.h>
+#endif
 #include <sys/stat.h>
 
 #include "import.h"
 #include "cmdline.h"
 #include "cJSON.h"
 #include "dobby.h"
-#include <link.h>
 
 struct shared_ptr apInf;
 uint8_t leaseMgr[16];
@@ -53,7 +91,7 @@ char *amUsername, *amPassword;
  * per attempt and the code is appended to the password, so it is cut back to
  * this length first; otherwise a second prompt sends password+code1+code2. */
 size_t amPasswordLen;
-struct shared_ptr GUID;
+struct shared_ptr g_GUID;
 int decryptCount = 1000;
 int offlineFlag;
 char *device_infos[9];
@@ -359,13 +397,13 @@ void drm_init_internal(void) {
     //     foothill, &root, &natLib);
     // _ZN8FootHill24defaultContextIdentifierEv(foothill);
 
-    _ZN17storeservicescore10DeviceGUID8instanceEv(&GUID);
+    _ZN17storeservicescore10DeviceGUID8instanceEv(&g_GUID);
 
     static uint8_t ret[88];
     static unsigned int conf3 = 29;
     static uint8_t conf4 = 1;
     _ZN17storeservicescore10DeviceGUID9configureERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_RKjRKb(
-        &ret, GUID.obj, &conf1, &conf2, &conf3, &conf4);
+        &ret, g_GUID.obj, &conf1, &conf2, &conf3, &conf4);
 }
 
 struct shared_ptr drm_init_ctx(void) {
@@ -1806,7 +1844,7 @@ void write_storefront_id(void) {
 
 char *get_guid() {
     char *ret[2];
-    _ZN17storeservicescore10DeviceGUID4guidEv(ret, GUID.obj);
+    _ZN17storeservicescore10DeviceGUID4guidEv(ret, g_GUID.obj);
     char *raw = _ZNK13mediaplatform4Data5bytesEv(ret[0]);
     size_t len = _ZNK13mediaplatform4Data6lengthEv(ret[0]);
     /* Data::bytes() is NOT null-terminated — copy to a null-terminated buffer */

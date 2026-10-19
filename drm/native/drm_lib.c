@@ -18,6 +18,15 @@
 #include "drm_lib.h"
 #include "cmdline.h"
 
+#ifdef _WIN32
+static int drm_windows_setenv(const char *name, const char *value, int overwrite)
+{
+    if (!overwrite && getenv(name) != NULL) return 0;
+    return _putenv_s(name, value != NULL ? value : "");
+}
+#define setenv drm_windows_setenv
+#endif
+
 /* ── Externs from hybris_stubs.c ────────────────────────────────────────────*/
 
 extern uint8_t endLeaseCallback[32];

@@ -21,3 +21,8 @@ const char *aml_android_dlerror(void)
 {
     return embedded_dlerror();
 }
+
+void aml_android_update_LD_LIBRARY_PATH(const char *path)
+{
+    embedded_update_ld_library_path(path);
+}
