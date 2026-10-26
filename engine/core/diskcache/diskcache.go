@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -117,7 +118,7 @@ func (c *Cache) Get(assetID, qualifier string) (*os.File, bool) {
 		return nil, false
 	}
 
-	f, err := os.Open(path)
+	f, err := openShared(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, false
 	}
@@ -149,7 +150,7 @@ func (c *Cache) BeginPut(assetID, qualifier string) (*PutWriter, error) {
 	}
 
 	tmpPath := filepath.Join(c.dir, key+".tmp")
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := openShared(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		c.inFlight.Delete(key)
 		return nil, err
@@ -162,6 +163,20 @@ func (c *Cache) BeginPut(assetID, qualifier string) (*PutWriter, error) {
 	}, nil
 }
 
+// commitRename moves a finished temp file to its final name. Windows will not replace a file that something
+// has open (a replay being served from the same entry, say); there the entry that is already in place is
+// kept and the temp file dropped, since both were built for the same asset and quality and hold the same bytes.
+func commitRename(tmp, final string) error {
+	err := os.Rename(tmp, final)
+	if err != nil && runtime.GOOS == "windows" {
+		if st, statErr := os.Stat(final); statErr == nil && st.Mode().IsRegular() {
+			os.Remove(tmp)
+			return nil
+		}
+	}
+	return err
+}
+
 // Commit closes the temp file and renames it to its final path.
 // After Commit the cache triggers eviction if a size limit is set.
 func (pw *PutWriter) Commit() error {
@@ -170,7 +185,7 @@ func (pw *PutWriter) Commit() error {
 	// Rename BEFORE releasing the in-flight marker: once it is gone, a new
 	// BeginPut/BeginStreamingPut may O_TRUNC the same .tmp path, which would
 	// truncate this file just before it becomes the committed entry.
-	err := os.Rename(pw.File.Name(), pw.finalPath)
+	err := commitRename(pw.File.Name(), pw.finalPath)
 	if err != nil {
 		os.Remove(pw.File.Name())
 	}
@@ -331,7 +346,7 @@ func (c *Cache) BeginStreamingPut(assetID, qualifier string) (*StreamingPutWrite
 		return nil, nil
 	}
 	tmpPath := filepath.Join(c.dir, key+".tmp")
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	f, err := openShared(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		c.inFlight.Delete(key)
 		return nil, err
@@ -382,7 +397,7 @@ func (sw *StreamingPutWriter) decRef() {
 func (sw *StreamingPutWriter) Commit() error {
 	// Rename BEFORE releasing the in-flight/streaming markers (see PutWriter.Commit).
 	// Readers keep working across the rename: they hold the open descriptor.
-	err := os.Rename(sw.file.Name(), sw.finalPath)
+	err := commitRename(sw.file.Name(), sw.finalPath)
 	if err != nil {
 		os.Remove(sw.file.Name())
 	}
@@ -444,7 +459,7 @@ func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
 // the caller is done with it. Do NOT call Commit or Discard on the result.
 func (c *Cache) NewFromCommitted(assetID, qualifier string) (*StreamingPutWriter, error) {
 	path := filepath.Join(c.dir, c.filename(assetID, qualifier))
-	f, err := os.Open(path)
+	f, err := openShared(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
