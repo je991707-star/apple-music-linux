@@ -32,6 +32,7 @@ import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
 import { gnomeWallpaperPath } from './wallpaper.mjs';
 import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS, ACRYLIC_TITLEBAR_HEIGHT } from './acrylic.mjs';
 import { setAccent } from './acrylic-accent.mjs';
+import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1476,10 +1477,10 @@ function buildTweakCSS(p) {
 // No direct style conflicts — the glass CSS owns its rules, we just tune vars.
 function applyGlassEffect(blur, opacity) {
     if (!win) return;
-    // Coerce to numbers before JS interpolation — raw prefs strings must not
-    // reach executeJavaScript as template-literal values (injection risk).
-    blur    = parseFloat(blur)    || 20;
-    opacity = parseFloat(opacity) || 0.07;
+    // Clamp to numbers before JS interpolation — raw prefs strings must not reach executeJavaScript as
+    // template-literal values (injection risk). 0 is a real value, so no `x || default`.
+    blur    = cleanBlur(blur);
+    opacity = cleanGlassOpacity(opacity);
     const p = loadPrefs();
     p.glassBlur    = blur;
     p.glassOpacity = opacity;
@@ -1488,6 +1489,15 @@ function applyGlassEffect(blur, opacity) {
         document.documentElement.style.setProperty('--adam-glass-blur', '${blur}px');
         document.documentElement.style.setProperty('--adam-glass-opacity', '${opacity}');
     `).catch(() => {});
+}
+
+// Album-art theming colours the sidebar itself (with --adam-nav-bg on <body>), so the Sidebar opacity slider
+// reaches it through this variable on <html>: the accent opacity, or the blur veil scaled to the same range.
+function _applyNavAlpha() {
+    if (!win || win.isDestroyed()) return;
+    const p = loadPrefs();
+    const alpha = artNavAlpha(_resolveThemeMode(p), p);
+    win.webContents.executeJavaScript(`document.documentElement.style.setProperty('--adam-nav-alpha','${alpha}')`).catch(() => {});
 }
 
 // ── Theme mode ───────────────────────────────────────────────────────────────
@@ -1518,6 +1528,7 @@ function applyThemeMode() {
         _clearThemeVars();
         _clearCustomCss();
     }
+    _applyNavAlpha();
 }
 
 // Auto-authenticate on startup when saved credentials exist but no engine session.
@@ -1683,7 +1694,7 @@ ipcMain.on('pref:set', (_, k, v) => {
     const p = loadPrefs(); p[k] = v; savePrefs(p);
 });
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
-ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffect(parseInt(b), p.glassOpacity ?? 0.07); });
+ipcMain.on('view:glass-blur', (_, b) => { applyGlassEffect(b, loadPrefs().glassOpacity); });
 ipcMain.on('view:bg-blur',   (_, b) => {
     const p = loadPrefs(); p.bgBlur = parseInt(b); savePrefs(p);
     win?.webContents.executeJavaScript(
@@ -1705,19 +1716,21 @@ function _validTweak(k, v) {
         (typeof v === 'string' && v.length <= 1024);
 }
 ipcMain.on('view:tweak',      (_, k, v) => { if (_validTweak(k, v)) applyTweak(k, v); });
+// "Sidebar opacity" edits what the CURRENT theme's sidebar uses (see sidebar-glass.js): the accent colour's
+// opacity, or the blur veil. The theme comes from the same rule as everything else (_resolveThemeMode); this
+// handler used to treat a saved Blur as Accent off Hyprland, which re-applied the palette and so switched the
+// theme, and wrote one pref while driving the other's CSS variable, so the change was never saved.
 ipcMain.on('view:nav-opacity', (_, v) => {
     const p = loadPrefs();
-    p.themeNavBgAlpha = parseFloat(v);
-    savePrefs(p);
-    const effectiveMode = (p.themeMode === 'blur' && !_isHyprland) ? 'accent' : (p.themeMode || (_isHyprland ? 'blur' : 'accent'));
-    if (effectiveMode === 'blur') {
-        // In blur mode, opacity controls the glass opacity CSS var directly
-        win?.webContents.executeJavaScript(
-            `document.documentElement.style.setProperty('--adam-glass-opacity','${parseFloat(v)}')`
-        ).catch(() => {});
-    } else if (p.themePalette) {
-        _applyThemeVars(p.themePalette);
+    const control = sidebarOpacityControl(_resolveThemeMode(p));
+    if (control.pref === 'themeNavBgAlpha') {
+        p.themeNavBgAlpha = control.clean(v);
+        savePrefs(p);
+        if (p.themePalette) _applyThemeVars(p.themePalette);
+    } else {
+        applyGlassEffect(p.glassBlur, v);
     }
+    _applyNavAlpha();
 });
 
 // ── Acrylic window (Windows) ─────────────────────────────────────────────────
@@ -1731,8 +1744,8 @@ function _applyAcrylic() {
     if (!_acrylicBackend || !win || win.isDestroyed()) return;
     const s = _acrylicSettings();
     try {
-        if (_acrylicBackend.kind === 'material') win.setBackgroundMaterial(s.material);
-        else setAccent(win, s.material === 'none' ? 0 : _acrylicBackend.accentState);
+        if (_acrylicBackend.kind === 'material') w.setBackgroundMaterial(s.material);
+        else setAccent(w, s.material === 'none' ? 0 : _acrylicBackend.accentState);
     } catch (e) { console.warn('[Adam] acrylic material:', e.message); }
     if (_resolveThemeMode(loadPrefs()) === 'blur') nativeTheme.themeSource = s.theme;
     _applyAcrylicPage();
@@ -1775,6 +1788,7 @@ ipcMain.on('theme:set-mode', async (_, mode) => {
         _applyThemeVars(p.themePalette);
     } else if (mode === 'blur') {
         savePrefs(p);
+    if (mode !== 'blur' && mode !== 'accent' && mode !== 'custom') return; // the page picks from three buttons
         await _clearCustomCss();
         _clearThemeVars();
     } else if (mode === 'custom') {
@@ -1792,6 +1806,7 @@ ipcMain.on('theme:set-palette', (_, key, value) => {
     p.themePalette[key] = value;
     savePrefs(p);
     _applyThemeVars(p.themePalette);
+    _applyNavAlpha();
 });
 
 ipcMain.handle('theme:reset-palette', async () => {
@@ -2586,6 +2601,7 @@ function createMiniPlayer() {
         webPreferences: {
             preload: path.join(__dirname, 'miniplayer-preload.cjs'),
             contextIsolation: true,
+        ...(_acrylicBackend?.kind === 'material' ? { backgroundMaterial: _acrylicSettings().material } : {}),
             nodeIntegration: false,
             // sandbox: false keeps the sandbox off to avoid the preload
             // bootstrap crash ("binding.startupData is null") seen on some

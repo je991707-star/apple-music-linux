@@ -99,6 +99,30 @@
     return timescale > 0 ? decodeTime / timescale : null;
   }
 
+  // src/engine/sidebar-glass.js
+  var GLASS = Object.freeze({
+    blur: Object.freeze({ def: 20, min: 0, max: 80 }),
+    glassOpacity: Object.freeze({ def: 0.07, min: 0, max: 0.5 }),
+    navAlpha: Object.freeze({ def: 0.72, min: 0, max: 1 }),
+    // Album-art theming colours the sidebar with this alpha when the veil is at its default.
+    artNavAlpha: 0.6
+  });
+  function clampTo({ def, min, max }, v) {
+    const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
+  }
+  var hundredths = (n) => Math.round(n * 100) / 100;
+  var cleanBlur = (v) => Math.round(clampTo(GLASS.blur, v));
+  var cleanGlassOpacity = (v) => hundredths(clampTo(GLASS.glassOpacity, v));
+  var cleanNavAlpha = (v) => hundredths(clampTo(GLASS.navAlpha, v));
+  function sidebarOpacityControl(mode) {
+    return mode === "accent" ? { pref: "themeNavBgAlpha", ...GLASS.navAlpha, clean: cleanNavAlpha, hint: "How opaque the sidebar background is" } : { pref: "glassOpacity", ...GLASS.glassOpacity, clean: cleanGlassOpacity, hint: "How strong the light veil over the sidebar blur is" };
+  }
+  function navColorWithAlphaVar(color) {
+    const m = /^(hsla|rgba)\((.*),\s*([\d.]+)\s*\)\s*$/i.exec(String(color).trim());
+    return m ? `${m[1]}(${m[2]}, var(--adam-nav-alpha, ${m[3]}))` : color;
+  }
+
   // src/engine/catalog.js
   var extractItemId = (item) => item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
   var isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
@@ -8216,7 +8240,7 @@
     }
     function apply(roles, artSrc) {
       const b = document.body.style;
-      b.setProperty("--adam-nav-bg", roles.navBg);
+      b.setProperty("--adam-nav-bg", navColorWithAlphaVar(roles.navBg));
       b.setProperty("--adam-nav-border", roles.border);
       b.setProperty("--adam-accent", roles.accent);
       b.setProperty("--adam-accent-active", roles.accentActive);
@@ -9278,13 +9302,13 @@
       }
       const blurVal = document.createElement("span");
       blurVal.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;";
-      blurVal.textContent = `${prefs.glassBlur ?? 20}px`;
+      blurVal.textContent = `${cleanBlur(prefs.glassBlur)}px`;
       const blurSl = document.createElement("input");
       blurSl.type = "range";
-      blurSl.min = 0;
-      blurSl.max = 80;
+      blurSl.min = GLASS.blur.min;
+      blurSl.max = GLASS.blur.max;
       blurSl.step = 4;
-      blurSl.value = prefs.glassBlur ?? 20;
+      blurSl.value = cleanBlur(prefs.glassBlur);
       blurSl.style.cssText = "flex:1;accent-color:#fc3c44;margin:0 10px;";
       blurSl.oninput = () => {
         blurVal.textContent = `${blurSl.value}px`;
@@ -9295,9 +9319,9 @@
       blurR.appendChild(blurSl);
       blurR.appendChild(blurVal);
       blurR.appendChild(makeResetBtn("glass blur", () => {
-        blurSl.value = 20;
-        blurVal.textContent = "20px";
-        window.adamBridge.setGlassBlur(20);
+        blurSl.value = GLASS.blur.def;
+        blurVal.textContent = `${GLASS.blur.def}px`;
+        window.adamBridge.setGlassBlur(GLASS.blur.def);
       }));
       dBody.appendChild(makeRow("Glass blur", blurR, "Sidebar and UI element blur intensity", false));
       const bgBlurVal = document.createElement("span");
@@ -9326,29 +9350,53 @@
       if (window.adamBridge.platform !== "win32") dBody.appendChild(makeRow("Background blur", bgBlurR, "Wallpaper blur (requires a wallpaper to be set)", false));
       const navOpVal = document.createElement("span");
       navOpVal.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;";
-      const initNavAlpha = prefs.themeNavBgAlpha ?? 0.72;
-      navOpVal.textContent = Math.round(initNavAlpha * 100) + "%";
       const navOpSl = document.createElement("input");
       navOpSl.type = "range";
-      navOpSl.min = 0;
-      navOpSl.max = 1;
       navOpSl.step = 0.01;
-      navOpSl.value = initNavAlpha;
       navOpSl.style.cssText = "flex:1;accent-color:#fc3c44;margin:0 10px;";
-      navOpSl.oninput = () => {
-        navOpVal.textContent = Math.round(+navOpSl.value * 100) + "%";
-        window.adamBridge.setNavOpacity(+navOpSl.value);
-      };
+      const navVals = { themeNavBgAlpha: prefs.themeNavBgAlpha, glassOpacity: prefs.glassOpacity };
+      let navMode = document.body.getAttribute("data-adam-mode") || "blur";
       const navOpR = document.createElement("div");
       navOpR.style.cssText = "display:flex;align-items:center;flex:1;";
+      const navOpRow = makeRow("Sidebar opacity", navOpR, sidebarOpacityControl(navMode).hint, false);
+      const navOpHint = navOpRow.firstChild.children[1];
+      function showNavOpacity() {
+        const c = sidebarOpacityControl(navMode);
+        navOpSl.min = c.min;
+        navOpSl.max = c.max;
+        const v = c.clean(navVals[c.pref]);
+        navOpSl.value = v;
+        navOpVal.textContent = Math.round(v * 100) + "%";
+        navOpHint.textContent = c.hint;
+      }
+      function setNavOpacity(v) {
+        const c = sidebarOpacityControl(navMode);
+        navVals[c.pref] = c.clean(v);
+        showNavOpacity();
+        window.adamBridge.setNavOpacity(navVals[c.pref]);
+      }
+      navOpSl.oninput = () => setNavOpacity(navOpSl.value);
       navOpR.appendChild(navOpSl);
       navOpR.appendChild(navOpVal);
-      navOpR.appendChild(makeResetBtn("sidebar opacity", () => {
-        navOpSl.value = 0.72;
-        navOpVal.textContent = "72%";
-        window.adamBridge.setNavOpacity(0.72);
-      }));
-      dBody.appendChild(makeRow("Sidebar opacity", navOpR, "How opaque the sidebar background is", false));
+      navOpR.appendChild(makeResetBtn("sidebar opacity", () => setNavOpacity(sidebarOpacityControl(navMode).def)));
+      showNavOpacity();
+      const onThemeMode = (e) => {
+        if (!navOpSl.isConnected) {
+          window.removeEventListener("adam:theme-mode", onThemeMode);
+          return;
+        }
+        navMode = e.detail;
+        showNavOpacity();
+      };
+      window.addEventListener("adam:theme-mode", onThemeMode);
+      window.adamBridge.getThemeInfo().then((info) => {
+        if (info?.themeMode) {
+          navMode = info.themeMode;
+          showNavOpacity();
+        }
+      }).catch(() => {
+      });
+      dBody.appendChild(navOpRow);
       const zoomVal = document.createElement("span");
       zoomVal.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;";
       zoomVal.textContent = `${Math.round((prefs.zoomFactor ?? 1) * 100)}%`;
@@ -9479,6 +9527,7 @@
           });
           document.body.setAttribute("data-adam-mode", value);
           window.adamBridge.setThemeMode(value);
+          window.dispatchEvent(new CustomEvent("adam:theme-mode", { detail: value }));
           renderThemeContent(value);
         };
         modeSeg.appendChild(btn);
@@ -10502,9 +10551,10 @@
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("adam-opening"), { once: true });
       }
-      const [drm, [, tools, prefs]] = await Promise.all([
+      const [drm, [, tools], prefs] = await Promise.all([
         fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
-        _settingsPreload ?? _warmSettingsCache()
+        _settingsPreload ?? _warmSettingsCache(),
+        window.adamBridge.getPrefs().catch(() => ({}))
       ]);
       _warmSettingsCache();
       if (myGen !== _settingsGen) {

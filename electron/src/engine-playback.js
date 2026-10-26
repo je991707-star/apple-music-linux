@@ -18,6 +18,7 @@
 // Extracted modules (esbuild inlines these into engine-bundle.js at build time).
 import { mp4ParseBoxes as _mp4ParseBoxes } from './engine/mp4parse.js';
 import { mp4FirstDecodeSeconds } from './engine/mp4base.js';
+import { GLASS, cleanBlur, sidebarOpacityControl, navColorWithAlphaVar } from './engine/sidebar-glass.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
 import { accountSignedIn } from './engine/auth.js';
@@ -8595,7 +8596,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
 
     function apply(roles, artSrc) {
         const b = document.body.style;
-        b.setProperty('--adam-nav-bg', roles.navBg);
+        b.setProperty('--adam-nav-bg', navColorWithAlphaVar(roles.navBg)); // alpha comes from --adam-nav-alpha (Sidebar opacity)
         b.setProperty('--adam-nav-border', roles.border);
         b.setProperty('--adam-accent', roles.accent);
         b.setProperty('--adam-accent-active', roles.accentActive);
@@ -9595,15 +9596,15 @@ window.adamGetQueueInfo = function () {
         }
         const blurVal = document.createElement('span');
         blurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
-        blurVal.textContent = `${prefs.glassBlur ?? 20}px`;
+        blurVal.textContent = `${cleanBlur(prefs.glassBlur)}px`;
         const blurSl = document.createElement('input');
-        blurSl.type = 'range'; blurSl.min = 0; blurSl.max = 80; blurSl.step = 4; blurSl.value = prefs.glassBlur ?? 20;
+        blurSl.type = 'range'; blurSl.min = GLASS.blur.min; blurSl.max = GLASS.blur.max; blurSl.step = 4; blurSl.value = cleanBlur(prefs.glassBlur);
         blurSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
         blurSl.oninput = () => { blurVal.textContent = `${blurSl.value}px`; window.adamBridge.setGlassBlur(+blurSl.value); };
         const blurR = document.createElement('div');
         blurR.style.cssText = 'display:flex;align-items:center;flex:1;';
         blurR.appendChild(blurSl); blurR.appendChild(blurVal);
-        blurR.appendChild(makeResetBtn('glass blur', () => { blurSl.value = 20; blurVal.textContent = '20px'; window.adamBridge.setGlassBlur(20); }));
+        blurR.appendChild(makeResetBtn('glass blur', () => { blurSl.value = GLASS.blur.def; blurVal.textContent = `${GLASS.blur.def}px`; window.adamBridge.setGlassBlur(GLASS.blur.def); }));
         dBody.appendChild(makeRow('Glass blur', blurR, 'Sidebar and UI element blur intensity', false));
         const bgBlurVal = document.createElement('span');
         bgBlurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
@@ -9618,19 +9619,46 @@ window.adamGetQueueInfo = function () {
         bgBlurR.appendChild(makeResetBtn('background blur', () => { bgBlurSl.value = 18; bgBlurVal.textContent = '18px'; window.adamBridge.setBgBlur(18); }));
         // Windows blurs with the acrylic window (Theme settings), not a wallpaper image.
         if (window.adamBridge.platform !== 'win32') dBody.appendChild(makeRow('Background blur', bgBlurR, 'Wallpaper blur (requires a wallpaper to be set)', false));
+        // Sidebar opacity edits a different stored value in each theme (engine/sidebar-glass.js): the accent
+        // theme's sidebar colour, or the blur theme's veil. The slider follows the theme, so its range, value,
+        // default and hint change with it; main.mjs applies the same rule when the value arrives.
         const navOpVal = document.createElement('span');
         navOpVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
-        const initNavAlpha = prefs.themeNavBgAlpha ?? 0.72;
-        navOpVal.textContent = Math.round(initNavAlpha * 100) + '%';
         const navOpSl = document.createElement('input');
-        navOpSl.type = 'range'; navOpSl.min = 0; navOpSl.max = 1; navOpSl.step = 0.01; navOpSl.value = initNavAlpha;
+        navOpSl.type = 'range'; navOpSl.step = 0.01;
         navOpSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
-        navOpSl.oninput = () => { navOpVal.textContent = Math.round(+navOpSl.value * 100) + '%'; window.adamBridge.setNavOpacity(+navOpSl.value); };
+        const navVals = { themeNavBgAlpha: prefs.themeNavBgAlpha, glassOpacity: prefs.glassOpacity };
+        let navMode = document.body.getAttribute('data-adam-mode') || 'blur';
         const navOpR = document.createElement('div');
         navOpR.style.cssText = 'display:flex;align-items:center;flex:1;';
+        const navOpRow = makeRow('Sidebar opacity', navOpR, sidebarOpacityControl(navMode).hint, false);
+        const navOpHint = navOpRow.firstChild.children[1];
+        function showNavOpacity() {
+            const c = sidebarOpacityControl(navMode);
+            navOpSl.min = c.min; navOpSl.max = c.max;
+            const v = c.clean(navVals[c.pref]);
+            navOpSl.value = v;
+            navOpVal.textContent = Math.round(v * 100) + '%';
+            navOpHint.textContent = c.hint;
+        }
+        function setNavOpacity(v) {
+            const c = sidebarOpacityControl(navMode);
+            navVals[c.pref] = c.clean(v);
+            showNavOpacity();
+            window.adamBridge.setNavOpacity(navVals[c.pref]);
+        }
+        navOpSl.oninput = () => setNavOpacity(navOpSl.value);
         navOpR.appendChild(navOpSl); navOpR.appendChild(navOpVal);
-        navOpR.appendChild(makeResetBtn('sidebar opacity', () => { navOpSl.value = 0.72; navOpVal.textContent = '72%'; window.adamBridge.setNavOpacity(0.72); }));
-        dBody.appendChild(makeRow('Sidebar opacity', navOpR, 'How opaque the sidebar background is', false));
+        navOpR.appendChild(makeResetBtn('sidebar opacity', () => setNavOpacity(sidebarOpacityControl(navMode).def)));
+        showNavOpacity();
+        // The Theme section announces a mode change; the resolved mode (which also depends on the desktop) comes from main.
+        const onThemeMode = (e) => {
+            if (!navOpSl.isConnected) { window.removeEventListener('adam:theme-mode', onThemeMode); return; }
+            navMode = e.detail; showNavOpacity();
+        };
+        window.addEventListener('adam:theme-mode', onThemeMode);
+        window.adamBridge.getThemeInfo().then(info => { if (info?.themeMode) { navMode = info.themeMode; showNavOpacity(); } }).catch(() => {});
+        dBody.appendChild(navOpRow);
         const zoomVal = document.createElement('span');
         zoomVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
         zoomVal.textContent = `${Math.round((prefs.zoomFactor ?? 1) * 100)}%`;
@@ -9743,6 +9771,7 @@ window.adamGetQueueInfo = function () {
                 // rules (ghost blur layers) fire immediately, then update the backend.
                 document.body.setAttribute('data-adam-mode', value);
                 window.adamBridge.setThemeMode(value);
+                window.dispatchEvent(new CustomEvent('adam:theme-mode', { detail: value }));
                 renderThemeContent(value);
             };
             modeSeg.appendChild(btn);
@@ -10724,10 +10753,12 @@ window.adamGetQueueInfo = function () {
         // Consume the pre-loaded cache (resolves instantly if already warm)
         // then immediately start re-warming for the next open.
         // Account state must be current: a warmed snapshot can precede a login or a session restore.
-        // Tools and preferences may come from the cache; authorization never does.
-        const [drm, [, tools, prefs]] = await Promise.all([
+        // Tools may come from the cache; authorization never does, and neither do preferences: a warmed copy
+        // predates everything saved since, so the sliders showed old values on reopening (a local IPC call is cheap).
+        const [drm, [, tools], prefs] = await Promise.all([
             fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
             _settingsPreload ?? _warmSettingsCache(),
+            window.adamBridge.getPrefs().catch(() => ({})),
         ]);
         _warmSettingsCache(); // refresh in background while sections render
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
