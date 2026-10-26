@@ -150,5 +150,8 @@
   "optionalDependencies": {
     "mpris-service": "^2.1.2",
     "x11": "^2.3.0"
+  },
+  "dependencies": {
+    "koffi": "3.3.4"
   }
 }

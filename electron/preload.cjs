@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('adamReady', () => ipcRenderer.send('app:ui-read
 // injected bundles run on, never to whatever origin the window navigates to.
 if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('adamBridge', {
     isDev: !!process.defaultApp, // true when running via `electron .`, false in packaged app
+    platform: process.platform,
     debug: process.argv.includes('--adam-debug=1'), // app was started from a terminal (see DEBUG_OUTPUT in main.mjs)
     // ── Prefs / view (settings panel) ────────────────────────────────────────
     getPrefs:       ()          => ipcRenderer.invoke('prefs:get'),
@@ -99,6 +100,7 @@ if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('adamBridge', {
     exportThemePreset: (name)     => ipcRenderer.invoke('theme:export-preset', name),
     importThemePreset: ()         => ipcRenderer.invoke('theme:import-preset'),
     setNavOpacity:     (v)        => ipcRenderer.send('view:nav-opacity', v),
+    setAcrylic:        (patch)    => ipcRenderer.invoke('acrylic:set', patch),
     eqSaveFile:   (filename, content) => ipcRenderer.invoke('eq:save-file', { filename, content }),
     eqOpenFile:   (filters)           => ipcRenderer.invoke('eq:open-file', filters ? { filters } : undefined),
     chooseDownloadDir: ()             => ipcRenderer.invoke('dialog:choose-download-dir'),
@@ -106,9 +108,6 @@ if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('adamBridge', {
     onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
     mediaCmd:       (c)         => ipcRenderer.send('media:cmd', c),
     authState:      (v)         => ipcRenderer.send('app:auth-state', v === true),
-    winControl:     (a)         => ipcRenderer.send('win:control', a),
-    glassState:     ()          => ipcRenderer.invoke('glass:state'),
-    glassSet:       (on)        => ipcRenderer.invoke('glass:set', on === true),
     appRestart:     ()          => ipcRenderer.send('app:restart'),
     linksGet:       ()          => ipcRenderer.invoke('links:get'),
     linksSet:       (s, on)     => ipcRenderer.invoke('links:set', s, on),

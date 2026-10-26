@@ -8717,6 +8717,82 @@
       };
       return "#" + [f(0), f(8), f(4)].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("");
     }
+    function _adamRenderAcrylicControls(container, info) {
+      container.innerHTML = "";
+      const MATERIAL_LABELS = { acrylic: "Acrylic", mica: "Mica", tabbed: "Mica Alt", auto: "Auto", none: "None (solid)" };
+      const THEME_LABELS = { system: "System", light: "Light", dark: "Dark" };
+      const cur = { ...info };
+      const send = (patch) => {
+        Object.assign(cur, patch);
+        window.adamBridge.setAcrylic(patch);
+      };
+      const selectCss = FF + "min-width:150px;padding:5px 8px;border-radius:6px;border:0.5px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.88);font-size:13px;outline:none;color-scheme:dark;";
+      function select(labels, keys, value, onChange) {
+        const el2 = document.createElement("select");
+        el2.style.cssText = selectCss;
+        keys.forEach((k) => {
+          const o = document.createElement("option");
+          o.value = k;
+          o.textContent = labels[k];
+          el2.appendChild(o);
+        });
+        el2.value = value;
+        el2.onchange = () => onChange(el2.value);
+        return el2;
+      }
+      function slider(value, onChange) {
+        const val = document.createElement("span");
+        val.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.5);width:34px;text-align:right;";
+        const sl = document.createElement("input");
+        sl.type = "range";
+        sl.min = 0;
+        sl.max = 1;
+        sl.step = 0.01;
+        sl.style.cssText = "width:150px;accent-color:#fc3c44;margin:0 10px;";
+        const show = (v) => {
+          sl.value = v;
+          val.textContent = Number(v).toFixed(2);
+        };
+        sl.oninput = () => {
+          val.textContent = Number(sl.value).toFixed(2);
+          onChange(+sl.value);
+        };
+        show(value);
+        const wrap = document.createElement("div");
+        wrap.style.cssText = "display:flex;align-items:center;";
+        wrap.appendChild(sl);
+        wrap.appendChild(val);
+        wrap.set = show;
+        return wrap;
+      }
+      const materialSel = select(MATERIAL_LABELS, info.materials, cur.material, (v) => send({ material: v }));
+      const themeSel = select(THEME_LABELS, Object.keys(THEME_LABELS), cur.theme, (v) => send({ theme: v }));
+      const color = document.createElement("input");
+      color.type = "color";
+      color.value = cur.tintColor;
+      color.style.cssText = "width:44px;height:26px;padding:0;border:0.5px solid rgba(255,255,255,0.2);border-radius:6px;background:none;cursor:pointer;";
+      color.oninput = () => send({ tintColor: color.value });
+      const tintSl = slider(cur.tintOpacity, (v) => send({ tintOpacity: v }));
+      const lumSl = slider(cur.lumOpacity, (v) => send({ lumOpacity: v }));
+      container.appendChild(makeRow("Material", materialSel, "The window background Windows draws behind the app", false));
+      container.appendChild(makeRow("Theme", themeSel, "Light or dark look of the material (Adam is designed for Dark); System follows Windows", false));
+      container.appendChild(makeRow("Tint color", color, null, false));
+      container.appendChild(makeRow("Tint opacity", tintSl, "Colour laid over the material", false));
+      container.appendChild(makeRow("Luminosity opacity", lumSl, "Theme-coloured layer under the tint; 1 hides the material", false));
+      const reset = makeBtn("Reset");
+      reset.style.cssText += "margin:10px 0;display:block;";
+      reset.onclick = async () => {
+        const d = await window.adamBridge.setAcrylic({ ...info.defaults });
+        if (!d) return;
+        Object.assign(cur, d);
+        materialSel.value = d.material;
+        themeSel.value = d.theme;
+        color.value = d.tintColor;
+        tintSl.set(d.tintOpacity);
+        lumSl.set(d.lumOpacity);
+      };
+      container.appendChild(reset);
+    }
     function _adamRenderPaletteEditor(container, thInfo, st) {
       container.innerHTML = "";
       const pal = st.curPalette || thInfo.defaultPalette || {};
@@ -9207,7 +9283,7 @@
         bgBlurVal.textContent = "18px";
         window.adamBridge.setBgBlur(18);
       }));
-      dBody.appendChild(makeRow("Background blur", bgBlurR, "Wallpaper blur (requires a wallpaper to be set)", false));
+      if (window.adamBridge.platform !== "win32") dBody.appendChild(makeRow("Background blur", bgBlurR, "Wallpaper blur (requires a wallpaper to be set)", false));
       const navOpVal = document.createElement("span");
       navOpVal.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;";
       const initNavAlpha = prefs.themeNavBgAlpha ?? 0.72;
@@ -9322,7 +9398,9 @@
       const thContentArea = document.createElement("div");
       function renderThemeContent(mode) {
         thContentArea.innerHTML = "";
-        if (mode === "blur") {
+        if (mode === "blur" && thInfo.acrylic) {
+          _adamRenderAcrylicControls(thContentArea, thInfo.acrylic);
+        } else if (mode === "blur") {
           const info = document.createElement("div");
           info.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;";
           info.textContent = "Your wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.";

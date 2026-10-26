@@ -23,14 +23,15 @@ import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 import { parseLink, isLinkArg } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
-import { glassModuleDirs, loadGlassModule, createGlassController } from './glass.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
 import { validBackstop, writeBackstop, clearCredentialsFlow } from './drm-signout.mjs';
 import { parseByteRange } from './range.mjs';
 import { shouldShowOffline, offlineHash } from './load-failure.mjs';
 import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
-import { windowsWallpaperPath, gnomeWallpaperPath } from './wallpaper.mjs';
+import { gnomeWallpaperPath } from './wallpaper.mjs';
+import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS, ACRYLIC_TITLEBAR_HEIGHT } from './acrylic.mjs';
+import { setAccent } from './acrylic-accent.mjs';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -169,16 +170,15 @@ if (IS_LINUX) {
 let win    = null;
 let tray   = null;
 const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
-// Liquid glass (Windows, opt-in, experimental; see glass.mjs). Whether it is active is decided once at startup
-// because it needs a transparent frameless window.
-const _glassModule = IS_WIN ? loadGlassModule({
-    dirs: glassModuleDirs({ resourcesPath: process.resourcesPath, devDir: path.join(__dirname, '..', 'native', 'liquid-glass') }),
-    load: (entry) => require(entry),
-    log: (m) => console.warn('[Adam]', m),
-}) : null;
-const _glassWanted = !!_glassModule && (process.env.ADAM_GLASS === '1' || loadPrefs().liquidGlass === true);
-let _glass = null;
-const _glassActive = () => !!_glass?.panel;
+// Windows blur theme: a system acrylic window (see acrylic.mjs). `kind` is 'material' (DWM backdrop, Windows 11
+// 22H2+) or 'accent' (Windows 10 and early Windows 11); ADAM_ACRYLIC_BACKEND=accent forces the second for testing.
+const _acrylicBackend = !IS_WIN ? null
+    : process.env.ADAM_ACRYLIC_BACKEND === 'accent' ? { kind: 'accent', accentState: 4, materials: ['acrylic', 'none'] }
+    : acrylicBackend(os.release());
+const _acrylicSettings = () => normalizeAcrylic(loadPrefs().winAcrylic, _acrylicBackend?.materials);
+// No native title bar on the acrylic window: the material has to reach the top edge, and overlays in the page
+// cannot colour a native caption. Windows draws only the window buttons, over a transparent strip.
+const _titleBarOverlay = () => ({ color: '#00000000', symbolColor: nativeTheme.shouldUseDarkColors ? '#ffffff' : '#000000', height: ACRYLIC_TITLEBAR_HEIGHT });
 let winIntegration = null; // Windows only: SMTC, taskbar buttons, jump list, login item
 const _startHidden = process.argv.includes('--hidden');
 let isQuitting = false;
@@ -556,7 +556,7 @@ function _blurredWallpaperUrl(wp) {
 }
 
 // Draw a wallpaper file (blurred as above) behind the interface. Used wherever the compositor cannot
-// blur what is behind the window: Windows, GNOME, Hyprland and KDE Wayland.
+// blur what is behind the window: GNOME, Hyprland and KDE Wayland.
 function _injectWallpaperFile(bwin, wp, label) {
     try {
         if (!wp || !existsSync(wp)) { console.warn(`[Adam] ${label} wallpaper blur: no wallpaper file`); return false; }
@@ -576,7 +576,6 @@ function _refreshWallpaperBlur() {
 }
 
 async function _applyPlatformWallpaperBlur(bwin) {
-    if (IS_WIN) return _injectWallpaperFile(bwin, await windowsWallpaperPath(), 'Windows');
     return _injectWallpaperFile(bwin, await gnomeWallpaperPath(), 'GNOME');
 }
 
@@ -665,7 +664,7 @@ function _applyThemeVars(palette) {
 
 function _clearThemeVars() {
     if (!win) return;
-    nativeTheme.themeSource = 'system';
+    nativeTheme.themeSource = _acrylicBackend ? _acrylicSettings().theme : 'system';
     win.webContents.executeJavaScript(`(function(){
         const r = document.documentElement;
         ['--adam-nav-bg','--adam-nav-border','--adam-accent','--adam-accent-active','--adam-nav-text','--adam-nav-text-sec','--adam-bg-color']
@@ -813,53 +812,6 @@ function setupDebugLogging(win) {
     });
 }
 
-// The title bar and surface styling of the frameless glass window (the native frame is gone). Idempotent.
-function _injectGlassChrome() {
-    const solid = !_glassActive(); // the panel failed to start: nothing is drawn behind the page, so fill it in
-    const css = `
-        html { background: ${solid ? '#1c1c1e' : 'transparent'} !important; border-radius: 14px !important; overflow: hidden !important;
-               box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10) !important; }
-        body { background: transparent !important; }
-        #_adamBlurBg, #_adamBlurTint { display: none !important; }
-        #adam-caption { position: fixed; top: 0; left: 0; right: 0; height: 32px; z-index: 2147483000; display: flex;
-               justify-content: flex-end; -webkit-app-region: drag; user-select: none; }
-        #adam-caption button { width: 46px; height: 32px; border: 0; background: transparent; color: rgba(255,255,255,0.85);
-               -webkit-app-region: no-drag; display: flex; align-items: center; justify-content: center; cursor: default; }
-        #adam-caption button:hover { background: rgba(255,255,255,0.12); }
-        #adam-caption button.close:hover { background: #e81123; color: #fff; }
-        #adam-caption svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1; }
-    `;
-    win.webContents.executeJavaScript(`(function(){
-        if (!document.getElementById('adam-glass-style')) {
-            const st = document.createElement('style'); st.id = 'adam-glass-style'; st.textContent = ${JSON.stringify(css)};
-            document.documentElement.appendChild(st);
-        }
-        if (document.getElementById('adam-caption') || !document.body) return;
-        const bar = document.createElement('div'); bar.id = 'adam-caption';
-        const mk = (cls, action, svg) => { const b = document.createElement('button'); b.className = cls; b.setAttribute('aria-label', action);
-            b.innerHTML = svg; b.onclick = () => window.adamBridge && window.adamBridge.winControl && window.adamBridge.winControl(action); return b; };
-        bar.appendChild(mk('min', 'minimize', '<svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg>'));
-        bar.appendChild(mk('max', 'maximize', '<svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg>'));
-        bar.appendChild(mk('close', 'close', '<svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg>'));
-        document.body.appendChild(bar);
-    })()`).catch(() => {});
-}
-
-// Title-bar buttons of the frameless window. A fixed set of actions; the page cannot ask for anything else.
-ipcMain.on('win:control', (_e, action) => {
-    if (!win || win.isDestroyed()) return;
-    if (action === 'minimize') win.minimize();
-    else if (action === 'maximize') (win.isMaximized() ? win.unmaximize() : win.maximize());
-    else if (action === 'close') win.close();
-});
-
-// Settings → Theme → Liquid glass.
-ipcMain.handle('glass:state', () => ({ supported: !!_glassModule, enabled: loadPrefs().liquidGlass === true, active: _glassActive() }));
-ipcMain.handle('glass:set', (_e, on) => {
-    if (typeof on !== 'boolean') throw new Error('bad argument');
-    const p = loadPrefs(); p.liquidGlass = on; savePrefs(p);
-    return { supported: !!_glassModule, enabled: on, active: _glassActive() };
-});
 ipcMain.on('app:restart', () => { app.relaunch(); app.quit(); });
 
 function createWindow() {
@@ -870,13 +822,11 @@ function createWindow() {
         // the desktop behind the window with its own blur effect, giving
         // us the visionOS "glass over room" look for free.
         backgroundColor: '#00000000',
-        // Windows: DWM cannot draw Mica behind a layered transparent window, so use the
-        // system backdrop material instead (Windows 11; older builds fall back to a solid frame).
-        ...(_glassWanted
-            // Liquid glass: the native panel under this window draws the refracted desktop, so the window is
-            // frameless and fully transparent and carries only the interface (and its own title bar).
-            ? { frame: false, transparent: true, hasShadow: false }
-            : { transparent: !IS_WIN, ...(IS_WIN ? { backgroundMaterial: 'mica' } : {}) }),
+        // Windows: DWM cannot draw a system material behind a layered transparent window, so the window is
+        // not transparent and the page is (see _applyAcrylic).
+        transparent: !IS_WIN,
+        ...(_acrylicBackend?.kind === 'material' ? { backgroundMaterial: _acrylicSettings().material } : {}),
+        ...(_acrylicBackend ? { titleBarStyle: 'hidden', titleBarOverlay: _titleBarOverlay() } : {}),
         show: false,
         title: 'Adam',
         webPreferences: {
@@ -890,10 +840,8 @@ function createWindow() {
         },
     });
 
-    if (_glassWanted) {
-        _glass = createGlassController({ glass: _glassModule, win, screen, log: (m) => console.warn('[Adam]', m) });
-        if (!_glass.start()) { console.warn('[Adam] liquid glass could not start; using a solid background'); _glass = null; }
-    }
+    if (_acrylicBackend?.kind === 'accent') _applyAcrylic();
+    if (_acrylicBackend) nativeTheme.on('updated', () => { if (!win.isDestroyed()) win.setTitleBarOverlay({ symbolColor: _titleBarOverlay().symbolColor }); });
 
     win.on('page-title-updated', (e) => e.preventDefault());
     let initialLoadRetried = false;
@@ -953,9 +901,9 @@ function createWindow() {
         // Blur layer (needs executeJavaScript, so it runs after the page is loaded; showWindow fires
         // on app:ui-ready). Hyprland reads its own wallpaper config; Windows and GNOME use the
         // wallpaper file; anything else falls back to a software screenshot blur (X11 / Sway).
-        if (_glassActive()) { /* the native glass panel is the background */ }
-        else if (_isHyprland) _applyHyprlandWallpaperBlur(win);
-        else if (IS_WIN || _desktop.includes('gnome')) {
+        if (_isHyprland) _applyHyprlandWallpaperBlur(win);
+        else if (_acrylicBackend) { /* the acrylic window is the blur; the page overlays are applied on load */ }
+        else if (_desktop.includes('gnome')) {
             _applyPlatformWallpaperBlur(win).then(ok => { if (!ok && _useSoftBlur) refreshBlurBg(); });
         } else if (_useSoftBlur) refreshBlurBg();
     };
@@ -1396,7 +1344,6 @@ function createWindow() {
             .catch(e => console.error('[Adam] bundle injection error:', e));
 
         applyPersistedViewSettings();
-        if (_glassWanted) _injectGlassChrome();
     }
 
     win.webContents.on('did-frame-finish-load', injectBundles);
@@ -1553,7 +1500,7 @@ function applyGlassEffect(blur, opacity) {
 }
 let _signedIn = !!loadPrefs().signedIn;
 
-const _resolveThemeMode = (p) => resolveThemeMode({ signedIn: _signedIn, themeMode: p.themeMode, isHyprland: _isHyprland, glass: _glassActive() });
+const _resolveThemeMode = (p) => resolveThemeMode({ signedIn: _signedIn, themeMode: p.themeMode, isHyprland: _isHyprland });
 
 function applyThemeMode() {
     const p = loadPrefs();
@@ -1628,6 +1575,7 @@ function applyPersistedViewSettings() {
         ).catch(() => {});
     applyTweak('__noop', null);
     applyThemeMode();
+    _applyAcrylicPage();
 }
 
 // ── IPC sender check ─────────────────────────────────────────────────────────
@@ -1748,7 +1696,7 @@ ipcMain.on('view:bg-blur',   (_, b) => {
 // window state) are set only through their dedicated handlers, never here.
 const _MAIN_OWNED_PREFS = new Set([
     'customCssPath', 'themePalette', 'themePresets', 'themeMode', 'themeAppearance',
-    'themeNavBgAlpha', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur', 'linkSchemes', 'linkSchemesApplied', 'signedIn', 'themeVersion', 'liquidGlass',
+    'themeNavBgAlpha', 'winAcrylic', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur', 'linkSchemes', 'linkSchemesApplied', 'signedIn', 'themeVersion',
 ]);
 const _tweakKeyRe = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 function _validTweak(k, v) {
@@ -1772,6 +1720,33 @@ ipcMain.on('view:nav-opacity', (_, v) => {
     }
 });
 
+// ── Acrylic window (Windows) ─────────────────────────────────────────────────
+function _applyAcrylicPage() {
+    if (!_acrylicBackend || !win || win.isDestroyed()) return;
+    win.webContents.executeJavaScript(acrylicOverlayScript(_acrylicSettings())).catch(() => {});
+}
+
+// Pushes the saved settings to the window: the material, and the native theme while the blur theme is on.
+function _applyAcrylic() {
+    if (!_acrylicBackend || !win || win.isDestroyed()) return;
+    const s = _acrylicSettings();
+    try {
+        if (_acrylicBackend.kind === 'material') win.setBackgroundMaterial(s.material);
+        else setAccent(win, s.material === 'none' ? 0 : _acrylicBackend.accentState);
+    } catch (e) { console.warn('[Adam] acrylic material:', e.message); }
+    if (_resolveThemeMode(loadPrefs()) === 'blur') nativeTheme.themeSource = s.theme;
+    _applyAcrylicPage();
+}
+
+ipcMain.handle('acrylic:set', (_e, patch) => {
+    if (!_acrylicBackend) return null;
+    const p = loadPrefs();
+    p.winAcrylic = normalizeAcrylic({ ..._acrylicSettings(), ...(patch && typeof patch === 'object' ? patch : {}) }, _acrylicBackend.materials);
+    savePrefs(p);
+    _applyAcrylic();
+    return p.winAcrylic;
+});
+
 // ── Theme IPC ────────────────────────────────────────────────────────────────
 ipcMain.handle('theme:get-info', async () => {
     const p = loadPrefs();
@@ -1786,6 +1761,7 @@ ipcMain.handle('theme:get-info', async () => {
             ...(p.themePresets || []),
         ],
         customCssPath:  p.customCssPath || null,
+        acrylic:        _acrylicBackend ? { ..._acrylicSettings(), materials: _acrylicBackend.materials, defaults: ACRYLIC_DEFAULTS } : null,
     };
 });
 
@@ -3069,7 +3045,6 @@ app.on('before-quit', (e) => {
     // sync-writing to disk and really quitting.
     try { win?.webContents?.send('app:flush-and-quit'); } catch (_) {}
     globalShortcut.unregisterAll();
-    try { _glass?.stop(); _glassModule?.shutdown?.(); } catch (_) {}
     setTimeout(async () => {
         _storeFlushSync();
         // Bound the cookie flush: a stalled promise must not hold the quit open.

@@ -180,13 +180,6 @@ test('signed-in users get their saved theme, with the existing defaults and fall
     assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'blur', isHyprland: false }), 'blur', 'blur works on every desktop');
 });
 
-test('liquid glass overrides every other theme mode, signed in or out', () => {
-    for (const signedIn of [true, false]) for (const themeMode of [undefined, 'accent', 'blur', 'custom']) {
-        assert.equal(resolveThemeMode({ signedIn, themeMode, isHyprland: false, glass: true }), 'glass');
-    }
-    assert.equal(resolveThemeMode({ signedIn: true, themeMode: 'accent', isHyprland: false, glass: false }), 'accent');
-});
-
 import { hasSessionBus, mprisRetryDelay } from '../platform.mjs';
 
 test('hasSessionBus needs an actual bus, not just environment variables', () => {

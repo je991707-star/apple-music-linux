@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BUILTIN_PRESETS, DEFAULT_PRESET, defaultPalette, migrateThemePrefs, THEME_VERSION } from '../theme-presets.mjs';
-import { parseRegWallpaper, parseGsettingsUri, windowsWallpaperPath, gnomeWallpaperPath, imageMime } from '../wallpaper.mjs';
+import { parseGsettingsUri, gnomeWallpaperPath, imageMime } from '../wallpaper.mjs';
 
 test('the one built-in preset is a fixed neutral palette with red only as the accent', () => {
     assert.deepEqual(Object.keys(BUILTIN_PRESETS), ['Apple Music']);
@@ -31,32 +31,11 @@ test('migrateThemePrefs drops the old generated palette once and keeps everythin
     assert.deepEqual(prefs.themePalette, { accent: '#123456' });
 });
 
-test('parseRegWallpaper reads the value from reg query output', () => {
-    const out = '\r\nHKEY_CURRENT_USER\\Control Panel\\Desktop\r\n    WallPaper    REG_SZ    C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg\r\n\r\n';
-    assert.equal(parseRegWallpaper(out), 'C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg');
-    assert.equal(parseRegWallpaper('    WallPaper    REG_SZ    \r\n'), '');
-    assert.equal(parseRegWallpaper(''), '');
-    assert.equal(parseRegWallpaper('    WallPaper    REG_EXPAND_SZ    %SystemRoot%\\a.jpg'), '%SystemRoot%\\a.jpg');
-});
-
 test('parseGsettingsUri accepts file URIs only', () => {
     assert.equal(parseGsettingsUri("'file:///home/a/Pictures/my%20wall.jpg'\n"), '/home/a/Pictures/my wall.jpg');
     assert.equal(parseGsettingsUri("'none'"), '');
     assert.equal(parseGsettingsUri("'https://example.com/x.jpg'"), '');
     assert.equal(parseGsettingsUri(''), '');
-});
-
-test('windowsWallpaperPath falls back to the transcoded wallpaper when the registry value is empty', async () => {
-    const env = { APPDATA: 'C:\\Users\\a\\AppData\\Roaming' };
-    const seen = new Set();
-    const exists = (p) => seen.has(p.replace(/\\/g, '/'));
-    seen.add('C:/Users/a/AppData/Roaming/Microsoft/Windows/Themes/TranscodedWallpaper');
-    const empty = async () => '    WallPaper    REG_SZ    \r\n';
-    assert.match(await windowsWallpaperPath(env, exists, empty), /TranscodedWallpaper$/);
-    seen.add('C:/pics/real.jpg');
-    const set = async () => '    WallPaper    REG_SZ    C:\\pics\\real.jpg\r\n';
-    assert.equal(await windowsWallpaperPath(env, exists, set), 'C:\\pics\\real.jpg');
-    assert.equal(await windowsWallpaperPath({ APPDATA: 'X' }, () => false, empty), '');
 });
 
 test('gnomeWallpaperPath prefers the dark variant and needs an existing file', async () => {
