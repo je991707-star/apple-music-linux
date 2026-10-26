@@ -105,6 +105,12 @@ foreach ($d in 'access', 'audio_filter', 'audio_mixer', 'audio_output', 'codec',
 # The cache lists the full plugin set; a stale one makes VLC rescan on every start, so drop it.
 Remove-Item "$vlcOut\plugins\plugins.dat" -ErrorAction SilentlyContinue
 
+# Minimal FFmpeg: the engine runs it for music-video remux and export. Prebuilt and committed
+# (scripts/build-ffmpeg-windows.sh regenerates it), so the app needs nothing installed.
+$ff = Join-Path $Repo 'third_party\ffmpeg-win'
+if (-not (Test-Path "$ff\bin\ffmpeg.exe")) { throw "third_party\ffmpeg-win\bin\ffmpeg.exe is missing (git lfs pull, or run scripts/build-ffmpeg-windows.sh from an MSYS2 UCRT64 shell)" }
+Copy-Item $ff (Join-Path $Out 'ffmpeg') -Recurse
+
 # ── 5. Renderer bundles ──────────────────────────────────────────────────────
 Write-Host '[5/6] renderer bundles'
 Push-Location $Electron

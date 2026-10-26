@@ -23,11 +23,9 @@
 
 set -euo pipefail
 
-VERSION=9.0.2
-SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
-URL="https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz"
-
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/scripts/ffmpeg-config.sh"   # pinned source + the component list, shared with build-ffmpeg-windows.sh
+VERSION=$FFMPEG_VERSION SHA256=$FFMPEG_SHA256 URL=$FFMPEG_URL
 WORK="$REPO/.ffmpeg-build"
 OUT="$REPO/third_party/ffmpeg"
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -47,22 +45,7 @@ cd "$WORK/src"
 STAGE="$WORK/stage"
 rm -rf "$STAGE"
 
-CONFIGURE_FLAGS=(
-    --prefix="$STAGE"
-    --disable-autodetect --enable-zlib
-    --disable-everything --disable-doc --disable-debug --disable-static --enable-shared
-    --disable-network --disable-avdevice
-    --disable-ffplay --disable-ffprobe --enable-ffmpeg
-    --enable-pic --enable-small
-    --enable-protocol=file,pipe
-    --enable-demuxer=mov,srt,flac,aac,mp3,wav,ac3,eac3
-    --enable-muxer=mp4,mov,ipod,flac,null
-    --enable-decoder=alac,aac,aac_latm,flac,mp3,mp3float,ac3,eac3,opus,vorbis,h264,srt,subrip,movtext,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le
-    --enable-encoder=flac,aac,movtext,pcm_s16le,pcm_s24le
-    --enable-parser=aac,aac_latm,ac3,flac,mpegaudio,h264,hevc,opus,vorbis
-    --enable-bsf=aac_adtstoasc,extract_extradata,null
-    --enable-filter=abuffer,abuffersink,buffer,buffersink,aformat,aresample,anull,null,format,scale
-)
+CONFIGURE_FLAGS=(--prefix="$STAGE" "${FFMPEG_COMMON_FLAGS[@]}" --enable-pic)
 
 # quoted so a prefix containing spaces survives the trip into the sandbox
 BUILD_CMD="./configure $(printf '%q ' "${CONFIGURE_FLAGS[@]}") && make -j$JOBS && make install"

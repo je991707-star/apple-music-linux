@@ -260,11 +260,11 @@ const _vlcPkgDir  = path.join(process.resourcesPath, 'vlc');
 const _vlcDevDir  = path.join(__dirname, 'dist', 'resources', 'vlc');
 const _vlcDir     = app.isPackaged ? _vlcPkgDir : (existsSync(_vlcDevDir) ? _vlcDevDir : _vlcPkgDir);
 
-// Prebuilt minimal FFmpeg (third_party/ffmpeg): its binary does the engine's music-video remux and
-// export work (the engine finds "ffmpeg" on PATH), and its libraries are the ones VLC's libavcodec
-// plugin loads. Bundled so no package depends on the host's FFmpeg version.
+// Prebuilt minimal FFmpeg (third_party/ffmpeg on Linux, third_party/ffmpeg-win on Windows): its binary does
+// the engine's music-video remux and export work (the engine finds "ffmpeg" on PATH), and on Linux its
+// libraries are the ones VLC's libavcodec plugin loads. Bundled so no package depends on the host's FFmpeg.
 const _ffDir = app.isPackaged ? path.join(process.resourcesPath, 'ffmpeg')
-                              : path.join(__dirname, '..', 'third_party', 'ffmpeg');
+                              : path.join(__dirname, '..', 'third_party', IS_WIN ? 'ffmpeg-win' : 'ffmpeg');
 
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;

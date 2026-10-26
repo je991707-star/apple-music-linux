@@ -6,3 +6,5 @@
 # Prebuilt minimal FFmpeg (regenerate with scripts/build-ffmpeg.sh)
 third_party/ffmpeg/bin/ffmpeg filter=lfs diff=lfs merge=lfs -text
 third_party/ffmpeg/lib/*.so.* filter=lfs diff=lfs merge=lfs -text
+third_party/ffmpeg-win/bin/*.exe filter=lfs diff=lfs merge=lfs -text
+third_party/ffmpeg-win/bin/*.dll filter=lfs diff=lfs merge=lfs -text
