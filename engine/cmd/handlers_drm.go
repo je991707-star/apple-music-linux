@@ -15,6 +15,9 @@ import (
 // and session age metadata for proactive refresh coordination.
 type drmStatusResponse struct {
 	drm.DRMSnapshot
+	// Available is false when this build has no DRM layer (built without adamplay_backend): the session can
+	// never become ready, which the other fields cannot tell apart from "not ready yet".
+	Available    bool          `json:"available"`
 	Backend      backendStatus `json:"backend"`
 	ReadySinceMs int64         `json:"readySinceMs,omitempty"`
 	SessionAgeMs int64         `json:"sessionAgeMs,omitempty"`
@@ -33,6 +36,7 @@ func (s *APIServer) handleDRMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := drmStatusResponse{
 		DRMSnapshot: snap,
+		Available:   s.dm != nil,
 		Backend:     backendStatus{Selected: s.backendName},
 	}
 	if since := s.lifecycle.DRMReadySince(); !since.IsZero() {
