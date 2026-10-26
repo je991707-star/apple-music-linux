@@ -17,6 +17,7 @@
 
 // Extracted modules (esbuild inlines these into engine-bundle.js at build time).
 import { mp4ParseBoxes as _mp4ParseBoxes } from './engine/mp4parse.js';
+import { mp4FirstDecodeSeconds } from './engine/mp4base.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
 import { accountSignedIn } from './engine/auth.js';
@@ -3083,6 +3084,15 @@ async function startMVPipeline() {
         }
     }
 
+    // How much of the audio stream to hold while looking for its start time before giving up and appending as is.
+    const MV_AUDIO_HOLD_MAX = 4 * 1024 * 1024;
+    const concatBytes = (chunks) => {
+        if (chunks.length === 1) return chunks[0];
+        const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+        let o = 0;
+        for (const c of chunks) { out.set(c, o); o += c.length; }
+        return out;
+    };
     const runAudioPipe = async (signal) => {
         console.log(`[Adam MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)}`);
         const t0 = performance.now();
@@ -3109,6 +3119,7 @@ async function startMVPipeline() {
         };
         audioSb.addEventListener('error', _sbErrListener);
 
+        let held = [], heldBytes = 0, offsetSet = false;
         try {
             while (true) {
                 const { done, value } = await reader.read();
@@ -3120,35 +3131,30 @@ async function startMVPipeline() {
 
                 const bufBefore = _mvaBufStr();
 
-                // First chunk: probe HLS base timestamp and correct via timestampOffset.
-                // The raw HLS audio fMP4 has presentation timestamps starting at ~10s (the
-                // CMAF epoch offset), while the vseg video is remuxed by FFmpeg starting at 0.
-                // Shifting the audio SourceBuffer by -hls_base aligns both to t=0.
-                if (chunk === 0) {
+                // The engine sends this audio with Apple's native timestamps (about 10 s in) while the vseg video is
+                // remuxed by FFmpeg to start at 0, so the SourceBuffer is shifted by the stream's start to line the two
+                // up. The shift has to be set before the first append, and the stream arrives in arbitrary network
+                // chunks (often the init segment alone), so hold chunks until the first fragment's time is known.
+                if (!offsetSet) {
+                    held.push(value);
+                    heldBytes += value.length;
+                    const joined = concatBytes(held);
+                    const base = mp4FirstDecodeSeconds(joined);
+                    if (base === null && heldBytes < MV_AUDIO_HOLD_MAX) continue;
+                    offsetSet = true;
+                    held = [];
                     try {
-                        audioSb.appendBuffer(value);
-                        await _waitAudIdle();
-                        if (audioSb.buffered.length > 0) {
-                            const hls_base = audioSb.buffered.start(0);
-                            if (hls_base > 0.5) {
-                                const bufEnd = audioSb.buffered.end(audioSb.buffered.length - 1);
-                                audioSb.remove(hls_base, bufEnd + 0.001);
-                                await _waitAudIdle();
-                                // abort() resets Chrome's internal append state from
-                                // PARSING_MEDIA_SEGMENT → WAITING_FOR_SEGMENT so the
-                                // timestampOffset setter doesn't throw InvalidStateError.
-                                if (audioMs.readyState === 'open') audioSb.abort();
-                                audioSb.timestampOffset = -hls_base;
-                                console.log(`[Adam MV-A] timestampOffset=${(-hls_base).toFixed(2)}s (HLS base=${hls_base.toFixed(2)}s)`);
-                                audioSb.appendBuffer(value);
-                                await _waitAudIdle();
-                            }
+                        if (base !== null && base > 0.5) {
+                            audioSb.timestampOffset = -base;
+                            console.log(`[Adam MV-A] timestampOffset=${(-base).toFixed(2)}s (HLS base=${base.toFixed(2)}s)`);
+                        } else if (base === null) {
+                            console.warn(`[Adam MV-A] could not read the stream start in ${heldBytes} bytes; audio may be offset from the video`);
                         }
+                        audioSb.appendBuffer(joined);
+                        await _waitAudIdle();
                     } catch (e) {
-                        console.warn(`[Adam MV-A] offset-probe failed (${e.name}: ${e.message}) — fallback: sync ct`);
+                        console.warn(`[Adam MV-A] first append failed (${e.name}: ${e.message})`);
                         await _waitAudIdle().catch(() => {});
-                        if (audioSb.buffered.length > 0 && mkAudio.currentTime < audioSb.buffered.start(0))
-                            mkAudio.currentTime = audioSb.buffered.start(0);
                     }
                     chunk = 1;
                     continue;
@@ -3156,6 +3162,11 @@ async function startMVPipeline() {
                 const r = await appendAudioChunk(value, chunk, elapsed, bufBefore, signal, evictAudio);
                 if (r.shouldBreak) break;
                 chunk = r.chunk;
+            }
+            if (!offsetSet && held.length && !signal.aborted && audioMs.readyState === 'open') {
+                // A stream too short to tell: append what there is, unshifted.
+                audioSb.appendBuffer(concatBytes(held));
+                await _waitAudIdle();
             }
         } finally {
             audioSb.removeEventListener('error', _sbErrListener);
@@ -9748,7 +9759,7 @@ window.adamGetQueueInfo = function () {
         return wrap;
     }
 
-    function _buildAudioSection(prefs, drmSignedIn) {
+    function _buildAudioSection(prefs, drmSignedIn, drmAvailable = true) {
         const { wrap, body: aqBody } = makeSection('Audio Quality');
 
         if (!document.getElementById('adam-quality-dropdown-style')) {
@@ -9800,7 +9811,8 @@ window.adamGetQueueInfo = function () {
         }
         // The toggle only records the preference. Whether lossless can actually play depends on the DRM layer,
         // which starts by itself once the web session is known; until then the engine plays AAC.
-        const losslessOn = prefs['lossless-enabled'] !== false;
+        // With no DRM layer in this build the toggle is shown off and locked, and the saved preference is left alone.
+        const losslessOn = prefs['lossless-enabled'] !== false && drmAvailable;
         // Always build the full option set — the greyed row prevents interaction when lossless is off,
         // and toggling on restores the saved choice.
         const qualityOpts = [
@@ -9815,13 +9827,12 @@ window.adamGetQueueInfo = function () {
         // lossless is disabled — clicking it re-enables lossless and restores quality.
         const sqResetBtn = _adamMiniBtn(() => {
             // Re-enable lossless toggle if it was off.
-            if (!losslessToggle.querySelector('input')?.checked) {
-                losslessToggle.querySelector('input').click();
-            }
+            if (!losslessToggle._cb.checked) losslessToggle.click(); // runs the toggle's own handler
             setSQ('lossless');
             window.adamBridge?.setTweak('streaming-quality', 'lossless');
             _streamingQuality = 'lossless';
         });
+        if (!drmAvailable) { sqResetBtn.style.opacity = '0.38'; sqResetBtn.style.pointerEvents = 'none'; }
         // Wrap: greyed dropdown + always-active reset side by side.
         const sqInner = document.createElement('div');
         sqInner.style.cssText = 'flex:1;display:flex;align-items:center;gap:8px;';
@@ -9836,7 +9847,8 @@ window.adamGetQueueInfo = function () {
         }
         _applyLosslessRowState(losslessOn);
         const sqRow = makeRow('Streaming', sqInner,
-            drmSignedIn ? null : 'Lossless qualities play once the DRM layer is ready; AAC plays until then',
+            !drmAvailable ? 'AAC only: this build has no DRM layer'
+                : drmSignedIn ? null : 'Lossless qualities play once the DRM layer is ready; AAC plays until then',
             true);
 
         let _onLosslessChange = null;
@@ -9853,9 +9865,15 @@ window.adamGetQueueInfo = function () {
             }
             _onLosslessChange?.(v);
         });
+        if (!drmAvailable) {
+            losslessToggle.style.opacity = '0.4';
+            losslessToggle.style.pointerEvents = 'none';
+            losslessToggle.title = 'Lossless needs the DRM layer, which this build does not include';
+        }
         aqBody.appendChild(makeRow('Lossless Audio', losslessToggle,
-            drmSignedIn ? 'Stream lossless audio (ALAC) when available'
-                        : 'Starts as soon as the DRM layer is ready; AAC plays until then',
+            !drmAvailable ? 'Not available: this build has no DRM layer, so AAC plays'
+                : drmSignedIn ? 'Stream lossless audio (ALAC) when available'
+                              : 'Starts as soon as the DRM layer is ready; AAC plays until then',
             false));
         aqBody.appendChild(sqRow);
 
@@ -10068,7 +10086,7 @@ window.adamGetQueueInfo = function () {
             'Use original album track number and album name instead of playlist position when downloading a playlist', true));
     }
 
-    function _buildDownloadsSection(prefs, tools, drmSignedIn) {
+    function _buildDownloadsSection(prefs, tools, drmSignedIn, drmAvailable = true) {
         const { wrap, body: dlBody } = makeSection('Downloads');
         function makeIOSToggle(on, onChange) { return _adamIOSToggle(on, onChange); }
         function makeMiniBtn(_, onClick) { return _adamMiniBtn(onClick); }
@@ -10145,28 +10163,53 @@ window.adamGetQueueInfo = function () {
         }
         applyDlLossless(losslessAllowed);
         dlBody.appendChild(makeRow('Quality', dlQInner,
-            !drmSignedIn ? 'Lossless downloads are available once the DRM session is ready' : null,
+            !drmSignedIn ? (drmAvailable ? 'Lossless downloads are available once the DRM session is ready'
+                                         : 'Lossless downloads need the DRM layer, which this build does not include') : null,
             true));
 
-        const ffmpegAvail = tools?.ffmpeg?.available === true;
-        const ffmpegVersion = tools?.ffmpeg?.version ?? null;
-
         // ── FFmpeg indicator — right-aligned status control in a makeRow ──
+        // The engine runs ffmpeg and reports what it found: whether it works, its version and encoders. The row
+        // checks again each time Settings opens and whenever the custom path changes.
         const ffmpegIndCtrl = document.createElement('div');
         ffmpegIndCtrl.style.cssText = 'display:flex;align-items:center;gap:6px;';
         const ffmpegDot = document.createElement('span');
-        ffmpegDot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${ffmpegAvail ? '#34c759' : '#ff3b30'};`;
         const ffmpegLabel = document.createElement('span');
         ffmpegLabel.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.7);';
-        ffmpegLabel.textContent = ffmpegAvail ? (ffmpegVersion || 'Available') : 'Not found';
         ffmpegIndCtrl.append(ffmpegDot, ffmpegLabel);
-        dlBody.appendChild(makeRow('FFmpeg', ffmpegIndCtrl,
-            ffmpegAvail ? 'Available for re-encoding' : 'Install FFmpeg or set a custom path below',
-            false));
+        const ffmpegRow = makeRow('FFmpeg', ffmpegIndCtrl, 'Checking…', false);
+        dlBody.appendChild(ffmpegRow);
+        const ffmpegSub = ffmpegRow.firstChild.children[1];
 
-        const ffmpegToggle = makeIOSToggle(!!(prefs['dl-ffmpeg-enabled']) && ffmpegAvail, v => window.adamBridge?.setTweak('dl-ffmpeg-enabled', v));
-        if (!ffmpegAvail) { ffmpegToggle.style.opacity = '0.4'; ffmpegToggle.title = 'FFmpeg not found'; }
+        const ffmpegToggle = makeIOSToggle(!!(prefs['dl-ffmpeg-enabled']), v => window.adamBridge?.setTweak('dl-ffmpeg-enabled', v));
         dlBody.appendChild(makeRow('Convert with FFmpeg', ffmpegToggle, 'Re-encode downloaded files with FFmpeg', false));
+
+        function applyFfmpeg(info) {
+            const found = info?.available === true;
+            const enc = info?.encoders; // an older engine sends no encoder list
+            const canEncode = !enc || enc.aac === true || enc.flac === true;
+            const usable = found && canEncode;
+            ffmpegDot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${usable ? '#34c759' : found ? '#ff9f0a' : '#ff3b30'};`;
+            const missing = !found && (!info?.error || info.error === 'not found');
+            ffmpegLabel.textContent = found ? (info.version || 'Available') : missing ? 'Not found' : 'Not working';
+            ffmpegSub.textContent = !found ? (missing ? 'Install FFmpeg or set a custom path below' : info.error)
+                : !canEncode ? 'This FFmpeg has no AAC or FLAC encoder, so it cannot re-encode downloads'
+                : enc ? `Available for re-encoding (${[enc.aac && 'AAC', enc.flac && 'FLAC'].filter(Boolean).join(', ')})`
+                : 'Available for re-encoding';
+            ffmpegToggle.style.opacity = usable ? '' : '0.4';
+            ffmpegToggle.style.pointerEvents = usable ? '' : 'none';
+            ffmpegToggle.title = usable ? '' : 'FFmpeg is not available';
+            if (!usable) ffmpegToggle._cb.checked = false; // shown off; the saved preference is left alone
+        }
+        applyFfmpeg(tools?.ffmpeg);
+        let ffmpegCheck = 0;
+        function recheckFfmpeg(customPath) {
+            const mine = ++ffmpegCheck; // a slow answer must not overwrite a newer one
+            fetch(`${ENGINE}/api/v1/tools?ffmpegPath=${encodeURIComponent(customPath || '')}`)
+                .then(r => r.json())
+                .then(t => { if (mine === ffmpegCheck) applyFfmpeg(t?.ffmpeg); })
+                .catch(() => {});
+        }
+        recheckFfmpeg(prefs['ffmpeg-path']);
 
         // FFmpeg custom path — lets users point to a non-PATH ffmpeg binary.
         const ffmpegPathInp = document.createElement('input');
@@ -10175,7 +10218,7 @@ window.adamGetQueueInfo = function () {
         ffmpegPathInp.value = prefs['ffmpeg-path'] || '';
         ffmpegPathInp.style.cssText = FF + 'flex:1;min-width:0;padding:5px 9px;border-radius:7px;background:rgba(255,255,255,0.07);border:0.5px solid rgba(255,255,255,0.14);color:rgba(255,255,255,0.85);font-size:11.5px;font-family:ui-monospace,monospace;outline:none;transition:border-color 0.15s;';
         ffmpegPathInp.onfocus = () => { ffmpegPathInp.style.borderColor = 'rgba(252,60,68,0.5)'; };
-        ffmpegPathInp.onblur  = () => { ffmpegPathInp.style.borderColor = 'rgba(255,255,255,0.14)'; window.adamBridge?.setTweak('ffmpeg-path', ffmpegPathInp.value.trim()); };
+        ffmpegPathInp.onblur  = () => { ffmpegPathInp.style.borderColor = 'rgba(255,255,255,0.14)'; const v = ffmpegPathInp.value.trim(); window.adamBridge?.setTweak('ffmpeg-path', v); recheckFfmpeg(v); };
         const ffmpegPathRow = document.createElement('div');
         ffmpegPathRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex:1;';
         ffmpegPathRow.appendChild(ffmpegPathInp);
@@ -10691,6 +10734,9 @@ window.adamGetQueueInfo = function () {
 
         // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
         const drmSignedIn = accountSignedIn(drm); // one definition, shared with the status poll below
+        // False for a build with no DRM layer: the session can never become ready, so lossless is not merely "later".
+        // An older engine does not say, and counts as available.
+        const drmAvailable = drm?.available !== false;
 
         // Build all async sections in parallel now that we have prefs.
         const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
@@ -10707,10 +10753,10 @@ window.adamGetQueueInfo = function () {
         dlg.appendChild(_buildEngineStatusSection(drm));
         dlg.appendChild(_buildDisplaySection(prefs));
         dlg.appendChild(themeWrap);
-        const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);
+        const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn, drmAvailable);
         dlg.appendChild(audioWrap);
         dlg.appendChild(cacheWrap);
-        const { wrap: dlWrap, applyLossless: applyDlLossless } = _buildDownloadsSection(prefs, tools, drmSignedIn);
+        const { wrap: dlWrap, applyLossless: applyDlLossless } = _buildDownloadsSection(prefs, tools, drmSignedIn, drmAvailable);
         dlg.appendChild(dlWrap);
         // Wire lossless toggle → downloads quality row.
         onLosslessChange(applyDlLossless);
