@@ -73,7 +73,9 @@ body[data-adam-mode="custom"] #_adamAcrylicLum, body[data-adam-mode="custom"] #_
 `;
 
 // Page script that creates the layers on first use and updates them afterwards (safe to run any number of times).
-export function acrylicOverlayScript(settings) {
+// The main window has no native title bar, so it also gets the drag strip; a window with its own drag area (the
+// mini player) passes { drag: false }.
+export function acrylicOverlayScript(settings, { drag = true } = {}) {
     const s = normalizeAcrylic(settings);
     const n = parseInt(s.tintColor.slice(1), 16);
     const tint = `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${s.tintOpacity})`;
@@ -89,7 +91,7 @@ export function acrylicOverlayScript(settings) {
             const tint = document.createElement('div'); tint.id = '_adamAcrylicTint';
             document.body.prepend(tint); document.body.prepend(lum);
         }
-        if (!document.getElementById('_adamAcrylicDrag')) {
+        if (${drag === true} && !document.getElementById('_adamAcrylicDrag')) {
             const drag = document.createElement('div'); drag.id = '_adamAcrylicDrag';
             document.body.appendChild(drag);
         }

@@ -73,7 +73,7 @@ function fakeDom() {
     };
     return { document, props, attrs, bodyOrder, byId, appended };
 }
-const run = (dom, settings) => new Function('document', `return ${acrylicOverlayScript(settings)}`)(dom.document);
+const run = (dom, settings, opts) => new Function('document', `return ${acrylicOverlayScript(settings, opts)}`)(dom.document);
 
 test('overlay script creates the style and both layers, luminosity below the tint', () => {
     const dom = fakeDom();
@@ -84,6 +84,14 @@ test('overlay script creates the style and both layers, luminosity below the tin
     assert.equal(dom.props['--adam-acrylic-tint'], 'rgba(16,32,48,0.5)');
     assert.equal(dom.props['--adam-acrylic-lum-opacity'], '0.25');
     assert.equal(dom.attrs['data-adam-acrylic-material'], 'mica');
+});
+
+test('a window with its own drag area (the mini player) gets the layers but no drag strip', () => {
+    const dom = fakeDom();
+    run(dom, {}, { drag: false });
+    assert.deepEqual(dom.bodyOrder.map(e => e.id), ['_adamAcrylicLum', '_adamAcrylicTint']);
+    assert.equal(dom.byId.has('_adamAcrylicDrag'), false);
+    assert.equal(dom.attrs['data-adam-acrylic-material'], 'acrylic', 'the page keys its acrylic styling off this');
 });
 
 test('running the overlay script again updates in place instead of adding layers', () => {

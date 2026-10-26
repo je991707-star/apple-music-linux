@@ -1734,19 +1734,28 @@ ipcMain.on('view:nav-opacity', (_, v) => {
 });
 
 // ── Acrylic window (Windows) ─────────────────────────────────────────────────
+// The windows that carry the acrylic: the main window and the mini player share the one setting.
+const _acrylicWindows = () => [win, miniWin].filter(w => w && !w.isDestroyed());
+
 function _applyAcrylicPage() {
-    if (!_acrylicBackend || !win || win.isDestroyed()) return;
-    win.webContents.executeJavaScript(acrylicOverlayScript(_acrylicSettings())).catch(() => {});
+    if (!_acrylicBackend) return;
+    const s = _acrylicSettings();
+    for (const w of _acrylicWindows())
+        w.webContents.executeJavaScript(acrylicOverlayScript(s, { drag: w === win })).catch(() => {});
 }
 
-// Pushes the saved settings to the window: the material, and the native theme while the blur theme is on.
-function _applyAcrylic() {
-    if (!_acrylicBackend || !win || win.isDestroyed()) return;
-    const s = _acrylicSettings();
+function _applyAcrylicMaterial(w, s) {
     try {
         if (_acrylicBackend.kind === 'material') w.setBackgroundMaterial(s.material);
         else setAccent(w, s.material === 'none' ? 0 : _acrylicBackend.accentState);
     } catch (e) { console.warn('[Adam] acrylic material:', e.message); }
+}
+
+// Pushes the saved settings to the windows: the material, and the native theme while the blur theme is on.
+function _applyAcrylic() {
+    if (!_acrylicBackend) return;
+    const s = _acrylicSettings();
+    for (const w of _acrylicWindows()) _applyAcrylicMaterial(w, s);
     if (_resolveThemeMode(loadPrefs()) === 'blur') nativeTheme.themeSource = s.theme;
     _applyAcrylicPage();
 }
@@ -1779,6 +1788,7 @@ ipcMain.handle('theme:get-info', async () => {
 });
 
 ipcMain.on('theme:set-mode', async (_, mode) => {
+    if (mode !== 'blur' && mode !== 'accent' && mode !== 'custom') return; // the page picks from three buttons
     const p = loadPrefs();
     p.themeMode = mode;
     if (mode === 'accent') {
@@ -1788,7 +1798,6 @@ ipcMain.on('theme:set-mode', async (_, mode) => {
         _applyThemeVars(p.themePalette);
     } else if (mode === 'blur') {
         savePrefs(p);
-    if (mode !== 'blur' && mode !== 'accent' && mode !== 'custom') return; // the page picks from three buttons
         await _clearCustomCss();
         _clearThemeVars();
     } else if (mode === 'custom') {
@@ -1797,6 +1806,7 @@ ipcMain.on('theme:set-mode', async (_, mode) => {
         _injectCustomFallbackBg();
         if (p.customCssPath) await _injectCustomCss(p.customCssPath);
     }
+    _applyNavAlpha();
 });
 
 ipcMain.on('theme:set-palette', (_, key, value) => {
@@ -1806,7 +1816,6 @@ ipcMain.on('theme:set-palette', (_, key, value) => {
     p.themePalette[key] = value;
     savePrefs(p);
     _applyThemeVars(p.themePalette);
-    _applyNavAlpha();
 });
 
 ipcMain.handle('theme:reset-palette', async () => {
@@ -2588,8 +2597,11 @@ function createMiniPlayer() {
         height: 150,
         useContentSize: true,
         frame: false,
-        transparent: true,
+        // Windows: the window itself is the acrylic (a transparent window cannot show a system material), the
+        // page is transparent over it. Elsewhere it stays a transparent window drawing its own glass.
+        transparent: !_acrylicBackend,
         backgroundColor: '#00000000',
+        ...(_acrylicBackend?.kind === 'material' ? { backgroundMaterial: _acrylicSettings().material } : {}),
         hasShadow: true,
         resizable: false,
         maximizable: false,
@@ -2601,7 +2613,6 @@ function createMiniPlayer() {
         webPreferences: {
             preload: path.join(__dirname, 'miniplayer-preload.cjs'),
             contextIsolation: true,
-        ...(_acrylicBackend?.kind === 'material' ? { backgroundMaterial: _acrylicSettings().material } : {}),
             nodeIntegration: false,
             // sandbox: false keeps the sandbox off to avoid the preload
             // bootstrap crash ("binding.startupData is null") seen on some
@@ -2612,6 +2623,10 @@ function createMiniPlayer() {
         },
     });
     miniWin.setAlwaysOnTop(true, 'floating');
+    if (_acrylicBackend) {
+        if (_acrylicBackend.kind === 'accent') _applyAcrylicMaterial(miniWin, _acrylicSettings());
+        miniWin.webContents.on('did-finish-load', _applyAcrylicPage);
+    }
     miniWin.loadFile(path.join(__dirname, 'miniplayer.html'));
     miniWin.once('ready-to-show', () => {
         miniWin.show();
