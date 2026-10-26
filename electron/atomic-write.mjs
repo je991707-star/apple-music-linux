@@ -1,4 +1,4 @@
-import { writeFileSync, renameSync, unlinkSync, openSync, fsyncSync, closeSync, constants } from 'fs';
+import { writeFileSync, renameSync, unlinkSync, openSync, fsyncSync, closeSync } from 'fs';
 import { writeFile, rename, unlink, open } from 'fs/promises';
 
 let _n = 0;
@@ -11,7 +11,7 @@ export function writeFileAtomicSync(path, data, mode = 0o600) {
     const tmp = tmpName(path);
     try {
         writeFileSync(tmp, data, { mode });
-        const fd = openSync(tmp, constants.O_RDONLY);
+        const fd = openSync(tmp, 'r+'); // Windows refuses to fsync a read-only handle (EPERM)
         try { fsyncSync(fd); } finally { closeSync(fd); }
         renameSync(tmp, path);
     } catch (e) {
@@ -24,7 +24,7 @@ export async function writeFileAtomic(path, data, mode = 0o600) {
     const tmp = tmpName(path);
     try {
         await writeFile(tmp, data, { mode });
-        const fh = await open(tmp, 'r');
+        const fh = await open(tmp, 'r+');
         try { await fh.sync(); } finally { await fh.close(); }
         await rename(tmp, path);
     } catch (e) {
