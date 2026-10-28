@@ -45,6 +45,15 @@ runtime dependency.
   Review their license and compatibility before extending COPY or SYSTEM; do not
   fix this by appending all ldd output to SYSTEM. A broad system FFmpeg with video,
   network and graphics integrations will deliberately fail this policy.
+* A directly needed GNU x86_64 loader may appear in ldd as a bare absolute
+  path instead of `name => path`. Accept it as a system-loader contract only
+  when DT_NEEDED, the output basename and loader SONAME agree, and the resolved
+  path equals the native Python executable's PT_INTERP. Interpreter identification
+  runs without the candidate LD_LIBRARY_PATH. Mapped `=>` loader lines undergo
+  the same checks. Ordinary bare library paths receive no exemption. Missing,
+  mismatched or unidentifiable loaders fail; nothing copies the loader. This
+  currently covers native glibc x86_64, not static Python, cross builds or other
+  architecture loader spellings. Existing owned-library override checks remain.
 * Never collect glibc or a dynamic loader. Reject core libraries found inside the
   package. Preserve ADAM_MAX_GLIBC (default 2.38; older release builds use 2.35),
   checking both VLC and packaged FFmpeg libraries on reuse and at final staging.

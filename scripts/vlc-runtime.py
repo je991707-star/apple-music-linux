@@ -74,6 +74,37 @@ def inside(path, roots):
     return any(path.resolve().is_relative_to(r.resolve()) for r in roots)
 
 
+def resolve_system_loader(needed, output, resolved, env):
+    # Native GNU x86_64 only. Other architectures remain fail-closed until
+    # their interpreter names/output have explicit coverage; never copy a loader.
+    name = 'ld-linux-x86-64.so.2'
+    if name not in needed:
+        return set()
+    # Identify the native interpreter independently of the candidate's search
+    # paths. A familiar basename alone does not establish system-loader identity.
+    native_env = {k: v for k, v in env.items() if k != 'LD_LIBRARY_PATH'}
+    program = run('readelf', '-lW', str(Path(sys.executable).resolve()), env=native_env)
+    match = re.search(r'Requesting program interpreter: ([^\]]+)\]', program)
+    if not match or Path(match[1]).name != name:
+        raise RuntimeError(f'cannot confirm native GNU loader for DT_NEEDED {name}')
+    interpreter = Path(match[1]).resolve(strict=True)
+    candidates = {Path(path) for path in re.findall(
+        r'^\s*(/\S+)\s+\(0x[0-9a-f]+\)\s*$', output, re.M)
+        if Path(path).name == name}
+    if name in resolved:
+        candidates.add(Path(resolved[name]))
+    if not candidates:
+        raise RuntimeError(f'cannot resolve DT_NEEDED {name}: no matching system loader line')
+    for candidate in candidates:
+        if candidate.name != name or candidate.resolve(strict=True) != interpreter:
+            raise RuntimeError(f'unverified system loader {name}: {candidate} (native interpreter: {interpreter})')
+    dynamic = run('readelf', '-dW', str(interpreter), env=native_env)
+    if re.findall(r'\(SONAME\).*?\[(.*?)\]', dynamic) != [name]:
+        raise RuntimeError(f'system loader SONAME does not match DT_NEEDED {name}: {interpreter}')
+    resolved[name] = str(interpreter)
+    return {name}
+
+
 def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
     roots = [vlc.resolve(), ffmpeg.resolve()]
     # Match engineLibEnv's VLC-before-FFmpeg order; do not inherit host overrides.
@@ -123,6 +154,7 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
                     if 'not found' in line:
                         errors.append(f'{obj}: unresolved dependency: {line.strip()}')
                 resolved = dict(re.findall(r'^\s*(\S+)\s+=>\s+(/.*?)\s+\(0x[0-9a-f]+\)', output, re.M))
+                system_loaders = resolve_system_loader(needed, output, resolved, env)
                 for name in dict.fromkeys([*needed, *resolved]):
                     # SYSTEM libraries own their external closure. Still inspect
                     # every private/bundled dependency in this root's snapshot,
@@ -145,6 +177,9 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
                         continue
                     if name in owned:
                         errors.append(f'{obj}: bundle provides {name} but loader uses {target}; check RPATH')
+                        continue
+                    if name in system_loaders:
+                        host_contracts.add(name)
                         continue
                     if name in COPY:
                         if not collect:

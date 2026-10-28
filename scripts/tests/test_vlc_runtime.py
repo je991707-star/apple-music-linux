@@ -1,11 +1,13 @@
 """Real ELF fixtures: python3 -m unittest discover -s scripts/tests -v."""
 import importlib.util
+import re
 import sys
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location('runtime', Path(__file__).parents[1] / 'vlc-runtime.py')
 RUNTIME = importlib.util.module_from_spec(SPEC)
@@ -296,6 +298,145 @@ class RuntimeTests(unittest.TestCase):
                 result = self.cli(collect)
                 self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(path.is_symlink())
+
+    def loader_fixture(self):
+        program = subprocess.check_output(['readelf', '-lW', sys.executable], text=True)
+        match = re.search(r'Requesting program interpreter: ([^\]]+)\]', program)
+        if not match or Path(match[1]).name != 'ld-linux-x86-64.so.2':
+            self.skipTest('native GNU x86_64 interpreter required')
+        loader = Path(match[1])
+        obj = self.lib(self.plug / 'loader_consumer.so')
+        subprocess.run(['gcc', '-shared', '-fPIC', str(self.root / 'source.c'),
+                        '-Wl,--no-as-needed', str(loader), '-o', str(obj)],
+                       check=True, capture_output=True)
+        dynamic = subprocess.check_output(['readelf', '-dW', str(obj)], text=True)
+        self.assertIn('[ld-linux-x86-64.so.2]', dynamic)
+        # Use a deterministic bare-line spelling even if this host's ldd maps
+        # the loader via =>. All other loader output and ELF metadata are real.
+        original = RUNTIME.run
+        def output(*args, **kwargs):
+            text = original(*args, **kwargs)
+            if args[0] == 'ldd' and args[1] == str(obj):
+                lines = [line for line in text.splitlines()
+                         if 'ld-linux-x86-64.so.2' not in line]
+                return '\n'.join(lines + [f'\t{loader} (0x0000000000001000)']) + '\n'
+            return text
+        return loader, obj, output
+
+    def test_native_loader_bare_line_and_direct_needed_pass_both_modes(self):
+        loader, obj, output = self.loader_fixture()
+        with mock.patch.object(RUNTIME, 'run', side_effect=output):
+            for collect in (False, True):
+                with self.subTest(collect=collect):
+                    self.audit(collect)
+        self.assertFalse((self.vlc / loader.name).exists())
+
+    def test_native_loader_arrow_line_also_requires_verified_identity(self):
+        loader, obj, output = self.loader_fixture()
+        def arrow(*args, **kwargs):
+            text = output(*args, **kwargs)
+            if args[0] == 'ldd':
+                text = text.replace(f'{loader} (0x', f'{loader.name} => {loader} (0x')
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=arrow):
+            self.audit()
+
+    def test_external_fake_loader_with_expected_basename_is_rejected(self):
+        loader, obj, output = self.loader_fixture()
+        fake = self.lib(self.host / loader.name)
+        def forged(*args, **kwargs):
+            text = output(*args, **kwargs)
+            if args[0] == 'ldd':
+                text = text.replace(str(loader), str(fake))
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=forged):
+            for collect in (False, True):
+                with self.subTest(collect=collect):
+                    with self.assertRaises(RuntimeError):
+                        self.audit(collect)
+        self.assertFalse((self.vlc / loader.name).exists())
+
+    def test_loader_bare_name_mismatch_is_rejected(self):
+        loader, obj, output = self.loader_fixture()
+        def mismatch(*args, **kwargs):
+            text = output(*args, **kwargs)
+            if args[0] == 'ldd':
+                text = text.replace(str(loader), str(loader.with_name('ld-linux-other.so.2')))
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=mismatch):
+            with self.assertRaises(RuntimeError):
+                self.audit()
+
+    def test_missing_loader_resolution_is_rejected(self):
+        loader, obj, output = self.loader_fixture()
+        def missing(*args, **kwargs):
+            text = output(*args, **kwargs)
+            if args[0] == 'ldd':
+                text = '\n'.join(l for l in text.splitlines() if loader.name not in l)
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=missing):
+            with self.assertRaises(RuntimeError):
+                self.audit()
+
+    def test_missing_loader_file_is_rejected(self):
+        loader, obj, output = self.loader_fixture()
+        missing = self.host / 'missing' / loader.name
+        def absent(*args, **kwargs):
+            text = output(*args, **kwargs)
+            if args[0] == 'ldd':
+                text = text.replace(str(loader), str(missing))
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=absent):
+            with self.assertRaises(RuntimeError):
+                self.audit()
+
+    def test_unknown_native_interpreter_is_not_silently_accepted(self):
+        loader, obj, output = self.loader_fixture()
+        def no_interpreter(*args, **kwargs):
+            if args[:2] == ('readelf', '-lW'):
+                return 'No program interpreter available'
+            return output(*args, **kwargs)
+        with mock.patch.object(RUNTIME, 'run', side_effect=no_interpreter):
+            with self.assertRaises(RuntimeError):
+                self.audit()
+
+    def test_wrong_loader_soname_is_rejected(self):
+        loader, obj, output = self.loader_fixture()
+        def wrong_soname(*args, **kwargs):
+            if args[0] == 'readelf' and args[1] == '-dW' and Path(args[2]).resolve() == loader.resolve():
+                return ' (SONAME) Library soname: [libordinary.so.1]'
+            return output(*args, **kwargs)
+        with mock.patch.object(RUNTIME, 'run', side_effect=wrong_soname):
+            with self.assertRaises(RuntimeError):
+                self.audit()
+
+    def test_ordinary_dependency_bare_line_is_not_loader_exemption(self):
+        dep = self.lib(self.host / 'libordinary.so.1')
+        obj = self.lib(self.plug / 'ordinary.so', dep, self.host)
+        original = RUNTIME.run
+        def bare(*args, **kwargs):
+            text = original(*args, **kwargs)
+            if args[0] == 'ldd':
+                text = text.replace(f'{dep.name} => {dep}', str(dep))
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=bare):
+            for collect in (False, True):
+                with self.subTest(collect=collect):
+                    with self.assertRaisesRegex(RuntimeError, 'cannot resolve DT_NEEDED libordinary'):
+                        self.audit(collect)
+
+    def test_loader_path_cannot_resolve_an_ordinary_needed_name(self):
+        loader, obj, output = self.loader_fixture()
+        dep = self.lib(self.host / 'libordinary.so.1')
+        ordinary = self.lib(self.plug / 'ordinary.so', dep, self.host)
+        def forged_name(*args, **kwargs):
+            text = output(*args, **kwargs)
+            if args[0] == 'ldd' and args[1] == str(ordinary):
+                text = text.replace(f'{dep.name} => {dep}', f'{dep.name} => {loader}')
+            return text
+        with mock.patch.object(RUNTIME, 'run', side_effect=forged_name):
+            with self.assertRaisesRegex(RuntimeError, 'unreviewed external dependency libordinary'):
+                self.audit()
 
 
 if __name__ == '__main__':
