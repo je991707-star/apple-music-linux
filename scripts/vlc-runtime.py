@@ -38,9 +38,29 @@ def run(*args, env=None):
     return result.stdout
 
 
-def files(root):
+def reject_directory_symlinks(root):
+    if root.is_symlink():
+        raise RuntimeError(f'directory symlink is not allowed: {root}')
     if not root.is_dir():
         raise RuntimeError(f'missing library directory: {root}')
+
+    def scan_error(error):
+        raise RuntimeError(f'cannot scan runtime tree: {error}')
+
+    # Do not follow links, including internal links or loops. Check directories
+    # before filtering ELF filenames so required-plugin checks cannot bypass this.
+    for current, directories, filenames in os.walk(root, followlinks=False, onerror=scan_error):
+        for name in directories + filenames:
+            path = Path(current) / name
+            if path.is_symlink():
+                if path.is_dir():
+                    raise RuntimeError(f'directory symlink is not allowed: {path}')
+                if not path.exists():
+                    raise RuntimeError(f'dangling library symlink: {path}')
+
+
+def files(root):
+    reject_directory_symlinks(root)
     candidates = sorted(p for p in root.rglob('*') if LIB.fullmatch(p.name))
     for path in candidates:
         if path.is_symlink() and not path.exists():
@@ -65,10 +85,19 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
     while True:
         changed = False
         errors = []
-        for obj in files(vlc) + files(ffmpeg):
+        objects = files(vlc) + files(ffmpeg)
+        # Reject core libraries before spawning tools with the bundle's search
+        # path: a bundled libc could otherwise break the audit tools themselves.
+        for obj in objects:
             if CORE.match(obj.name):
-                errors.append(f'{obj}: core system library must not be bundled')
-                continue
+                raise RuntimeError(f'{obj}: core system library must not be bundled')
+        # Static ELF metadata may be shared; loader resolutions must remain
+        # specific to each root (ancestor DT_RPATH can change indirect loads).
+        dynamics = {obj: run('readelf', '-dW', str(obj), env=env) for obj in objects}
+        owned = {obj.name for obj in objects}
+        for dynamic in dynamics.values():
+            owned.update(re.findall(r'\(SONAME\).*?\[(.*?)\]', dynamic))
+        for obj in objects:
             try:
                 license_name = COPY.get(obj.name)
                 if license_name and obj.parent.resolve() == vlc.resolve():
@@ -79,7 +108,7 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
                         shutil.copyfile(notice, packaged_notice)
                     elif not packaged_notice.is_file():
                         errors.append(f'{obj}: missing redistribution notice {packaged_notice}')
-                dynamic = run('readelf', '-dW', str(obj), env=env)
+                dynamic = dynamics[obj]
                 needed = re.findall(r'\(NEEDED\).*?\[(.*?)\]', dynamic)
                 versions = run('readelf', '-VW', str(obj), env=env)
                 required = [tuple(map(int, v.split('.'))) for v in re.findall(r'GLIBC_([0-9.]+)', versions)]
@@ -94,7 +123,14 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
                     if 'not found' in line:
                         errors.append(f'{obj}: unresolved dependency: {line.strip()}')
                 resolved = dict(re.findall(r'^\s*(\S+)\s+=>\s+(/.*?)\s+\(0x[0-9a-f]+\)', output, re.M))
-                for name in needed:
+                for name in dict.fromkeys([*needed, *resolved]):
+                    # SYSTEM libraries own their external closure. Still inspect
+                    # every private/bundled dependency in this root's snapshot,
+                    # even when reached indirectly through another library.
+                    private = name in COPY or name in owned or re.match(
+                        r'^lib(?:avcodec|avformat|avutil|avfilter|avdevice|swresample|swscale)\.so(?:\.|$)', name)
+                    if name not in needed and not private:
+                        continue
                     target = resolved.get(name)
                     if target is None and collect and name in COPY:
                         # Private VLC support libraries may live outside ldconfig.
@@ -106,6 +142,9 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
                         continue
                     target = Path(target)
                     if inside(target, roots):
+                        continue
+                    if name in owned:
+                        errors.append(f'{obj}: bundle provides {name} but loader uses {target}; check RPATH')
                         continue
                     if name in COPY:
                         if not collect:
@@ -140,6 +179,7 @@ def audit(vlc, ffmpeg, collect=False, max_glibc='2.38', source_dirs=()):
 
 
 def check_plugins(vlc):
+    reject_directory_symlinks(vlc)
     for name in ('access/libimem_plugin.so', 'demux/libmp4_plugin.so',
                  'codec/libavcodec_plugin.so'):
         if not (vlc / 'plugins' / name).is_file():
@@ -161,6 +201,7 @@ def main():
     parser.add_argument('ffmpeg', type=Path)
     args = parser.parse_args()
     try:
+        reject_directory_symlinks(args.ffmpeg)
         check_plugins(args.vlc)
         audit(args.vlc, args.ffmpeg, args.collect, args.max_glibc, args.source_dir)
     except (RuntimeError, OSError) as error:

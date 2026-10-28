@@ -17,6 +17,14 @@ runtime dependency.
   ldd to resolve actual paths, honoring RPATH/RUNPATH, with only the same VLC then
   FFmpeg search order used by engineLibEnv. Inherited LD_LIBRARY_PATH, LD_PRELOAD
   and LD_AUDIT are removed from the audit subprocesses.
+* Validate private/bundled dependency paths in each root ELF's full loader
+  snapshot, including indirect loads affected by ancestor DT_RPATH. Packaged
+  filenames/SONAMEs, COPY entries and FFmpeg runtime families remain package-owned;
+  an outside path overriding them fails even in collection mode. Loader results
+  are not cached globally by SONAME. SYSTEM libraries retain their host closure.
+* Reject directory symlinks throughout both runtime trees before ELF scanning or
+  required-plugin checks; this includes internal directory links and loops.
+  Normal in-tree ELF file symlinks remain supported.
 * Resolve bundled dependencies recursively by inspecting every packaged ELF.
   Missing dependencies anywhere in each ldd closure fail with the affected ELF
   path and library name.
