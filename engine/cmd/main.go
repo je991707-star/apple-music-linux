@@ -1,0 +1,132 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime/debug"
+	"syscall"
+	"time"
+
+	"engine/utils/aacstream"
+	"engine/utils/config"
+
+	"gopkg.in/yaml.v2"
+)
+
+var (
+	apiPort int
+	Config  config.ConfigSet
+)
+
+func loadConfig() error {
+	data, err := os.ReadFile("config.yaml")
+	if err != nil {
+		return err
+	}
+	var next config.ConfigSet
+	if err = yaml.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	if os.Getenv("ADAM_MAIN_PLAYBACK") == "1" {
+		for _, dir := range []string{next.DRMBaseDir, next.DRMRuntimeLib64Dir} {
+			if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+				return fmt.Errorf("private Main requires explicit absolute DRM workspace and runtime directories")
+			}
+		}
+	}
+	Config = next
+	if len(Config.Storefront) != 2 {
+		Config.Storefront = "us"
+	}
+	return nil
+}
+
+func main() {
+	if os.Getenv("ADAM_MAIN_PLAYBACK") == "1" {
+		if err := restrictScopedFiles(); err != nil {
+			log.Printf("private file policy unavailable: %v", err)
+			os.Exit(1)
+		}
+	}
+	// Return transient heap spikes (full-track ALAC decrypt buffers, MV cache
+	// commits) to the OS. Go's GC reclaims them but retains the pages by default,
+	// so the engine's RSS ratchets up and never falls. FreeOSMemory hands them
+	// back. Purely additive — it only releases memory the GC already freed, so it
+	// cannot OOM or throttle any playback path (ALAC/VLC included).
+	go func() {
+		t := time.NewTicker(2 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			debug.FreeOSMemory()
+		}
+	}()
+
+	if err := loadConfig(); err != nil {
+		if os.Getenv("ADAM_MAIN_PLAYBACK") == "1" {
+			log.Printf("scoped config unavailable: %v", err)
+			os.Exit(1)
+		}
+		log.Printf("load config failed (%v); using defaults", err)
+		Config.Storefront = "us"
+		Config.Language = "en-US"
+		Config.AlacSaveFolder = "AM-DL downloads"
+		Config.AacSaveFolder = "AM-DL-AAC downloads"
+		Config.AtmosSaveFolder = "AM-DL-Atmos downloads"
+		Config.MVSaveFolder = "AM-DL-MV downloads"
+		Config.AlacStreamFolder = "AM-Stream-ALAC"
+		Config.AacStreamFolder = "AM-Stream-AAC"
+		Config.AtmosStreamFolder = "AM-Stream-Atmos"
+		Config.AacType = "aac-lc"
+		Config.AlacMax = 192000
+		Config.AtmosMax = 2768
+		Config.LimitMax = 2000
+		Config.MaxMemoryLimit = 4096
+		Config.CoverSize = "5000x5000"
+		Config.CoverFormat = "original"
+		Config.LrcType = "lyrics"
+		Config.LrcFormat = "lrc"
+		Config.EmbedCover = true
+		Config.EmbedLrc = true
+		Config.GetM3u8Mode = "hires"
+		Config.GetM3u8FromDevice = true
+		Config.MVAudioType = "atmos"
+		Config.MVMax = 2160
+		Config.AlbumFolderFormat = "{AlbumName}"
+		Config.SongFileFormat = "{SongNumer}. {SongName}"
+		Config.PlaylistFolderFormat = "{PlaylistName}"
+		Config.ArtistFolderFormat = "{UrlArtistName}"
+		Config.ExplicitChoice = "[E]"
+		Config.CleanChoice = "[C]"
+		Config.AppleMasterChoice = "[M]"
+		Config.FFmpegPath = "ffmpeg"
+		Config.StreamCacheSize = 500
+	}
+	flag.IntVar(&apiPort, "api", 0, "Start local HTTP API server on given port (e.g. --api 20025)")
+	flag.Parse()
+	aacstream.WarmCache()
+	if apiPort > 0 {
+		srv := NewAPIServer(apiPort, ServerConfig{
+			DRMBinaryPath:      Config.DRMBinaryPath,
+			DRMBaseDir:         Config.DRMBaseDir,
+			DRMRuntimeLib64Dir: Config.DRMRuntimeLib64Dir,
+			ExportFloorKbps:    Config.ExportThrottleFloorKbps,
+		})
+		if err := srv.Start(); err != nil {
+			slog.Error("API server failed to start", "err", err)
+			os.Exit(1)
+		}
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		slog.Info("Shutting down API server")
+		srv.Stop()
+		return
+	}
+	slog.Error("Usage: engine --api <port>")
+	os.Exit(1)
+}

@@ -1,0 +1,8 @@
+import{test}from'node:test';import assert from'node:assert/strict';import{controller}from'../helpers/vlc-controller.mjs';
+const ended=(h,p)=>{h.update(p,'ended');h.stateChange('ended',p)};
+test('contract terminal must retain180000',async()=>{const h=controller();h.update(180000);ended(h,45000);await h.run(500);assert.equal(h.commands.find(v=>v.op==='load').body.startMs,180000)});
+for(const op of ['seek','pause'])test('observed upstream scheduled retry survives newer '+op,async()=>{const h=controller();h.update(180000);ended(h,45000);if(op==='seek'){await h.seek(220000);await h.run(150)}else await h.pause();await h.run(500);assert.equal(h.commands.filter(v=>v.op==='load').length,0)});
+test('observed late success restores old retry position after new seek',async()=>{let release;const p=new Promise(r=>release=r);const h=controller({fetch:async url=>url.endsWith('/load')?p:{ok:true,json:async()=>({})}});h.update(180000);ended(h,45000);const old=h.run(500);await h.seek(220000);await h.run(150);release({ok:true});await old;assert.equal(h.snapshot().position,220000)});
+test('observed duplicate EOF dispatches two Next requests',()=>{const h=controller();h.update(239000);ended(h,239000);ended(h,239000);assert.equal(h.next(),1)});
+test('observed old404 reopens the new track with old resume position',async()=>{let release;const p=new Promise(r=>release=r);const h=controller({fetch:async()=>p});h.update(180000);ended(h,45000);const old=h.run(500);h.session('b');release({ok:false,status:404});await old;await h.drain();assert(!h.events.some(v=>v?.reopen))});
+test('observed terminal-only overrun changes declared UI duration',()=>{const h=controller();h.update(100000);h.update(300000,'ended');assert.equal(h.snapshot().duration,240)});

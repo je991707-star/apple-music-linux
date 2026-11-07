@@ -1,0 +1,1288 @@
+package export
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"engine/core/pipeline"
+	"engine/core/playback"
+	"engine/internal/pq"
+	"engine/utils/ampapi"
+	"engine/utils/lyrics"
+)
+
+const (
+	// defaultArtworkSize is the square pixel dimension requested from Apple CDN.
+	defaultArtworkSize = 3000
+)
+
+// EventSink receives export progress events.  apiserver.go injects an
+// implementation that forwards them to SSE clients.
+type EventSink func(ev ExportEvent)
+
+// AudioCache is the slice of the playback disk cache that exports read from,
+// so an export of a track playback already fetched (or is fetching right now)
+// does not download it a second time. Implementations must only report a
+// tail when a playback download for that exact asset+qualifier is actually in
+// progress — never merely because a session exists.
+type AudioCache interface {
+	// Path returns the committed cache file for the track, if any.
+	Path(assetID, qualifier string) (string, bool)
+	// TailReader returns a reader over an in-progress playback download. Read
+	// blocks until more bytes arrive, returns io.EOF once the producer commits
+	// and a non-EOF error if it fails.
+	TailReader(assetID, qualifier string) (io.ReadCloser, bool)
+}
+
+// Options configures a Manager. The zero value is valid.
+type Options struct {
+	// Cache, when non-nil, lets audio exports reuse bytes playback fetched.
+	Cache AudioCache
+	// FloorBps is the minimum export rate (bytes/s) while playback streams.
+	// Zero selects the default (128 KiB/s).
+	FloorBps int64
+	// OutputRoots, when non-empty, confines exports: a request's OutputDir must lie
+	// inside one of these directories (compared after resolving symlinks). Empty
+	// means unrestricted, which is only appropriate when every caller is trusted —
+	// the HTTP server sets it, because request bodies come from a web page.
+	OutputRoots []string
+}
+
+// Manager enqueues and executes export jobs one at a time: highest priority
+// first, FIFO among equal priorities. It is safe for concurrent use.
+//
+// A single worker is deliberate: the DRM wrapper is one process, and one
+// active export keeps the bandwidth limiter's meaning simple (the maximum
+// background egress rate).
+type Manager struct {
+	mu       sync.RWMutex
+	jobs     map[string]*ExportJob
+	requests map[string]ExportRequest // original request per job, for Retry — stored without credentials
+	queue    *pq.Queue[*workItem]
+	sink     EventSink
+	manager  *playback.Manager
+	cache    AudioCache // nil when the playback disk cache is disabled
+	bw       *bwController
+	run      func(*workItem) // test seam; nil means m.execute
+	seq      atomic.Int64    // monotonically increasing enqueue counter
+	roots    []string        // resolved OutputRoots
+	confined bool            // OutputRoots was set (even if nothing resolved: then nothing is allowed)
+	active   sync.WaitGroup  // the worker and every post-process goroutine, joined by Stop
+}
+
+type workItem struct {
+	job *ExportJob
+	req ExportRequest
+	ctx context.Context
+}
+
+// NewManager creates an ExportManager that acquires media through pm and
+// notifies ev on each state transition. Jobs are processed one at a time,
+// highest priority first and FIFO within a priority.
+func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
+	var roots []string
+	for _, r := range opts.OutputRoots {
+		if r == "" {
+			continue
+		}
+		if real, err := resolveExisting(r); err == nil {
+			roots = append(roots, real)
+		}
+	}
+	m := &Manager{
+		roots:    roots,
+		confined: len(opts.OutputRoots) > 0,
+		jobs:     make(map[string]*ExportJob),
+		requests: make(map[string]ExportRequest),
+		queue:    pq.New[*workItem](),
+		sink:     ev,
+		manager:  pm,
+		cache:    opts.Cache,
+	}
+	var stats fgStatsFunc
+	if pm != nil {
+		stats = pm.ForegroundStats
+	}
+	m.bw = newBWController(stats, float64(opts.FloorBps))
+	m.active.Add(1)
+	go func() {
+		defer m.active.Done()
+		m.worker()
+	}()
+	return m
+}
+
+// Enqueue adds a new export job to the queue and returns its descriptor.
+func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
+	if req.AssetID == "" {
+		return nil, fmt.Errorf("assetId is required")
+	}
+	if !validToolPath(req.Options.FFmpegPath, "ffmpeg") {
+		return nil, fmt.Errorf("options.ffmpegPath must name an ffmpeg binary")
+	}
+	if !validToolPath(req.Options.VLCPath, "vlc", "cvlc") {
+		return nil, fmt.Errorf("options.vlcPath must name a vlc or cvlc binary")
+	}
+	if err := checkToolExecutable(req.Options.FFmpegPath, "ffmpeg"); err != nil {
+		return nil, fmt.Errorf("options.ffmpegPath: %w", err)
+	}
+	if err := checkToolExecutable(req.Options.VLCPath, "vlc", "cvlc"); err != nil {
+		return nil, fmt.Errorf("options.vlcPath: %w", err)
+	}
+	if req.OutputDir == "" {
+		req.OutputDir = defaultOutputDir()
+	}
+	absDir, err := normalizeOutputDir(req.OutputDir)
+	if err != nil {
+		return nil, err
+	}
+	req.OutputDir = absDir
+	if err := m.checkOutputDir(req.OutputDir); err != nil {
+		return nil, err
+	}
+	if req.Options.ArtworkSize <= 0 {
+		req.Options.ArtworkSize = defaultArtworkSize
+	}
+	if req.Options.OverwritePolicy == "" {
+		req.Options.OverwritePolicy = "skip"
+	}
+	if req.Options.LrcFormat == "" {
+		req.Options.LrcFormat = "lrc"
+	}
+	if req.Options.LrcType == "" {
+		req.Options.LrcType = "lyrics"
+	}
+
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job := &ExportJob{
+		ID:         newExportID(),
+		AssetID:    req.AssetID,
+		Phase:      PhaseQueued,
+		QueuePos:   m.seq.Add(1),
+		Priority:   req.Priority,
+		Title:      req.HintTitle,
+		ArtistName: req.HintArtist,
+		ArtworkURL: req.HintArtwork,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+		ctx:        jobCtx,
+		cancel:     cancel,
+	}
+
+	// Keep credentials only in the queued work item: finished jobs can sit in
+	// the list indefinitely, and Retry is given fresh tokens anyway.
+	stored := req
+	stored.Token, stored.MUT = "", ""
+	m.mu.Lock()
+	if !m.queue.Push(job.ID, &workItem{job: job, req: req, ctx: jobCtx}, req.Priority) {
+		m.mu.Unlock()
+		cancel()
+		return nil, fmt.Errorf("export queue is closed")
+	}
+	m.jobs[job.ID] = job
+	m.requests[job.ID] = stored
+	m.mu.Unlock()
+
+	m.emit(job, 0, "")
+	return job, nil
+}
+
+// stopWait bounds how long Stop waits for running exports to end. Cancelled jobs
+// stop their VLC/FFmpeg children (SIGTERM, then a kill after toolStopGrace), so
+// this stays under the Electron lifecycle's kill delay; a variable so a test can
+// lower it.
+var stopWait = 2500 * time.Millisecond
+
+// Stop closes the export queue, cancels every job (which also stops their VLC and
+// FFmpeg children) and waits, bounded by stopWait, for the worker and every
+// post-process goroutine, so no child keeps writing after the engine exits. No new
+// jobs should be enqueued afterwards.
+func (m *Manager) Stop() {
+	m.queue.Close()
+	m.mu.RLock()
+	for _, j := range m.jobs {
+		j.cancel()
+	}
+	m.mu.RUnlock()
+	done := make(chan struct{})
+	go func() {
+		m.active.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(stopWait):
+		log.Printf("export: stop timed out after %v with work still running", stopWait)
+	}
+}
+
+// worker processes items one at a time, highest priority first.
+func (m *Manager) worker() {
+	for {
+		item, ok := m.queue.Pop()
+		if !ok {
+			return
+		}
+		if m.run != nil {
+			m.run(item)
+			continue
+		}
+		m.execute(item)
+	}
+}
+
+// Errors returned by Prioritize.
+var (
+	ErrJobNotFound = errors.New("job not found")
+	ErrNotQueued   = errors.New("job is not queued")
+)
+
+// Prioritize changes the priority of a queued job and returns its updated
+// snapshot. A job that is already running (or finished) is never reordered.
+func (m *Manager) Prioritize(id string, prio int) (*ExportJob, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return nil, ErrJobNotFound
+	}
+	if !m.queue.Update(id, prio) {
+		return nil, ErrNotQueued
+	}
+	j.Priority = prio
+	j.UpdatedAt = time.Now()
+	return m.snapshotLocked(j, m.queuePositions()), nil
+}
+
+// queuePositions maps queued job IDs to their 1-based run order, from one
+// sorted snapshot of the queue.
+func (m *Manager) queuePositions() map[string]int {
+	snap := m.queue.Snapshot()
+	pos := make(map[string]int, len(snap))
+	for i, e := range snap {
+		pos[e.ID] = i + 1
+	}
+	return pos
+}
+
+// Get returns a snapshot of a job's current state, or (nil, false) if unknown.
+// Returns a copy so the caller can safely serialise it without holding the lock.
+func (m *Manager) Get(id string) (*ExportJob, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return nil, false
+	}
+	return m.snapshotLocked(j, m.queuePositions()), true
+}
+
+// List returns snapshots of all known jobs.
+// Returns copies so callers can safely serialise them without holding the lock.
+func (m *Manager) List() []*ExportJob {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*ExportJob, 0, len(m.jobs))
+	pos := m.queuePositions()
+	for _, j := range m.jobs {
+		out = append(out, m.snapshotLocked(j, pos))
+	}
+	return out
+}
+
+// Cancel cancels or removes a job by id.
+//   - queued:   removed from the queue immediately and marked cancelled.
+//   - running:  its context is cancelled; the worker observes it and the job
+//     ends in the cancelled phase. (A job the worker has just popped is
+//     running: the queue no longer holds it, so Remove reports false.)
+//   - terminal (done/failed/cancelled): removed from the map entirely — this
+//     is what the "Clear done" button uses.
+//
+// Returns false if the job is not found.
+func (m *Manager) Cancel(id string) bool {
+	m.mu.Lock()
+	j, ok := m.jobs[id]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	switch j.Phase {
+	case PhaseDone, PhaseFailed, PhaseCancelled:
+		delete(m.jobs, id)
+		delete(m.requests, id)
+		m.mu.Unlock()
+		return true
+	}
+	if _, queued := m.queue.Remove(id); queued {
+		j.Phase = PhaseCancelled
+		j.UpdatedAt = time.Now()
+		m.mu.Unlock()
+		j.cancel()
+		m.emit(j, 0, "")
+		return true
+	}
+	m.mu.Unlock()
+	j.cancel()
+	return true
+}
+
+// Retry re-enqueues the original request for a failed or cancelled job with
+// the given current credentials (stored requests carry none).
+// Returns (newJob, true) on success, or (nil, false) if the job is unknown
+// or not in a retryable state (failed or cancelled).
+func (m *Manager) Retry(id, token, mut string) (*ExportJob, bool) {
+	m.mu.RLock()
+	j, ok := m.jobs[id]
+	req, hasReq := m.requests[id]
+	var phase Phase
+	if j != nil {
+		phase = j.Phase
+	}
+	m.mu.RUnlock()
+
+	if !ok || !hasReq {
+		return nil, false
+	}
+	if phase != PhaseFailed && phase != PhaseCancelled {
+		return nil, false
+	}
+	req.Token, req.MUT = token, mut
+	newJob, err := m.Enqueue(req)
+	if err != nil {
+		return nil, false
+	}
+	return newJob, true
+}
+
+// resolvedAttrs holds normalized track metadata populated from either the
+// music-video or song catalog API response.
+type resolvedAttrs struct {
+	trackName, artistName, albumName string
+	artworkURL, genreStr             string
+	releaseDate, contentRating       string
+	composerName, isrc               string
+	audioTraits                      []string
+	durationMs, trackNumber          int
+	discNumber, trackTotal           int
+	copyright, recordLabel, upc      string
+	hasLyrics, isMastered            bool
+}
+
+// fetchVideoAttrs resolves track metadata from the music-video API.
+func fetchVideoAttrs(ctx context.Context, sf, assetID, lang, token string, opts ExportOptions) (resolvedAttrs, error) {
+	mv, err := ampapi.GetMusicVideoRespContext(ctx, sf, assetID, lang, token)
+	if err != nil || len(mv.Data) == 0 {
+		return resolvedAttrs{}, fmt.Errorf("music video %s not found in %s: %w", assetID, sf, err)
+	}
+	a := mv.Data[0].Attributes
+	ra := resolvedAttrs{
+		trackName:     a.Name,
+		artistName:    a.ArtistName,
+		albumName:     a.AlbumName,
+		artworkURL:    a.Artwork.URL,
+		durationMs:    a.DurationInMillis,
+		isrc:          a.Isrc,
+		trackNumber:   a.TrackNumber,
+		discNumber:    a.DiscNumber,
+		releaseDate:   a.ReleaseDate,
+		contentRating: a.ContentRating,
+		hasLyrics:     opts.EmbedLyrics || opts.SaveLrcSidecar,
+	}
+	if len(a.GenreNames) > 0 {
+		ra.genreStr = a.GenreNames[0]
+	}
+	if len(mv.Data[0].Relationships.Albums.Data) > 0 {
+		al := mv.Data[0].Relationships.Albums.Data[0].Attributes
+		ra.trackTotal = al.TrackCount
+		ra.copyright = al.Copyright
+		ra.recordLabel = al.RecordLabel
+		ra.upc = al.Upc
+	}
+	return ra, nil
+}
+
+// fetchSongAttrsOrExpand resolves song metadata, or expands an album/single
+// into per-track jobs. Returns (attrs, true, nil) when the asset was expanded
+// (caller should return immediately), (attrs, false, nil) on success,
+// or (zero, false, err) on failure.
+func (m *Manager) fetchSongAttrsOrExpand(ctx context.Context, sf string, req ExportRequest, job *ExportJob, lang string) (resolvedAttrs, bool, error) {
+	song, err := ampapi.GetSongRespContext(ctx, sf, req.AssetID, lang, req.Token)
+	if err != nil || len(song.Data) == 0 {
+		album, aerr := ampapi.GetAlbumRespContext(ctx, sf, req.AssetID, lang, req.Token)
+		if aerr == nil && len(album.Data) > 0 && len(album.Data[0].Relationships.Tracks.Data) > 0 {
+			for _, track := range album.Data[0].Relationships.Tracks.Data {
+				if track.Type != "songs" && track.Type != "music-videos" {
+					continue
+				}
+				trackReq := req
+				trackReq.AssetID = track.ID
+				if track.Type == "music-videos" {
+					trackReq.Capabilities.Video = true
+				}
+				m.Enqueue(trackReq) //nolint:errcheck
+			}
+			m.mu.Lock()
+			delete(m.jobs, job.ID)
+			delete(m.requests, job.ID)
+			m.mu.Unlock()
+			return resolvedAttrs{}, true, nil
+		}
+		return resolvedAttrs{}, false, fmt.Errorf("song %s not found in %s: %w", req.AssetID, sf, err)
+	}
+	a := song.Data[0].Attributes
+	ra := resolvedAttrs{
+		trackName:     a.Name,
+		artistName:    a.ArtistName,
+		albumName:     a.AlbumName,
+		artworkURL:    a.Artwork.URL,
+		durationMs:    a.DurationInMillis,
+		isrc:          a.Isrc,
+		trackNumber:   a.TrackNumber,
+		discNumber:    a.DiscNumber,
+		releaseDate:   a.ReleaseDate,
+		contentRating: a.ContentRating,
+		composerName:  a.ComposerName,
+		hasLyrics:     a.HasLyrics,
+		audioTraits:   a.AudioTraits,
+		isMastered:    a.IsMasteredForItunes || a.IsAppleDigitalMaster,
+	}
+	if len(a.GenreNames) > 0 {
+		ra.genreStr = a.GenreNames[0]
+	}
+	if len(song.Data[0].Relationships.Albums.Data) > 0 {
+		al := song.Data[0].Relationships.Albums.Data[0].Attributes
+		ra.trackTotal = al.TrackCount
+		ra.copyright = al.Copyright
+		ra.recordLabel = al.RecordLabel
+		ra.upc = al.Upc
+	}
+	return ra, false, nil
+}
+
+// deriveCodecExt returns codec label and file extension for the export capabilities.
+func deriveCodecExt(cap ExportCapabilities, opts ExportOptions) (codec, ext string) {
+	codec, ext = "aac", "m4a"
+	switch {
+	case cap.Video:
+		codec, ext = "mv", "mp4"
+	case cap.Atmos:
+		codec = "atmos"
+	case cap.Lossless:
+		codec = "alac"
+	}
+	if opts.ConvertToFLAC && cap.Lossless && !cap.Video {
+		ext = "flac"
+	}
+	return codec, ext
+}
+
+// deriveQuality returns the quality label for template and display use.
+func deriveQuality(cap ExportCapabilities, audioTraits []string) string {
+	switch {
+	case cap.Video:
+		return "MV"
+	case cap.Atmos:
+		return "Atmos"
+	case cap.Lossless:
+		for _, t := range audioTraits {
+			if t == "hi-res-lossless" {
+				return "Hi-Res Lossless"
+			}
+		}
+		return "Lossless"
+	default:
+		return "AAC"
+	}
+}
+
+// bitrateForCapabilities returns a conservative bytes-per-millisecond estimate.
+func bitrateForCapabilities(cap ExportCapabilities) int64 {
+	switch {
+	case cap.Video:
+		return 8_000_000 / 8_000 // ~1 MB/s
+	case cap.Atmos:
+		return 768_000 / 8_000 // ~96 B/ms
+	case cap.Lossless:
+		return 1_500_000 / 8_000 // ~188 B/ms
+	default:
+		return 256_000 / 8_000 // ~32 B/ms
+	}
+}
+
+// execute runs one export job through the full pipeline.
+func (m *Manager) execute(item *workItem) {
+	job := item.job
+	req := item.req
+	ctx := item.ctx
+
+	defer func() {
+		if r := recover(); r != nil {
+			m.fail(job, fmt.Errorf("panic: %v", r))
+		}
+	}()
+
+	// Cancelled between Pop and here: end cleanly without doing any work.
+	if ctx.Err() != nil {
+		m.fail(job, ctx.Err())
+		return
+	}
+
+	// ── Phase 1: Resolve catalog metadata ────────────────────────────────
+	m.advance(job, PhaseResolving, 0)
+
+	sf := req.Storefront
+	if sf == "" {
+		sf = "us"
+	}
+	lang := req.Language
+	if lang == "" {
+		lang = "en-US"
+	}
+
+	// ── Playlist expansion (before per-track resolution) ─────────────────
+	if m.expandCollection(ctx, req, job, sf, lang) {
+		return
+	}
+
+	var ra resolvedAttrs
+	if req.Capabilities.Video {
+		var err error
+		ra, err = fetchVideoAttrs(ctx, sf, req.AssetID, lang, req.Token, req.Options)
+		if err != nil {
+			m.fail(job, err)
+			return
+		}
+	} else {
+		var expanded bool
+		var err error
+		ra, expanded, err = m.fetchSongAttrsOrExpand(ctx, sf, req, job, lang)
+		if expanded {
+			return
+		}
+		if err != nil {
+			m.fail(job, err)
+			return
+		}
+	}
+
+	codec, ext := deriveCodecExt(req.Capabilities, req.Options)
+
+	m.mu.Lock()
+	job.Title = ra.trackName
+	job.ArtistName = ra.artistName
+	job.ArtworkURL = ra.artworkURL
+	m.mu.Unlock()
+
+	meta := TrackMeta{
+		Title:         ra.trackName,
+		ArtistName:    ra.artistName,
+		AlbumArtist:   ra.artistName,
+		AlbumName:     ra.albumName,
+		TrackNumber:   ra.trackNumber,
+		TrackTotal:    ra.trackTotal,
+		DiscNumber:    ra.discNumber,
+		ReleaseDate:   ra.releaseDate,
+		Genre:         ra.genreStr,
+		Composer:      ra.composerName,
+		Copyright:     ra.copyright,
+		RecordLabel:   ra.recordLabel,
+		Isrc:          ra.isrc,
+		UPC:           ra.upc,
+		ContentRating: ra.contentRating,
+		DurationMs:    ra.durationMs,
+		ArtworkURL:    ra.artworkURL,
+		HasLyrics:     ra.hasLyrics,
+	}
+
+	quality := deriveQuality(req.Capabilities, ra.audioTraits)
+
+	// Derive {tag} from ContentRating + Apple Digital Master flag.
+	tag := ""
+	switch ra.contentRating {
+	case "explicit":
+		tag = req.Options.ExplicitChoice
+	case "clean":
+		tag = req.Options.CleanChoice
+	}
+	if ra.isMastered {
+		tag += req.Options.MasterChoice
+	}
+
+	vars := templateVar{
+		Title:       ra.trackName,
+		Artist:      ra.artistName,
+		AlbumArtist: ra.artistName,
+		Album:       ra.albumName,
+		TrackNumber: ra.trackNumber,
+		DiscNumber:  ra.discNumber,
+		Year:        yearFromDate(ra.releaseDate),
+		Genre:       ra.genreStr,
+		Quality:     quality,
+		Tag:         tag,
+		ReleaseDate: ra.releaseDate,
+		Isrc:        ra.isrc,
+		SongID:      req.AssetID,
+		URLArtist:   slugify(ra.artistName),
+		Codec:       codec,
+		Ext:         ext,
+	}
+
+	relPath := renderTemplate(req.FilenameTemplate, vars)
+	outPath := filepath.Join(req.OutputDir, relPath)
+	// Path traversal guard: ensure the final path is inside OutputDir.
+	cleanOut := filepath.Clean(outPath)
+	cleanDir := filepath.Clean(req.OutputDir)
+	if !strings.HasPrefix(cleanOut, cleanDir+string(filepath.Separator)) {
+		m.fail(job, fmt.Errorf("filename template escapes output directory"))
+		return
+	}
+
+	// ── Phase 2: Overwrite check ──────────────────────────────────────────
+	finalPath, skip := overwritePath(outPath, req.Options.OverwritePolicy)
+	if skip {
+		m.setOutput(job, finalPath)
+		m.advance(job, PhaseDone, 100)
+		return
+	}
+
+	// ── Phase 3: Download + decrypt via engine ────────────────────────────
+	m.advance(job, PhaseDownloading, 0)
+
+	tmpPath, ok := m.downloadToTemp(ctx, req, job, sf, lang, finalPath, ra.durationMs)
+	if !ok {
+		return
+	}
+
+	// ctx is the job's own context (not an HTTP request's), so post-processing
+	// already survives client disconnects; keeping it lets Cancel/Stop end it.
+	m.active.Add(1)
+	go func() {
+		defer m.active.Done()
+		m.runPostProcess(ctx, req, job, meta, tmpPath, finalPath)
+	}()
+}
+
+// downloadToTemp opens a playback session, streams to a temp file, and returns
+// the temp file path. Returns ("", false) on any error (already called m.fail).
+func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *ExportJob, sf, lang, finalPath string, durationMs int) (string, bool) {
+	// Exports are background work: they must not count as playback, or the
+	// prefetcher would defer cache-warming while a download runs.
+	ctx = playback.WithClass(ctx, playback.Background)
+	if durationMs > 0 {
+		m.mu.Lock()
+		job.BytesTotal = int64(durationMs) * bitrateForCapabilities(req.Capabilities)
+		m.mu.Unlock()
+	}
+
+	if err := ensureDir(filepath.Dir(finalPath)); err != nil {
+		m.fail(job, fmt.Errorf("mkdir %s: %w", filepath.Dir(finalPath), err))
+		return "", false
+	}
+	tmpPath := filepath.Join(filepath.Dir(finalPath), "."+job.ID+".am-export.tmp")
+
+	// Prefer bytes playback already fetched: committed cache, then the tail of
+	// an in-progress playback download, and only then the network.
+	if !req.Capabilities.Video && m.reuseCachedAudio(ctx, req, job, tmpPath) {
+		return tmpPath, true
+	}
+	if ctx.Err() != nil {
+		m.fail(job, ctx.Err())
+		return "", false
+	}
+	m.setSource(job, SourceNetwork)
+	// Only the network path competes with playback, so only it is throttled.
+	m.bw.start()
+	defer m.bw.stop()
+
+	sess, err := m.manager.Open(ctx, playback.OpenRequest{
+		AssetID:     req.AssetID,
+		Storefront:  sf,
+		Token:       req.Token,
+		MUT:         req.MUT,
+		Language:    lang,
+		Lossless:    req.Capabilities.Lossless,
+		Atmos:       req.Capabilities.Atmos,
+		Video:       req.Capabilities.Video,
+		MVMaxHeight: req.MVMaxHeight,
+		Private:     true, // our Release must never delete a session playback is serving
+	})
+	if err != nil {
+		m.fail(job, fmt.Errorf("open session: %w", err))
+		return "", false
+	}
+
+	if req.Capabilities.Video {
+		if err := m.streamVideoAudio(ctx, req, job, sess.ID, tmpPath); err != nil {
+			return "", false
+		}
+	} else {
+		// Stream straight to the temp file: buffering in memory held a whole
+		// track (~250 MB for hi-res ALAC) per export.
+		f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			m.manager.Release(sess.ID)
+			m.fail(job, fmt.Errorf("create temp: %w", err))
+			return "", false
+		}
+		pw := m.bw.writer(ctx, &progressWriter{w: f, mu: &m.mu, job: job})
+		streamErr := m.manager.Stream(ctx, sess.ID, pipeline.KindAudio, pw)
+		m.manager.Release(sess.ID)
+		closeErr := f.Close()
+		if streamErr == nil {
+			streamErr = closeErr
+		}
+		if streamErr != nil {
+			os.Remove(tmpPath)
+			m.fail(job, fmt.Errorf("stream: %w", streamErr))
+			return "", false
+		}
+	}
+	return tmpPath, true
+}
+
+// streamVideoAudio streams video+audio tracks to separate temp files, muxes them,
+// and leaves the result at tmpPath. Returns error (already called m.fail) on failure.
+func (m *Manager) streamVideoAudio(ctx context.Context, req ExportRequest, job *ExportJob, sessID, tmpPath string) error {
+	videoTmp := tmpPath + ".video"
+	vf, err := os.Create(videoTmp)
+	if err != nil {
+		m.manager.Release(sessID)
+		m.fail(job, fmt.Errorf("create video tmp: %w", err))
+		return err
+	}
+	vpw := m.bw.writer(ctx, &progressWriter{w: vf, mu: &m.mu, job: job})
+	if err := m.manager.Stream(ctx, sessID, pipeline.KindVideo, vpw); err != nil {
+		vf.Close()
+		os.Remove(videoTmp)
+		m.manager.Release(sessID)
+		m.fail(job, fmt.Errorf("stream video: %w", err))
+		return err
+	}
+	vf.Close()
+
+	audioTmp := tmpPath + ".audio"
+	af, err := os.Create(audioTmp)
+	if err != nil {
+		os.Remove(videoTmp)
+		m.manager.Release(sessID)
+		m.fail(job, fmt.Errorf("create audio tmp: %w", err))
+		return err
+	}
+	if err := m.manager.Stream(ctx, sessID, pipeline.KindAudio, m.bw.writer(ctx, af)); err != nil {
+		af.Close()
+		os.Remove(videoTmp)
+		os.Remove(audioTmp)
+		m.manager.Release(sessID)
+		m.fail(job, fmt.Errorf("stream audio: %w", err))
+		return err
+	}
+	af.Close()
+	m.manager.Release(sessID)
+
+	ffPath := req.Options.FFmpegPath
+	if ffPath == "" {
+		ffPath = "ffmpeg"
+	}
+	if err := muxVideoAudio(ctx, ffPath, videoTmp, audioTmp, tmpPath); err != nil {
+		os.Remove(videoTmp)
+		os.Remove(audioTmp)
+		m.fail(job, fmt.Errorf("mux video+audio: %w (ffmpeg required)", err))
+		return err
+	}
+	os.Remove(videoTmp)
+	os.Remove(audioTmp)
+	return nil
+}
+
+// fetchMVLyrics fetches TTML lyrics for a music video, embeds a subtitle track
+// into tmpPath if possible, and returns the sidecar string in the requested format.
+func fetchMVLyrics(ctx context.Context, sf, assetID, lang, token, mut, tmpPath string, opts ExportOptions) string {
+	ttml, lerr := lyrics.GetContext(ctx, sf, assetID, opts.LrcType, lang, "ttml", token, mut)
+	if lerr != nil || ttml == "" {
+		return ""
+	}
+	srtStr, _ := lyrics.TtmlToSrt(ttml)
+	if srtStr != "" {
+		srtTmp := tmpPath + ".srt"
+		if werr := os.WriteFile(srtTmp, []byte(srtStr), 0o644); werr == nil {
+			ffPath := opts.FFmpegPath
+			if ffPath == "" {
+				ffPath = "ffmpeg"
+			}
+			if serr := addSubtitleTrack(ctx, ffPath, tmpPath, srtTmp); serr != nil {
+				log.Printf("export %s: subtitle embed warning: %v", assetID, serr)
+			}
+			os.Remove(srtTmp)
+		}
+	}
+	switch opts.LrcFormat {
+	case "ttml":
+		return ttml
+	case "srt":
+		return srtStr
+	case "vtt":
+		vtt, _ := lyrics.TtmlToVtt(ttml)
+		return vtt
+	default:
+		lrc, _ := lyrics.TtmlToLrc(ttml)
+		return lrc
+	}
+}
+
+func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *ExportJob, meta TrackMeta, tmpPath, finalPath string) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.fail(job, fmt.Errorf("post-process panic: %v", r))
+		}
+	}()
+	sf := req.Storefront
+	if sf == "" {
+		sf = "us"
+	}
+	lang := req.Language
+	if lang == "" {
+		lang = "en-US"
+	}
+	m.advance(job, PhaseTagging, 80)
+
+	// ── Phase 5: Fetch lyrics if requested ───────────────────────────
+	var lrcStr string
+	if (req.Options.EmbedLyrics || req.Options.SaveLrcSidecar) && meta.HasLyrics {
+		if req.Capabilities.Video {
+			lrcStr = fetchMVLyrics(ctx, sf, req.AssetID, lang, req.Token, req.MUT, tmpPath, req.Options)
+		} else {
+			lrcStr, _ = lyrics.GetContext(ctx,
+				sf, req.AssetID,
+				req.Options.LrcType, lang, req.Options.LrcFormat,
+				req.Token, req.MUT,
+			)
+		}
+	}
+
+	// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────
+	if !req.Capabilities.Video {
+		if err := TagFile(tmpPath, meta, TagOptions{
+			Ctx:          ctx,
+			EmbedArtwork: req.Options.EmbedArtwork,
+			ArtworkSize:  req.Options.ArtworkSize,
+			Lyrics:       lrcStr,
+		}); err != nil {
+			log.Printf("export %s: tag warning: %v", req.AssetID, err)
+		}
+	}
+
+	// ── Phase 7: LRC sidecar ─────────────────────────────────────────
+	if req.Options.SaveLrcSidecar && lrcStr != "" {
+		lrcExt := req.Options.LrcFormat
+		if lrcExt == "" {
+			lrcExt = "lrc"
+		}
+		lrcPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + "." + lrcExt
+		_ = os.WriteFile(lrcPath, []byte(lrcStr), 0o644)
+	}
+
+	// ── Phase 8: Format conversion (optional) ────────────────────────
+	if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
+		tmpPath, finalPath = convertFLAC(ctx, req, meta, tmpPath, finalPath)
+	}
+
+	// ── Phase 9: Move temp → final ────────────────────────────────────
+	if ctx.Err() != nil { // cancelled during post-processing: leave nothing behind
+		os.Remove(tmpPath) //nolint:errcheck
+		m.fail(job, ctx.Err())
+		return
+	}
+	m.advance(job, PhaseMoving, 96)
+	// The existence check in Phase 2 ran long ago and another job may have
+	// produced the same file since, so the policy is enforced atomically here.
+	dest, err := moveNoClobber(tmpPath, finalPath, req.Options.OverwritePolicy)
+	if err != nil {
+		os.Remove(tmpPath) //nolint:errcheck
+		m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err))
+		return
+	}
+	finalPath = dest
+	m.setOutput(job, finalPath)
+	m.advance(job, PhaseDone, 100)
+}
+
+// expandCollection handles playlist and library-playlist expansion. Returns true
+// when the job was a collection router (caller should return immediately).
+func (m *Manager) expandCollection(ctx context.Context, req ExportRequest, job *ExportJob, sf, lang string) bool {
+	if !req.Capabilities.Playlist {
+		return false
+	}
+	if req.Capabilities.LibraryPlaylist {
+		tracks, err := ampapi.GetLibraryPlaylistTracksContext(ctx, req.AssetID, lang, req.Token, req.MUT)
+		if err != nil || len(tracks.Data) == 0 {
+			m.fail(job, fmt.Errorf("library playlist %s: %w", req.AssetID, err))
+			return true
+		}
+		for _, track := range tracks.Data {
+			catalogID := track.Attributes.PlayParams.CatalogId
+			if catalogID == "" {
+				continue
+			}
+			trackReq := req
+			trackReq.AssetID = catalogID
+			trackReq.Capabilities.Playlist = false
+			trackReq.Capabilities.LibraryPlaylist = false
+			if track.Type == "library-music-videos" {
+				trackReq.Capabilities.Video = true
+			}
+			m.Enqueue(trackReq) //nolint:errcheck
+		}
+	} else {
+		pl, err := ampapi.GetPlaylistRespContext(ctx, sf, req.AssetID, lang, req.Token, req.MUT)
+		if err != nil || len(pl.Data) == 0 || len(pl.Data[0].Relationships.Tracks.Data) == 0 {
+			m.fail(job, fmt.Errorf("playlist %s: %w", req.AssetID, err))
+			return true
+		}
+		for _, track := range pl.Data[0].Relationships.Tracks.Data {
+			if track.Type != "songs" && track.Type != "music-videos" {
+				continue
+			}
+			trackReq := req
+			trackReq.AssetID = track.ID
+			trackReq.Capabilities.Playlist = false
+			if track.Type == "music-videos" {
+				trackReq.Capabilities.Video = true
+			}
+			m.Enqueue(trackReq) //nolint:errcheck
+		}
+	}
+	m.mu.Lock()
+	delete(m.jobs, job.ID)
+	delete(m.requests, job.ID)
+	m.mu.Unlock()
+	return true
+}
+
+// convertFLAC converts tmpPath (ALAC fMP4) to FLAC, returning the updated
+// tmpPath and finalPath. Prefers VLC decode → ffmpeg tag; falls back to
+// ffmpeg all-in-one.
+func convertFLAC(ctx context.Context, req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (string, string) {
+	flacTmp := tmpPath + ".flac"
+	ffpathFlac := req.Options.FFmpegPath
+	if ffpathFlac == "" {
+		ffpathFlac = "ffmpeg"
+	}
+	vlcBin, hasVLC := findVLC(req.Options.VLCPath)
+	converted := false
+	if hasVLC {
+		rawFlac := flacTmp + ".raw.flac"
+		if err := runVLCToFLAC(ctx, vlcBin, tmpPath, rawFlac); err != nil {
+			log.Printf("export %s: vlc transcode failed: %v — trying ffmpeg", req.AssetID, err)
+			os.Remove(rawFlac) //nolint:errcheck
+		} else {
+			artArg := downloadArtworkToTemp(ctx, req, meta, rawFlac)
+			if tagErr := tagFLAC(ctx, ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
+				log.Printf("export %s: flac tag failed: %v — retrying without art", req.AssetID, tagErr)
+				os.Remove(flacTmp) //nolint:errcheck
+				if tagErr2 := tagFLAC(ctx, ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
+					log.Printf("export %s: flac tag failed (no art): %v — keeping raw", req.AssetID, tagErr2)
+					if renErr := os.Rename(rawFlac, flacTmp); renErr != nil {
+						os.Remove(rawFlac) //nolint:errcheck
+					}
+				} else {
+					os.Remove(rawFlac) //nolint:errcheck
+				}
+			} else {
+				os.Remove(rawFlac) //nolint:errcheck
+			}
+			if artArg != "" {
+				os.Remove(artArg) //nolint:errcheck
+			}
+			if !req.Options.KeepOriginal {
+				os.Remove(tmpPath) //nolint:errcheck
+			}
+			tmpPath = flacTmp
+			converted = true
+		}
+	}
+	if !converted {
+		if err := runFFmpeg(ctx, ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
+			log.Printf("export %s: flac conversion failed: %v — keeping .m4a", req.AssetID, err)
+			finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
+		} else {
+			if !req.Options.KeepOriginal {
+				os.Remove(tmpPath) //nolint:errcheck
+			}
+			tmpPath = flacTmp
+		}
+	}
+	return tmpPath, finalPath
+}
+
+// downloadArtworkToTemp downloads artwork to a temp file alongside rawFlac and
+// returns its path (empty string if skipped or failed).
+func downloadArtworkToTemp(ctx context.Context, req ExportRequest, meta TrackMeta, rawFlac string) string {
+	if !req.Options.EmbedArtwork || meta.ArtworkURL == "" {
+		return ""
+	}
+	artTmp := rawFlac + ".art.jpg"
+	artBytes, _, err := downloadArtworkBytes(ctx, meta.ArtworkURL, req.Options.ArtworkSize)
+	if err != nil {
+		return ""
+	}
+	if err := os.WriteFile(artTmp, artBytes, 0o644); err != nil {
+		return ""
+	}
+	return artTmp
+}
+
+// progressWriter wraps an io.Writer and updates job.BytesDone + Percent on
+// each write so the UI can show live byte-based download progress.
+type progressWriter struct {
+	w   io.Writer
+	mu  *sync.RWMutex
+	job *ExportJob
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.w.Write(p)
+	if n > 0 {
+		pw.mu.Lock()
+		pw.job.BytesDone += int64(n)
+		if total := pw.job.BytesTotal; total > 0 {
+			pct := int(pw.job.BytesDone * 79 / total)
+			if pct > 79 {
+				pct = 79
+			}
+			pw.job.Percent = pct
+		}
+		pw.mu.Unlock()
+	}
+	return n, err
+}
+
+// ── playback byte reuse ───────────────────────────────────────────────────────
+
+// exportAudioQualifier returns the disk-cache qualifier playback would use for
+// this request. Playback keys its cache by sess.Codec, which the provider
+// derives from the request flags *and* the track's traits (a lossless request
+// for a track without lossless audio yields AAC). The request-only mapping
+// here can therefore miss a reusable entry, but never match wrong content: an
+// "alac" or "atmos" entry exists only for tracks that carry that trait, so a
+// miss just falls back to the network.
+func exportAudioQualifier(c ExportCapabilities) string {
+	switch {
+	case c.Atmos:
+		return string(pipeline.CodecAtmos)
+	case c.Lossless:
+		return string(pipeline.CodecALAC)
+	default:
+		return string(pipeline.CodecAAC)
+	}
+}
+
+// reuseCachedAudio tries to fill tmpPath from bytes playback already fetched.
+// Order: committed cache file, then the tail of an in-progress playback
+// download. It returns true only when tmpPath holds the complete track; on any
+// failure the partial temp file is removed and progress reset, so the caller's
+// fresh network stream never appends to a partial copy.
+func (m *Manager) reuseCachedAudio(ctx context.Context, req ExportRequest, job *ExportJob, tmpPath string) bool {
+	if m.cache == nil {
+		return false
+	}
+	q := exportAudioQualifier(req.Capabilities)
+
+	if path, ok := m.cache.Path(req.AssetID, q); ok {
+		f, err := os.Open(path)
+		if err == nil {
+			err = m.copyToTemp(ctx, job, tmpPath, f)
+		}
+		if err == nil {
+			m.setSource(job, SourceCache)
+			return true
+		}
+		log.Printf("[export] %s: cache copy failed, falling back: %v", job.ID, err)
+	}
+
+	if r, ok := m.cache.TailReader(req.AssetID, q); ok {
+		m.setSource(job, SourcePlayback)
+		err := m.copyToTemp(ctx, job, tmpPath, r)
+		if err == nil {
+			return true
+		}
+		log.Printf("[export] %s: playback tail failed, falling back to network: %v", job.ID, err)
+	}
+	return false
+}
+
+// copyToTemp copies r (which it closes) into a fresh tmpPath, counting
+// progress. A playback tail Read can block on its producer and is not
+// context-aware, so the copy runs in a goroutine: on cancellation the temp
+// file is closed and removed, which makes the goroutine's next write fail and
+// exit (it closes r on the way out). Any failure leaves no temp file behind.
+func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string, r io.ReadCloser) error {
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		r.Close()
+		return err
+	}
+	m.resetProgress(job)
+	done := make(chan error, 1)
+	go func() {
+		defer r.Close()
+		_, copyErr := io.Copy(&progressWriter{w: f, mu: &m.mu, job: job}, r)
+		// The goroutine owns f exclusively — close it here so the parent goroutine
+		// never races f.Close() against an in-progress Write.
+		if cerr := f.Close(); copyErr == nil {
+			copyErr = cerr
+		}
+		done <- copyErr
+	}()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		// Signal the goroutine to stop by closing the reader. This unblocks any
+		// blocking Read (e.g. a live tail reader) so the goroutine can exit and
+		// close f cleanly. We do not wait on <-done because some Close()
+		// implementations are no-ops; the goroutine will eventually fail its
+		// next write and self-exit.
+		r.Close()
+		err = ctx.Err()
+	}
+	if err != nil {
+		os.Remove(tmpPath)
+		m.resetProgress(job)
+	}
+	return err
+}
+
+// snapshotLocked copies j for API clients (caller holds m.mu). LimitBps is
+// the export limit in force at snapshot time — only a job streaming from the
+// network is throttled; nil means unlimited.
+func (m *Manager) snapshotLocked(j *ExportJob, pos map[string]int) *ExportJob {
+	cp := *j
+	cp.QueueIndex = pos[j.ID]
+	cp.LimitBps = nil
+	if cp.Phase == PhaseDownloading && cp.Source == SourceNetwork && m.bw != nil {
+		cp.LimitBps = m.bw.currentLimit()
+	}
+	cp.Throttled = cp.LimitBps != nil
+	return &cp
+}
+
+func (m *Manager) resetProgress(job *ExportJob) {
+	m.mu.Lock()
+	job.BytesDone = 0
+	job.Percent = 0
+	m.mu.Unlock()
+}
+
+func (m *Manager) setSource(job *ExportJob, src string) {
+	m.mu.Lock()
+	job.Source = src
+	m.mu.Unlock()
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func (m *Manager) advance(job *ExportJob, phase Phase, pct int) {
+	m.mu.Lock()
+	// A late update from a goroutine that lost a race (cancel, failure) must not revive or rewind a job.
+	if !canTransition(job.Phase, phase) {
+		m.mu.Unlock()
+		return
+	}
+	job.Phase = phase
+	job.Percent = pct
+	job.UpdatedAt = time.Now()
+	m.mu.Unlock()
+	m.emit(job, pct, "")
+}
+
+// fail ends job. A job whose context was cancelled (Cancel on a running job)
+// ends in PhaseCancelled rather than PhaseFailed.
+func (m *Manager) fail(job *ExportJob, err error) {
+	m.mu.Lock()
+	if job.Phase.IsTerminal() { // already finished: a late error must not overwrite the outcome
+		m.mu.Unlock()
+		return
+	}
+	job.Phase = PhaseFailed
+	if job.ctx != nil && job.ctx.Err() != nil {
+		job.Phase = PhaseCancelled
+	}
+	job.Error = err.Error()
+	job.UpdatedAt = time.Now()
+	m.mu.Unlock()
+	m.emit(job, 0, err.Error())
+}
+
+func (m *Manager) setOutput(job *ExportJob, path string) {
+	m.mu.Lock()
+	job.Output = path
+	job.UpdatedAt = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Manager) emit(job *ExportJob, pct int, errMsg string) {
+	if m.sink == nil {
+		return
+	}
+	m.mu.RLock()
+	ev := ExportEvent{
+		JobID:   job.ID,
+		AssetID: job.AssetID,
+		Phase:   job.Phase,
+		Percent: pct,
+		Output:  job.Output,
+		Error:   errMsg,
+	}
+	m.mu.RUnlock()
+	m.sink(ev)
+}
+
+func newExportID() string {
+	b := make([]byte, 6)
+	rand.Read(b) //nolint:errcheck
+	return hex.EncodeToString(b)
+}
+
+// copyFile copies src to dst through a temp file in dst's directory and renames
+// it into place, so a failure never leaves a partial dst or damages an existing one.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp(filepath.Dir(dst), ".am-copy-*")
+	if err != nil {
+		return err
+	}
+	name := out.Name()
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(name, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(name, dst)
+	}
+	if err != nil {
+		os.Remove(name) //nolint:errcheck
+	}
+	return err
+}
+
+// errFFmpegUnavailable is returned when ffmpeg is not on PATH.
+var errFFmpegUnavailable = errors.New("ffmpeg not found; install ffmpeg or set FFmpegPath")

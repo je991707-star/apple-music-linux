@@ -1,0 +1,199 @@
+// Package fairplay is the sole DRM adapter in the engine.
+//
+// It exposes two things:
+//
+//  1. LicenseProvider — given key metadata from an HLS playlist, acquires a
+//     Decryptor.  This is the only type in the entire engine that holds key
+//     bytes; they enter fairplayDecryptor and never leave it.
+//
+//  2. HLSSource — builds a pipeline.Source that downloads HLS segments.
+//     This function lives here rather than in engine/hls because
+//     utils/aacstream is the authorised segment downloader and, outside main,
+//     this is the only engine package permitted to import it (see archtest).
+//
+// Trust boundary: key bytes enter the unexported fairplayDecryptor struct via
+// LicenseProvider.Open and are passed directly to aacstream.DecryptMP4Streaming.
+// They are never stored, logged, or returned to any caller above this package.
+package fairplay
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+
+	"engine/core/hls"
+	"engine/core/pipeline"
+	"engine/core/tracer"
+	"engine/utils/aacstream"
+)
+
+// WarmLicensePool pre-establishes a TLS connection to Apple's FairPlay license
+// server so the first AcquireKey call skips the handshake latency. Call once
+// at engine startup from a goroutine.
+func WarmLicensePool(ctx context.Context) { aacstream.WarmLicensePool(ctx) }
+
+// ── Licence acquisition ───────────────────────────────────────────────────────
+
+// LicenseRequest carries the key metadata extracted from an encrypted HLS
+// media playlist.  All fields come from the playlist; none are invented here.
+type LicenseRequest struct {
+	AssetID        string // Apple Music asset ID — needed in the licence request body
+	KIDBase64      string // base64 key ID from EXT-X-KEY URI (after the comma)
+	URIPrefix      string // KSM URI prefix from EXT-X-KEY URI (before the comma)
+	Token          string // bearer token (without "Bearer " prefix)
+	MediaUserToken string
+}
+
+// LicenseProvider acquires a Decryptor for one encrypted stream.
+// It is the only interface in the engine that touches DRM key material.
+type LicenseProvider interface {
+	Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error)
+}
+
+// ErrLicenceRefused is reported (wrapped) when the licence server refuses a key. Callers outside this package may not
+// import utils/aacstream, so it is re-exported here.
+var ErrLicenceRefused = aacstream.ErrLicenceRefused
+
+// New returns the default LicenseProvider backed by utils/aacstream.
+func New() LicenseProvider { return &fpLicenseProvider{} }
+
+type fpLicenseProvider struct{}
+
+func (p *fpLicenseProvider) Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error) {
+	return p.open(ctx, req, false)
+}
+
+func (p *fpLicenseProvider) open(ctx context.Context, req LicenseRequest, forceRefresh bool) (pipeline.Decryptor, error) {
+	tr := tracer.FromContext(ctx)
+	tr.RecordLicenseStart()
+	keyAndIV, err := aacstream.AcquireKey(ctx,
+		req.AssetID, req.KIDBase64, req.URIPrefix, req.Token, req.MediaUserToken, forceRefresh)
+	tr.RecordLicenseEnd()
+	if err != nil {
+		return nil, fmt.Errorf("fairplay licence: %w", err)
+	}
+	return &fairplayDecryptor{key: keyAndIV.Key, iv: keyAndIV.IV, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
+}
+
+// fairplayDecryptor is the ONLY type in the engine that holds key bytes.
+// It is unexported; callers receive it only through the pipeline.Decryptor interface.
+type fairplayDecryptor struct {
+	key       []byte
+	iv        []byte // Initialization vector from CKC
+	kid       string // kidBase64 — for cache invalidation on decrypt error
+	uriPrefix string
+}
+
+func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
+	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, d.iv, w)
+	if d.kid != "" && shouldEvictKey(ctx, err) {
+		// Evict the stale cached key so the next session Open re-negotiates.
+		// Matches Android FootHillDecryptionKey.fetchKeyData(forceRefresh=true)
+		// which bypasses the key cache after a decrypt failure.
+		aacstream.InvalidateKey(d.kid, d.uriPrefix)
+	}
+	return err
+}
+
+// shouldEvictKey reports whether a decrypt failure may mean a stale key. A
+// cancelled request (user skipped) or a closed downstream pipe is not a key
+// problem; evicting on those would force a licence round-trip on every skip.
+func shouldEvictKey(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrClosedPipe)
+}
+
+// ── HLS segment source ────────────────────────────────────────────────────────
+
+type hlsSource struct {
+	urls []string
+}
+
+func (s *hlsSource) Stream(ctx context.Context, w io.Writer) error {
+	return aacstream.DownloadSegmentsParallel(ctx, s.urls, w, 3)
+}
+
+// HLSSeekableSource returns a pipeline.SeekableSource backed by a full HLS
+// media playlist.  Unlike HLSSource (which bakes in a fixed URL list),
+// HLSSeekableSource retains the playlist so it can recompute the URL slice
+// for an arbitrary seek time via Media.URLsFrom.
+func HLSSeekableSource(med *hls.Media) pipeline.SeekableSource {
+	return &hlsSeekableSource{media: med}
+}
+
+type hlsSeekableSource struct {
+	media *hls.Media
+}
+
+func (s *hlsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
+	return aacstream.DownloadSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
+}
+
+func (s *hlsSeekableSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
+	urls, actual := s.media.URLsFrom(startSec)
+	return &hlsSource{urls: urls}, actual
+}
+
+// HLSMVVideoSource returns a pipeline.SeekableSource for an MV video playlist,
+// using the separate MV segment cache (larger capacity, independently toggleable).
+func HLSMVVideoSource(med *hls.Media) pipeline.SeekableSource {
+	return &hlsMVVideoSource{media: med}
+}
+
+type hlsMVVideoSource struct{ media *hls.Media }
+
+func (s *hlsMVVideoSource) Stream(ctx context.Context, w io.Writer) error {
+	return aacstream.DownloadMVSegmentsStreaming(ctx, s.media.AllURLs(), w, 5)
+}
+
+func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
+	// URLsFromExact: no step-back since FFmpeg resets timestamps from 0 at each
+	// HLS segment boundary, so no TFDT-overlap context is needed.
+	urls, actual := s.media.URLsFromExact(startSec)
+	return &hlsMVVideoRaw{urls: urls}, actual
+}
+
+// DirectSourceFrom plans a fragment-level seek: only the fragment holding startSec
+// and everything after it is fetched, instead of the whole segment containing it.
+func (s *hlsMVVideoSource) DirectSourceFrom(ctx context.Context, startSec float64) (pipeline.Source, pipeline.DirectInfo, error) {
+	idx, segStart, ok := s.media.SegmentFor(startSec)
+	if !ok || s.media.InitURL == "" {
+		return nil, pipeline.DirectInfo{}, aacstream.ErrDirectUnsupported
+	}
+	plan, err := aacstream.PlanDirectSeek(ctx, s.media.InitURL, s.media.SegmentURLs[idx],
+		s.media.SegmentURLs[idx+1:], startSec-segStart)
+	if err != nil {
+		return nil, pipeline.DirectInfo{}, err
+	}
+	// The raw timeline sits at a constant offset from the playlist's (10.000s for
+	// Apple MVs); measure it from the segment's own first fragment, to the millisecond.
+	base := math.Round((plan.RawSegStart-segStart)*1000) / 1000
+	return plan, pipeline.DirectInfo{StartSec: plan.RawFragStart - base, TsOffset: -base}, nil
+}
+
+func (s *hlsMVVideoSource) SegmentTimings() []float64 {
+	return s.media.CumulativeSegmentTimes()
+}
+
+type hlsMVVideoRaw struct{ urls []string }
+
+func (s *hlsMVVideoRaw) Stream(ctx context.Context, w io.Writer) error {
+	return aacstream.DownloadMVSegmentsStreaming(ctx, s.urls, w, 5)
+}
+
+// ── Passthrough (AAC clear content) ──────────────────────────────────────────
+
+// PassthroughDecryptor returns a Decryptor that strips the PSSH box from the
+// init segment and copies all fragments to output unchanged. Use for AAC
+// content that Apple Music CDN serves without content-level encryption.
+func PassthroughDecryptor() pipeline.Decryptor { return &passthroughDecryptor{} }
+
+type passthroughDecryptor struct{}
+
+func (p *passthroughDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
+	return aacstream.PassthroughStreaming(ctx, r, w)
+}

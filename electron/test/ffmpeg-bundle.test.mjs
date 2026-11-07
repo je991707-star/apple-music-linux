@@ -1,0 +1,63 @@
+// The packages bundle a prebuilt minimal FFmpeg (third_party/ffmpeg). Its binary does the engine's
+// music-video and export work; its libraries are the ones VLC's libavcodec plugin loads. Neither may
+// depend on the host's FFmpeg, whose version differs between distros.
+//
+//   node --test electron/test/ffmpeg-bundle.test.mjs
+import { test } from 'node:test';
+import { engineLibEnv } from '../platform.mjs';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const dir = path.dirname(fileURLToPath(import.meta.url));
+const ELECTRON = path.join(dir, '..');
+const FF = path.join(ELECTRON, '..', 'third_party', 'ffmpeg');
+const MAIN = readFileSync(path.join(ELECTRON, 'main.mjs'), 'utf8');
+// CI checks out without Git LFS, so the binaries are ~130-byte pointer files there; the tests that
+// run or inspect them only make sense on a real checkout.
+const isReal = (f) => existsSync(f) && !readFileSync(f, { encoding: 'latin1', flag: 'r' }).slice(0, 40).startsWith('version https://git-lfs');
+const REAL = isReal(path.join(FF, 'bin', 'ffmpeg'));
+const PKG = JSON.parse(readFileSync(path.join(ELECTRON, 'package.json'), 'utf8'));
+
+test('the engine is started with the bundled ffmpeg first on PATH and its libraries visible to VLC', () => {
+    const e = engineLibEnv({ plat: 'linux', env: { PATH: '/usr/bin' }, vlcDir: '/v', ffDir: '/f', resDir: '/r', hasVlc: true, hasFfmpeg: true });
+    assert.ok(e.PATH.startsWith('/f/bin:'), 'bundled ffmpeg must come first on PATH');
+    assert.match(e.LD_LIBRARY_PATH, /^\/v:\/f\/lib/);
+    assert.match(MAIN, /\.\.\.libEnv/, 'main.mjs must pass the library environment to the engine');
+});
+
+test('electron-builder ships third_party/ffmpeg as resources/ffmpeg', () => {
+    const r = [...(PKG.build.extraResources || []), ...(PKG.build.linux?.extraResources || [])].find((e) => e.from === '../third_party/ffmpeg');
+    assert.ok(r, 'extraResources entry missing');
+    assert.equal(r.to, 'ffmpeg');
+});
+
+test('the prebuilt binary and the sonames the VLC plugins link are present', { skip: !REAL && 'Git LFS binaries not checked out' }, () => {
+    for (const f of ['bin/ffmpeg', 'lib/libavcodec.so.63', 'lib/libavformat.so.63', 'lib/libavutil.so.61']) {
+        assert.ok(existsSync(path.join(FF, f)), `${f} missing (git lfs pull?)`);
+    }
+});
+
+test('the bundled ffmpeg runs from its own libraries with an empty environment', { skip: !REAL && 'Git LFS binaries not checked out' }, () => {
+    const out = execFileSync(path.join(FF, 'bin', 'ffmpeg'), ['-hide_banner', '-version'], { env: {}, encoding: 'utf8' });
+    assert.match(out, /^ffmpeg version 9\.0\.2/);
+    const ldd = execFileSync('ldd', [path.join(FF, 'bin', 'ffmpeg')], { env: {}, encoding: 'utf8' });
+    for (const lib of ['libavcodec', 'libavformat', 'libavutil']) {
+        const line = ldd.split('\n').find((l) => l.includes(lib + '.so'));
+        assert.ok(line && line.includes(path.join('third_party', 'ffmpeg')), `${lib} must resolve inside third_party/ffmpeg: ${line}`);
+    }
+});
+
+test('no bundled FFmpeg file needs a newer glibc than the other packaged binaries (2.38)', { skip: !REAL && 'Git LFS binaries not checked out' }, () => {
+    const files = ['bin/ffmpeg', ...readdirSync(path.join(FF, 'lib')).filter((f) => /\.so\.\d+\.\d+\.\d+$/.test(f)).map((f) => 'lib/' + f)];
+    const ver = (v) => v.split('.').map(Number);
+    const newer = (a, b) => { for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); } return false; };
+    for (const f of files) {
+        const out = execFileSync('objdump', ['-T', path.join(FF, f)], { encoding: 'utf8' });
+        for (const m of out.matchAll(/GLIBC_(\d+(?:\.\d+)*)/g)) {
+            assert.ok(!newer(ver(m[1]), [2, 38]), `${f} needs GLIBC_${m[1]}: rebuild with scripts/build-ffmpeg.sh (inside the SDK), not on a rolling host`);
+        }
+    }
+});

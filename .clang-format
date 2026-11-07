@@ -1,0 +1,18 @@
+# C/C++ style for Adam's own sources in drm/. Vendored code (drm/native: main.c,
+# main.cpp, cmdline.*, hybris_stubs.c, drm_lib.*, import.h, hybris_types.h; and
+# third-party cJSON.*, dobby.h) is left exactly as upstream ships it; see
+# FORMAT_SRCS in drm/Makefile for the formatted set.
+BasedOnStyle: LLVM
+IndentWidth: 4
+BreakBeforeBraces: Linux
+ColumnLimit: 0
+SortIncludes: Never
+ReflowComments: false
+AlignConsecutiveMacros: true
+AlignTrailingComments: true
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortFunctionsOnASingleLine: All
+AllowShortBlocksOnASingleLine: Always
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+IndentCaseLabels: true

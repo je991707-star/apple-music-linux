@@ -1,0 +1,613 @@
+// Package diskcache caches decrypted audio tracks to disk so that replaying a
+// track skips the HLS download + decryption pipeline entirely.
+//
+// Cache layout:
+//
+//	{dir}/{assetID}-{qualifier}.m4a          ← committed entry
+//	{dir}/{assetID}-{qualifier}.m4a.tmp      ← in-progress write (deleted on abort)
+//
+// The qualifier is the codec name (aac, alac, atmos, …), optionally suffixed
+// with "_raw" when the caller requested the native container without transcode.
+// Files are named with only alphanumeric/hyphen/underscore chars so the dir is
+// ls-friendly with no shell quoting needed.
+//
+// Eviction is size-based (LRU by mtime) and TTL-based; both are enforced lazily
+// after each successful write.  Callers set limits via SetConfig; zero means
+// unlimited/no-expiry.
+package diskcache
+
+import (
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_\-]`)
+
+// Cache is safe for concurrent use.
+type Cache struct {
+	dir string
+
+	limitBytes atomic.Int64 // 0 = unlimited
+	ttlDays    atomic.Int64 // 0 = never expire
+
+	// Evict is requested after every commit; passes are coalesced so a burst of commits
+	// costs one directory scan, not one per commit running concurrently.
+	evicting   atomic.Bool
+	evictAgain atomic.Bool
+
+	// in-flight tracks a put in progress for a given filename so that
+	// concurrent requests for the same track don't both write to temp files.
+	// Value is struct{}; presence means "write in progress".
+	inFlight sync.Map
+
+	// streaming maps filename → *StreamingPutWriter for puts started via
+	// BeginStreamingPut. Lets concurrent Range requests be served from the
+	// in-progress writer (blocking at the byte level) rather than re-downloading
+	// from byte 0. Entries are removed by Commit and Discard.
+	streaming sync.Map
+}
+
+// New returns a Cache rooted at dir, creating it if necessary.
+func New(dir string) (*Cache, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return &Cache{dir: dir}, nil
+}
+
+// SetConfig updates the cache limits atomically.  Zero means unlimited/no-expiry.
+func (c *Cache) SetConfig(limitMB, ttlDays int64) {
+	c.limitBytes.Store(limitMB * 1024 * 1024)
+	c.ttlDays.Store(ttlDays)
+}
+
+func (c *Cache) filename(assetID, qualifier string) string {
+	safe := func(s string) string { return unsafeChars.ReplaceAllString(s, "_") }
+	return safe(assetID) + "-" + safe(qualifier) + ".m4a"
+}
+
+// Path returns the absolute on-disk path of a committed cache entry without
+// opening a file descriptor, or ("", false) on miss or TTL expiry.
+func (c *Cache) Path(assetID, qualifier string) (string, bool) {
+	path := filepath.Join(c.dir, c.filename(assetID, qualifier))
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	ttl := c.ttlDays.Load()
+	if ttl > 0 && time.Since(info.ModTime()) > time.Duration(ttl)*24*time.Hour {
+		os.Remove(path)
+		return "", false
+	}
+	// A hit is a use: callers that open the file themselves (VLC, ServeContent) never go
+	// through Get, and without this their hottest tracks looked oldest to eviction.
+	touchIfStale(path, info)
+	return path, true
+}
+
+// touchIfStale refreshes path's mtime, at most once an hour (see Get).
+func touchIfStale(path string, info os.FileInfo) {
+	if time.Since(info.ModTime()) > time.Hour {
+		now := time.Now()
+		os.Chtimes(path, now, now)
+	}
+}
+
+// Get returns an open *os.File for the cached track, or (nil, false) on miss.
+// The caller must close the file.  A hit may still return false if the entry
+// has expired (it is deleted and treated as a miss).
+func (c *Cache) Get(assetID, qualifier string) (*os.File, bool) {
+	path := filepath.Join(c.dir, c.filename(assetID, qualifier))
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, false
+	}
+
+	ttl := c.ttlDays.Load()
+	if ttl > 0 && time.Since(info.ModTime()) > time.Duration(ttl)*24*time.Hour {
+		os.Remove(path)
+		return nil, false
+	}
+
+	f, err := openShared(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, false
+	}
+
+	// Touch mtime so LRU eviction keeps recently accessed entries.
+	// Throttled to once per hour — byte-range replays for the same file
+	// would otherwise issue a utimes syscall on every range request.
+	touchIfStale(path, info)
+
+	return f, true
+}
+
+// PutWriter is the handle returned by BeginPut.
+// Write to it; then call Commit or Discard.
+type PutWriter struct {
+	*os.File  // the temp file
+	finalPath string
+	key       string
+	cache     *Cache
+	committed bool
+}
+
+// BeginPut opens a temp file for a cache write.  Returns (nil, nil) if another
+// goroutine is already writing the same key (the caller should skip caching).
+func (c *Cache) BeginPut(assetID, qualifier string) (*PutWriter, error) {
+	key := c.filename(assetID, qualifier)
+	if _, loaded := c.inFlight.LoadOrStore(key, struct{}{}); loaded {
+		return nil, nil // already being written; skip
+	}
+
+	tmpPath := filepath.Join(c.dir, key+".tmp")
+	f, err := openShared(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		c.inFlight.Delete(key)
+		return nil, err
+	}
+	return &PutWriter{
+		File:      f,
+		finalPath: filepath.Join(c.dir, key),
+		key:       key,
+		cache:     c,
+	}, nil
+}
+
+// commitRename moves a finished temp file to its final name. Windows will not replace a file that something
+// has open (a replay being served from the same entry, say); there the entry that is already in place is
+// kept and the temp file dropped, since both were built for the same asset and quality and hold the same bytes.
+func commitRename(tmp, final string) error {
+	err := os.Rename(tmp, final)
+	if err != nil && runtime.GOOS == "windows" {
+		if st, statErr := os.Stat(final); statErr == nil && st.Mode().IsRegular() {
+			os.Remove(tmp)
+			return nil
+		}
+	}
+	return err
+}
+
+// Commit closes the temp file and renames it to its final path.
+// After Commit the cache triggers eviction if a size limit is set.
+func (pw *PutWriter) Commit() error {
+	pw.File.Close()
+	pw.committed = true
+	// Rename BEFORE releasing the in-flight marker: once it is gone, a new
+	// BeginPut/BeginStreamingPut may O_TRUNC the same .tmp path, which would
+	// truncate this file just before it becomes the committed entry.
+	err := commitRename(pw.File.Name(), pw.finalPath)
+	if err != nil {
+		os.Remove(pw.File.Name())
+	}
+	pw.cache.inFlight.Delete(pw.key)
+	if err != nil {
+		return err
+	}
+	go pw.cache.Evict() // async so it doesn't block the streaming response
+	return nil
+}
+
+// Discard closes and deletes the temp file without committing.
+func (pw *PutWriter) Discard() {
+	if pw.committed {
+		return
+	}
+	pw.File.Close()
+	os.Remove(pw.File.Name())
+	pw.cache.inFlight.Delete(pw.key)
+}
+
+// Remove deletes a single committed cache entry (no-op if absent). Used for
+// ephemeral entries that must not persist (e.g. MV faststart files when caching
+// is disabled in settings).
+func (c *Cache) Remove(assetID, qualifier string) {
+	os.Remove(filepath.Join(c.dir, c.filename(assetID, qualifier)))
+}
+
+// Stats returns the total size in bytes and file count of committed cache entries.
+func (c *Cache) Stats() (totalBytes int64, count int) {
+	entries, _ := os.ReadDir(c.dir)
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			totalBytes += info.Size()
+			count++
+		}
+	}
+	return
+}
+
+// Clear deletes all committed cache entries (not temp files).
+func (c *Cache) Clear() error {
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		os.Remove(filepath.Join(c.dir, e.Name()))
+	}
+	return nil
+}
+
+// Evict removes the oldest entries (by mtime) until the total size is below
+// the configured limit.  No-op when no limit is set.
+func (c *Cache) Evict() {
+	if !c.evicting.CompareAndSwap(false, true) {
+		c.evictAgain.Store(true) // a pass is running; ask it to go round once more
+		return
+	}
+	defer c.evicting.Store(false)
+	for {
+		c.evictOnce()
+		if !c.evictAgain.Swap(false) {
+			return
+		}
+	}
+}
+
+func (c *Cache) evictOnce() {
+	limit := c.limitBytes.Load()
+	if limit == 0 {
+		return
+	}
+
+	type entry struct {
+		path  string
+		size  int64
+		mtime time.Time
+	}
+
+	entries, _ := os.ReadDir(c.dir)
+	var files []entry
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, entry{
+			path:  filepath.Join(c.dir, e.Name()),
+			size:  info.Size(),
+			mtime: info.ModTime(),
+		})
+		total += info.Size()
+	}
+	if total <= limit {
+		return
+	}
+
+	// Oldest first.
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].mtime.Before(files[j].mtime)
+	})
+	for _, f := range files {
+		if total <= limit {
+			break
+		}
+		os.Remove(f.path)
+		total -= f.size
+	}
+}
+
+// ── Streaming put ─────────────────────────────────────────────────────────────
+
+// StreamingPutWriter writes to a temp file while StreamingReaders read from it
+// concurrently. Readers block (via sync.Cond) when they catch up to the writer
+// and unblock as soon as more bytes arrive.
+//
+// Usage:
+//
+//	spw, _ := cache.BeginStreamingPut(assetID, qualifier)
+//	go func() {
+//	    if err := fillFrom(spw); err != nil { spw.Discard() } else { spw.Commit() }
+//	}()
+//	reader := spw.NewReader()
+//	defer reader.Close()
+//	io.Copy(dst, reader)
+type StreamingPutWriter struct {
+	file      *os.File
+	finalPath string
+	key       string
+	cache     *Cache
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	written  int64
+	done     bool  // set by Commit or Discard
+	writeErr error // non-nil when Discard was called
+
+	refs atomic.Int32 // 1 (writer) + N readers; file closes when it hits 0
+}
+
+// BeginStreamingPut opens a temp file with O_RDWR so concurrent readers can
+// ReadAt while the writer appends. Returns (nil, nil) if another goroutine is
+// already writing the same key.
+func (c *Cache) BeginStreamingPut(assetID, qualifier string) (*StreamingPutWriter, error) {
+	key := c.filename(assetID, qualifier)
+	if _, loaded := c.inFlight.LoadOrStore(key, struct{}{}); loaded {
+		return nil, nil
+	}
+	tmpPath := filepath.Join(c.dir, key+".tmp")
+	f, err := openShared(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		c.inFlight.Delete(key)
+		return nil, err
+	}
+	sw := &StreamingPutWriter{
+		file:      f,
+		finalPath: filepath.Join(c.dir, key),
+		key:       key,
+		cache:     c,
+	}
+	sw.cond = sync.NewCond(&sw.mu)
+	sw.refs.Store(1) // writer holds the initial reference
+	c.streaming.Store(key, sw)
+	return sw, nil
+}
+
+// GetStreaming returns the in-progress StreamingPutWriter for the given asset,
+// or nil if none exists. Callers can obtain a reader via spw.NewReaderAt to
+// serve Range requests from the partially-written file while the download runs.
+func (c *Cache) GetStreaming(assetID, qualifier string) *StreamingPutWriter {
+	key := c.filename(assetID, qualifier)
+	if v, ok := c.streaming.Load(key); ok {
+		return v.(*StreamingPutWriter)
+	}
+	return nil
+}
+
+func (sw *StreamingPutWriter) Write(p []byte) (int, error) {
+	n, err := sw.file.Write(p)
+	if n > 0 {
+		sw.mu.Lock()
+		sw.written += int64(n)
+		sw.mu.Unlock()
+		sw.cond.Broadcast()
+	}
+	return n, err
+}
+
+// decRef decrements the reference count and closes the file when it reaches zero.
+func (sw *StreamingPutWriter) decRef() {
+	if sw.refs.Add(-1) == 0 {
+		sw.file.Close()
+	}
+}
+
+// Commit renames the temp file to its final path and signals all readers that
+// writing is done. Call exactly once after all Write calls succeed.
+func (sw *StreamingPutWriter) Commit() error {
+	// Rename BEFORE releasing the in-flight/streaming markers (see PutWriter.Commit).
+	// Readers keep working across the rename: they hold the open descriptor.
+	err := commitRename(sw.file.Name(), sw.finalPath)
+	if err != nil {
+		os.Remove(sw.file.Name())
+	}
+	sw.cache.inFlight.Delete(sw.key)
+	sw.cache.streaming.Delete(sw.key)
+	sw.mu.Lock()
+	sw.done = true
+	sw.writeErr = err
+	sw.mu.Unlock()
+	sw.cond.Broadcast()
+	sw.decRef()
+	if err != nil {
+		return err
+	}
+	go sw.cache.Evict()
+	return nil
+}
+
+// Discard deletes the temp file and signals readers with an error.
+// Call exactly once when writing fails or is abandoned.
+func (sw *StreamingPutWriter) Discard() {
+	os.Remove(sw.file.Name())
+	sw.cache.inFlight.Delete(sw.key)
+	sw.cache.streaming.Delete(sw.key)
+	sw.mu.Lock()
+	sw.done = true
+	sw.writeErr = errors.New("streaming cache download failed or was abandoned")
+	sw.mu.Unlock()
+	sw.cond.Broadcast()
+	sw.decRef()
+}
+
+// NewReader returns a StreamingReader that reads from the temp file as it is
+// written. The caller must call Close on the reader when done.
+// Written returns the number of bytes written so far. Safe to call concurrently.
+func (sw *StreamingPutWriter) Written() int64 {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.written
+}
+
+func (sw *StreamingPutWriter) NewReader() *StreamingReader {
+	sw.refs.Add(1)
+	return &StreamingReader{sw: sw}
+}
+
+// NewReaderAt returns a StreamingReader that begins at offset bytes into the
+// file. Reads block when the reader catches up to the writer, just like
+// NewReader, but start from the given byte offset rather than zero. Use this
+// to serve HTTP Range requests from an in-progress streaming download.
+func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
+	sw.refs.Add(1)
+	return &StreamingReader{sw: sw, pos: offset}
+}
+
+// NewFromCommitted wraps an already-committed cache entry as a finished
+// StreamingPutWriter so it can be served through the same byte-level read path
+// as an in-progress write. The writer holds one reference; call Release when
+// the caller is done with it. Do NOT call Commit or Discard on the result.
+func (c *Cache) NewFromCommitted(assetID, qualifier string) (*StreamingPutWriter, error) {
+	path := filepath.Join(c.dir, c.filename(assetID, qualifier))
+	f, err := openShared(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	sw := &StreamingPutWriter{
+		file:      f,
+		finalPath: path,
+		key:       c.filename(assetID, qualifier),
+		cache:     c,
+	}
+	sw.cond = sync.NewCond(&sw.mu)
+	sw.mu.Lock()
+	sw.written = info.Size()
+	sw.done = true
+	sw.mu.Unlock()
+	sw.refs.Store(1)
+	return sw, nil
+}
+
+// Release releases the writer's own reference without touching the underlying
+// file on disk. Use this in place of Commit or Discard on a StreamingPutWriter
+// returned by NewFromCommitted. The file descriptor is closed when refs reach zero
+// (i.e. after all readers have also closed).
+func (sw *StreamingPutWriter) Release() { sw.decRef() }
+
+// NewReaderIfActive is NewReader, but returns nil once the writer has
+// committed or discarded — the temp file may already be closed or renamed.
+func (sw *StreamingPutWriter) NewReaderIfActive() *StreamingReader {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.done {
+		return nil
+	}
+	sw.refs.Add(1)
+	return &StreamingReader{sw: sw}
+}
+
+// ErrReaderAborted is returned by Read after Abort.
+var ErrReaderAborted = errors.New("streaming reader aborted")
+
+// StreamingReader implements io.ReadSeeker. It blocks in Read when it has
+// consumed all bytes written so far and resumes when the writer adds more.
+// It returns io.EOF after the writer commits and all bytes have been read.
+// It returns an error if the writer calls Discard.
+type StreamingReader struct {
+	sw      *StreamingPutWriter
+	pos     int64
+	aborted bool // guarded by sw.mu
+}
+
+func (sr *StreamingReader) Read(p []byte) (int, error) {
+	sr.sw.mu.Lock()
+	for sr.pos >= sr.sw.written && !sr.sw.done && !sr.aborted {
+		sr.sw.cond.Wait()
+	}
+	if sr.aborted {
+		sr.sw.mu.Unlock()
+		return 0, ErrReaderAborted
+	}
+	avail := sr.sw.written - sr.pos
+	done := sr.sw.done
+	werr := sr.sw.writeErr
+	sr.sw.mu.Unlock()
+
+	if avail <= 0 && done {
+		if werr != nil {
+			return 0, werr
+		}
+		return 0, io.EOF
+	}
+	// avail > 0: bytes are present in the file at offset sr.pos.
+	toRead := avail
+	if toRead > int64(len(p)) {
+		toRead = int64(len(p))
+	}
+	// ReadAt is safe to call concurrently with Write (pread vs write syscalls).
+	n, err := sr.sw.file.ReadAt(p[:toRead], sr.pos)
+	sr.pos += int64(n)
+	if err == io.EOF {
+		err = nil // writer may append more data
+	}
+	return n, err
+}
+
+// Seek repositions the reader. Seeking past the written length is allowed;
+// the next Read blocks until the writer reaches that offset.
+func (sr *StreamingReader) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+	case io.SeekCurrent:
+		offset += sr.pos
+	default:
+		return sr.pos, errors.New("diskcache: StreamingReader supports SeekStart/SeekCurrent only")
+	}
+	if offset < 0 {
+		return sr.pos, errors.New("diskcache: negative seek offset")
+	}
+	sr.pos = offset
+	return offset, nil
+}
+
+// Size returns the final length once the writer has committed, else -1.
+func (sr *StreamingReader) Size() int64 {
+	sr.sw.mu.Lock()
+	defer sr.sw.mu.Unlock()
+	if sr.sw.done && sr.sw.writeErr == nil {
+		return sr.sw.written
+	}
+	return -1
+}
+
+// Abort unblocks any pending Read; subsequent Reads return ErrReaderAborted.
+// Safe to call from another goroutine.
+func (sr *StreamingReader) Abort() {
+	sr.sw.mu.Lock()
+	sr.aborted = true
+	sr.sw.mu.Unlock()
+	sr.sw.cond.Broadcast()
+}
+
+// Close releases the reader's reference to the underlying file.
+func (sr *StreamingReader) Close() {
+	sr.sw.decRef()
+}
+
+// EvictExpired removes all entries older than the configured TTL.
+// No-op when TTL is zero.
+func (c *Cache) EvictExpired() {
+	ttl := c.ttlDays.Load()
+	if ttl == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(ttl) * 24 * time.Hour)
+	entries, _ := os.ReadDir(c.dir)
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(c.dir, e.Name()))
+		}
+	}
+}

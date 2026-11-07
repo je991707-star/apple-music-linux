@@ -1,0 +1,480 @@
+package ordering
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"engine/core/vlc"
+	"engine/internal/playbackcmd"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+var vlog = log.Default()
+
+const alacStartBytes = 1024
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+type session struct{ AssetID, Codec string }
+type manager struct{ missing map[string]bool }
+
+func (m manager) GetSession(id string) (session, bool) {
+	return session{"synthetic", "alac"}, !m.missing[id] && (id=="a"||id=="b")
+}
+
+type streaming struct{}
+
+func (*streaming) Written() int64 { return 0 }
+
+type cache struct{}
+
+func (*cache) Path(string, string) (string, bool)     { return "", false }
+func (*cache) GetStreaming(string, string) *streaming { return nil }
+
+type priority struct{}
+
+func (priority) Foreground(string, bool) {}
+func (priority) done(string)             {}
+
+type source struct{ aborts, closes atomic.Int32 }
+
+func (*source) Read([]byte) (int, error)       { return 0, io.EOF }
+func (*source) Seek(int64, int) (int64, error) { return 0, nil }
+func (*source) Size() int64                    { return 0 }
+func (s *source) Abort()                       { s.aborts.Add(1) }
+func (s *source) Close()                       { s.closes.Add(1) }
+
+type player struct {
+	mu       sync.Mutex
+	pos      int64
+	paused   bool
+	terminal bool
+	src      vlc.Source
+	ticket   *playbackcmd.Ticket
+}
+
+func (p *player) LoadSource(*source) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pos = 0
+	p.paused = false
+	return nil
+}
+func (p *player) Load(string) error { return p.LoadSource(nil) }
+func (p *player) SetTime(ms int64)  { p.mu.Lock(); defer p.mu.Unlock(); p.pos = ms }
+func (p *player) Pause()            { p.mu.Lock(); defer p.mu.Unlock(); p.paused = true }
+func (p *player) Resume()           { p.mu.Lock(); defer p.mu.Unlock(); p.paused = false }
+func (p *player) Stop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pos = 0
+	if p.src != nil {
+		p.src.Abort()
+		p.src.Close()
+		p.src = nil
+	}
+}
+func (p *player) position() int64 { p.mu.Lock(); defer p.mu.Unlock(); return p.pos }
+
+type APIServer struct {
+	vlcPlayer       *player
+	pm              manager
+	diskCache       *cache
+	alac            priority
+	vlcGate         vlcGate
+	port            int
+	opened, release chan struct{}
+	prepare         func(string) (vlc.Source, error)
+}
+
+func (s *APIServer) openVLCSource(id string, _ string, _ string) (vlc.Source, error) {
+	if s.prepare != nil {
+		return s.prepare(id)
+	}
+	close(s.opened)
+	<-s.release
+	return &source{}, nil
+}
+func TestAcceptedLoadMustNotOverwriteNewerSeek(t *testing.T) {
+	s := &APIServer{vlcPlayer: &player{}, opened: make(chan struct{}), release: make(chan struct{})}
+	s.vlcGate.set("a")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleVLCLoad(httptest.NewRecorder(), httptest.NewRequest("POST", "/load", bytes.NewBufferString(`{"sessionId":"a","startMs":45000}`)))
+	}()
+	select {
+	case <-s.opened:
+	case <-time.After(time.Second):
+		t.Fatal("load preparation deadline")
+	}
+	seek := httptest.NewRecorder()
+	s.handleVLCSeek(seek, httptest.NewRequest("POST", "/seek", bytes.NewBufferString(`{"sessionId":"a","posMs":220000}`)))
+	if seek.Code != 200 || s.vlcPlayer.position() != 220000 {
+		t.Fatal("new seek did not complete")
+	}
+	close(s.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("load completion deadline")
+	}
+	if got := s.vlcPlayer.position(); got != 220000 {
+		t.Fatalf("accepted old Load overwrote completed new Seek: got %d want 220000", got)
+	}
+}
+func TestAcceptedLoadMustNotUndoNewerPause(t *testing.T) {
+	s := &APIServer{vlcPlayer: &player{}, opened: make(chan struct{}), release: make(chan struct{})}
+	s.vlcGate.set("a")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleVLCLoad(httptest.NewRecorder(), httptest.NewRequest("POST", "/load", bytes.NewBufferString(`{"sessionId":"a","startMs":45000}`)))
+	}()
+	select {
+	case <-s.opened:
+	case <-time.After(time.Second):
+		t.Fatal("load preparation deadline")
+	}
+	s.handleVLCPause(httptest.NewRecorder(), httptest.NewRequest("POST", "/pause", nil))
+	close(s.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("load completion deadline")
+	}
+	s.vlcPlayer.mu.Lock()
+	defer s.vlcPlayer.mu.Unlock()
+	if !s.vlcPlayer.paused {
+		t.Fatal("accepted old Load undid completed new Pause")
+	}
+}
+
+func (priority) foregroundLease(string, bool) func() { return func() {} }
+func (p *player) LoadSourceCommand(src vlc.Source, t *playbackcmd.Ticket, ms int64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.src != nil {
+		p.src.Abort()
+		p.src.Close()
+	}
+	p.src = src
+	p.pos = ms
+	p.paused = false
+	p.ticket = t
+	return nil
+}
+func (p *player) LoadCommand(url string, t *playbackcmd.Ticket, ms int64) error {
+	return p.LoadSourceCommand(nil, t, ms)
+}
+func (p *player) SetTimeCommand(ctx context.Context, ms int64, t *playbackcmd.Ticket) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.terminal {
+		return vlc.ErrTerminalSeek
+	}
+	p.pos = ms
+	return nil
+}
+func (p *player) TransportCommand(kind string, t *playbackcmd.Ticket) error {
+	switch kind {
+	case "pause":
+		p.Pause()
+	case "resume":
+		p.Resume()
+	case "stop":
+		p.Stop()
+	}
+	return nil
+}
+func (p *player) Time() (int64, int64, string) { return p.position(), 240000, "playing" }
+func (p *player) Volume() (int, bool)          { return 100, false }
+
+func (p *player) SetVolume(int) {}
+func TestAcceptedLoadMustNotUndoNewerStop(t *testing.T) {
+	s := &APIServer{vlcPlayer: &player{}, opened: make(chan struct{}), release: make(chan struct{})}
+	s.vlcGate.set("a")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleVLCLoad(httptest.NewRecorder(), httptest.NewRequest("POST", "/load", bytes.NewBufferString(`{"sessionId":"a","startMs":45000}`)))
+	}()
+	select {
+	case <-s.opened:
+	case <-time.After(time.Second):
+		t.Fatal("prepare timeout")
+	}
+	s.handleVLCStop(httptest.NewRecorder(), httptest.NewRequest("POST", "/stop", nil))
+	close(s.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("load timeout")
+	}
+	if s.vlcPlayer.position() != 0 || s.vlcGate.owns("a") {
+		t.Fatal("old load revived stopped session")
+	}
+}
+func TestControlRequiresAuthenticationAndOwnership(t *testing.T) {
+	t.Setenv("ADAM_VLC_ORDERED", "1")
+	t.Setenv("ADAM_API_TOKEN", "private-test-token")
+	s := &APIServer{vlcPlayer: &player{}}
+	s.vlcGate.set("a")
+	snap := s.vlcGate.order.Snapshot()
+	body := fmt.Sprintf(`{"boot":%q,"epoch":%q,"sessionId":"a"}`, snap.Boot, snap.Epoch)
+	bad := httptest.NewRecorder()
+	s.handleVLCControl(bad, httptest.NewRequest("POST", "/control", bytes.NewBufferString(body)))
+	if bad.Code != 401 {
+		t.Fatal(bad.Code)
+	}
+	req := httptest.NewRequest("POST", "/control", bytes.NewBufferString(body))
+	req.Header.Set("X-Api-Token", "private-test-token")
+	good := httptest.NewRecorder()
+	s.handleVLCControl(good, req)
+	if good.Code != 200 {
+		t.Fatal(good.Code)
+	}
+	legacy := httptest.NewRecorder()
+	s.handleVLCStop(legacy, httptest.NewRequest("POST", "/stop", nil))
+	if legacy.Code != 409 {
+		t.Fatal("legacy bypass", legacy.Code)
+	}
+	replay := httptest.NewRequest("POST", "/control", bytes.NewBufferString(body))
+	replay.Header.Set("X-Api-Token", "private-test-token")
+	result := httptest.NewRecorder()
+	s.handleVLCControl(result, replay)
+	if result.Code != 409 {
+		t.Fatal("old epoch claim accepted", result.Code)
+	}
+}
+
+func loadRequest(id string, ms int64) *http.Request {
+	return httptest.NewRequest("POST", "/load", bytes.NewBufferString(fmt.Sprintf(`{"sessionId":%q,"startMs":%d}`, id, ms)))
+}
+func TestNewLoadSupersedesPreparation(t *testing.T) {
+	for _, target := range []string{"a", "b"} {
+		t.Run(target, func(t *testing.T) {
+			oldSource, newSource := &source{}, &source{}
+			entered, release := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			s := &APIServer{vlcPlayer: &player{}}
+			s.vlcGate.set("a")
+			s.prepare = func(string) (vlc.Source, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-release
+					return oldSource, nil
+				}
+				return newSource, nil
+			}
+			old := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { defer close(done); s.handleVLCLoad(old, loadRequest("a", 45000)) }()
+			<-entered
+			next := httptest.NewRecorder()
+			s.handleVLCLoad(next, loadRequest(target, 220000))
+			if next.Code != 200 {
+				t.Fatal(next.Code)
+			}
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("stale load leaked")
+			}
+			if old.Code != 409 || s.vlcPlayer.position() != 220000 || !s.vlcGate.owns(target) {
+				t.Fatal("new Load overwritten", old.Code)
+			}
+			if oldSource.aborts.Load() != 1 || oldSource.closes.Load() != 1 || newSource.closes.Load() != 0 {
+				t.Fatal("prepared source ownership violated")
+			}
+			s.handleVLCStop(httptest.NewRecorder(), httptest.NewRequest("POST", "/stop", nil))
+			if newSource.closes.Load() != 1 {
+				t.Fatal("current source leaked")
+			}
+		})
+	}
+}
+func TestLoadTimeoutCannotCommitPreparedSource(t *testing.T) {
+	src := &source{}
+	entered, release := make(chan struct{}), make(chan struct{})
+	s := &APIServer{vlcPlayer: &player{}}
+	s.vlcGate.set("a")
+	s.prepare = func(string) (vlc.Source, error) { close(entered); <-release; return src, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { defer close(done); s.handleVLCLoad(rec, loadRequest("a", 45000).WithContext(ctx)) }()
+	<-entered
+	cancel()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled preparation leaked")
+	}
+	if rec.Code != 408 && rec.Code != 409 {
+		t.Fatal("cancelled Load reported success", rec.Code)
+	}
+	if src.aborts.Load() != 1 || src.closes.Load() != 1 || s.vlcPlayer.position() != 0 {
+		t.Fatal("cancelled source leaked/applied")
+	}
+}
+func TestSuccessfulLoadTicketSurvivesHTTPContextCompletion(t *testing.T) {
+	s := &APIServer{vlcPlayer: &player{}, prepare: func(string) (vlc.Source, error) { return &source{}, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := httptest.NewRecorder()
+	s.handleVLCLoad(rec, loadRequest("a", 45000).WithContext(ctx))
+	cancel()
+	if rec.Code != 200 || s.vlcPlayer.ticket == nil || !s.vlcPlayer.ticket.Valid() {
+		t.Fatal("HTTP completion cancelled active native intent")
+	}
+	s.handleVLCStop(httptest.NewRecorder(), httptest.NewRequest("POST", "/stop", nil))
+}
+
+func TestVersionedHTTPReorderingDuplicateAndRestart(t *testing.T) {
+	t.Setenv("ADAM_VLC_ORDERED", "1")
+	t.Setenv("ADAM_API_TOKEN", "private-test-token")
+	s := &APIServer{vlcPlayer: &player{}}
+	s.vlcGate.set("a")
+	snap := s.vlcGate.order.Snapshot()
+	snap, err := s.vlcGate.order.Claim(snap.Boot, snap.Epoch, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened atomic.Int32
+	s.prepare = func(string) (vlc.Source, error) { opened.Add(1); return &source{}, nil }
+	send := func(server *APIServer, seq, gen uint64) *httptest.ResponseRecorder {
+		cmd := playbackcmd.Identity{Boot: snap.Boot, Epoch: snap.Epoch, Session: "a", Load: gen, Sequence: seq, Type: "load", Request: fmt.Sprint("request-", seq)}
+		body, _ := json.Marshal(map[string]any{"sessionId": "a", "command": cmd})
+		r := httptest.NewRequest("POST", "/load", bytes.NewReader(body))
+		r.Header.Set("X-Api-Token", "private-test-token")
+		w := httptest.NewRecorder()
+		server.handleVLCLoad(w, r)
+		return w
+	}
+	if send(s, 4, 2).Code != 200 || send(s, 2, 1).Code != 409 || send(s, 4, 2).Code != 409 || opened.Load() != 1 {
+		t.Fatal("HTTP reordering/replay reached source preparation")
+	}
+	restarted := &APIServer{vlcPlayer: &player{}}
+	if send(restarted, 5, 3).Code != 409 {
+		t.Fatal("old boot reached new Engine")
+	}
+	previous := snap
+	current := s.vlcGate.order.Snapshot()
+	_, err = s.vlcGate.order.Claim(current.Boot, current.Epoch, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap = previous
+	if send(s, 6, 3).Code != 409 {
+		t.Fatal("obsolete renderer epoch accepted")
+	}
+	s.vlcPlayer.Stop()
+}
+
+func (p *player) QueueTimeCommand(ms int64, t *playbackcmd.Ticket) error { p.SetTime(ms); return nil }
+
+func (p *player) ReloadSourceCommand(ctx context.Context, src vlc.Source, t *playbackcmd.Ticket, ms int64) error {
+	err := p.LoadSourceCommand(src, t, ms)
+	p.mu.Lock()
+	p.terminal = false
+	p.mu.Unlock()
+	return err
+}
+
+func TestTerminalSeekReloadKeepsAcceptedIdentity(t *testing.T) {
+	t.Setenv("ADAM_VLC_ORDERED", "1")
+	t.Setenv("ADAM_API_TOKEN", "private-test-token")
+	src := &source{}
+	s := &APIServer{vlcPlayer: &player{terminal: true}, prepare: func(string) (vlc.Source, error) { return src, nil }}
+	s.vlcGate.set("a")
+	c := s.vlcGate.order.Snapshot()
+	c, err := s.vlcGate.order.Claim(c.Boot, c.Epoch, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := playbackcmd.Identity{Boot: c.Boot, Epoch: c.Epoch, Session: "a", Load: 0, Sequence: 1, Type: "seek", Request: "terminal-identity"}
+	data, _ := json.Marshal(map[string]any{"sessionId": "a", "posMs": 2200, "command": id})
+	req := httptest.NewRequest("POST", "/seek", bytes.NewReader(data))
+	req.Header.Set("X-Api-Token", "private-test-token")
+	w := httptest.NewRecorder()
+	s.handleVLCSeek(w, req)
+	var ack struct {
+		Command  playbackcmd.Identity
+		Reloaded bool
+		Ack      string
+	}
+	json.Unmarshal(w.Body.Bytes(), &ack)
+	if w.Code != 200 || ack.Command != id || !ack.Reloaded || ack.Ack != "seek-dispatched" || s.vlcPlayer.position() != 2200 {
+		t.Fatal("reload identity or ACK changed", w.Code, w.Body.String())
+	}
+	s.vlcPlayer.Stop()
+	if src.aborts.Load() != 1 || src.closes.Load() != 1 {
+		t.Fatal("reload source release")
+	}
+}
+func TestTerminalReloadPreparationCancellationAndUnavailableSource(t *testing.T) {
+	for _, kind := range []string{"pause", "stop", "seek", "timeout", "no-source"} {
+		t.Run(kind, func(t *testing.T) {
+			src := &source{}
+			entered, release := make(chan struct{}), make(chan struct{})
+			s := &APIServer{vlcPlayer: &player{terminal: true}}
+			s.vlcGate.set("a")
+			s.prepare = func(string) (vlc.Source, error) {
+				close(entered)
+				<-release
+				if kind == "no-source" {
+					return nil, nil
+				}
+				return src, nil
+			}
+			ticket, _ := s.vlcGate.order.Admit(nil, "seek", "a")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- s.loadVLCCommand(ctx, ticket, "a", 2200, true) }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("preparation deadline")
+			}
+			if kind == "timeout" {
+				cancel()
+			} else if kind != "no-source" {
+				if _, err := s.vlcGate.order.Admit(nil, kind, "a"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(release)
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("stale or unavailable reload accepted")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("reload cleanup deadline")
+			}
+			if kind != "no-source" && (src.aborts.Load() != 1 || src.closes.Load() != 1) {
+				t.Fatal("source cleanup not exactly once")
+			}
+			if s.vlcPlayer.position() != 0 {
+				t.Fatal("stale/native fallback load executed")
+			}
+		})
+	}
+}
+
+func(p *player)SourceEnded()bool{return false}

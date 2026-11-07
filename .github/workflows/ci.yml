@@ -1,0 +1,131 @@
+name: CI
+
+# Unfinished work is skipped: draft pull requests, pull requests titled "[WIP] ..." or "WIP: ...", and pushes whose
+# message contains "[wip]". Mark the draft ready for review (or drop the WIP from the title) and CI runs. A commit
+# message containing "[skip ci]" is skipped by GitHub itself. The Windows build is manual (see the windows job).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Go engine
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && (github.event.pull_request.draft || contains(github.event.pull_request.title, '[WIP]') || startsWith(github.event.pull_request.title, 'WIP:')))
+      && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[wip]')) }}
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false # tests do not load the Android runtime
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      - name: Install libvlc headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc-plugin-base
+      # Generated files (protoc output) are left as generated: gofmt's alignment changes between Go releases.
+      - name: gofmt
+        run: test -z "$(gofmt -s -l $(git ls-files '*.go' | xargs grep -L '^// Code generated .* DO NOT EDIT\.$') | tee /dev/stderr)"
+      - run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      - run: go test ./...
+
+  electron:
+    name: Electron app
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && (github.event.pull_request.draft || contains(github.event.pull_request.title, '[WIP]') || startsWith(github.event.pull_request.title, 'WIP:')))
+      && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[wip]')) }}
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: electron
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - name: Renderer bundles are up to date
+        run: |
+          npm run build:engine
+          git diff --exit-code -- . ':!dist'
+      - run: node --test test/*.test.mjs test/engine/*.test.mjs
+
+  style:
+    name: C format and shell syntax
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && (github.event.pull_request.draft || contains(github.event.pull_request.title, '[WIP]') || startsWith(github.event.pull_request.title, 'WIP:')))
+      && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[wip]')) }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: clang-format (same version as .clang-format was applied with)
+        run: |
+          pip install --user clang-format==23.1.1
+          export PATH="$HOME/.local/bin:$PATH"
+          clang-format --version
+          make -C drm format-check
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh electron/build.sh; do
+            case "$(head -1 "$f")" in *bash*) bash -n "$f" ;; *) sh -n "$f" ;; esac
+          done
+
+  windows:
+    name: Windows build
+    # Manual only (Actions tab > CI > Run workflow): the Windows DRM runtime is not released yet.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-openssl
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install VLC
+        run: choco install vlc --no-progress -y
+      - name: Build the DRM DLL, engine and VLC subset
+        shell: pwsh
+        run: scripts\build-windows.ps1 -Msys "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" -SkipInstaller
+      - name: Windows platform tests
+        working-directory: electron
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts
+          node --test test/platform.test.mjs test/drm-session-dir.test.mjs

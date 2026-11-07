@@ -1,0 +1,4 @@
+/* Android's libdl exports its symbols under the LIBC version node; Apple's
+ * libraries are linked against it, so the stub must define that node. The
+ * dl* functions themselves are provided by the hybris linker. */
+LIBC { };

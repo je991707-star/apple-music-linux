@@ -1,0 +1,359 @@
+package export
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+func lookFFmpeg(p string) error {
+	if _, err := exec.LookPath(p); err != nil {
+		return errFFmpegUnavailable
+	}
+	return nil
+}
+
+// sanitizeMeta replaces line breaks and NULs in tag values: arguments are
+// passed as argv (no shell), but multi-line or NUL-truncated tags are
+// malformed in most players.
+func sanitizeMeta(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\x00' {
+			return ' '
+		}
+		return r
+	}, v)
+}
+
+// findVLC returns the first VLC binary found on PATH: tries the explicit path,
+// then "cvlc" (headless), then "vlc".
+func findVLC(explicit string) (string, bool) {
+	for _, candidate := range []string{explicit, "cvlc", "vlc"} {
+		if candidate == "" {
+			continue
+		}
+		if _, err := exec.LookPath(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// runVLCToFLAC uses VLC to decode a lossless ALAC .m4a to a raw FLAC file.
+// VLC's native MP4 demuxer correctly processes Apple's identical-tfdt fMP4
+// without dropping fragments, unlike ffmpeg's mov demuxer.
+// The output FLAC has correct audio data but STREAMINFO.total_samples=0
+// (VLC streaming mode); tagFLAC re-encodes it to fix that.
+func runVLCToFLAC(ctx context.Context, vlcPath, src, dst string) error {
+	// Escape VLC sout special characters in the dst path.
+	// '}' closes the option block; ':' and '#' are sout module separators.
+	sout := fmt.Sprintf("#transcode{acodec=flac,channels=2}:std{access=file,mux=raw,dst=%s}",
+		strings.NewReplacer("}", "\\}", ":", "\\:", "#", "\\#").Replace(dst))
+	cmd := toolCommand(ctx, vlcPath,
+		"--intf", "dummy",
+		"--no-video",
+		"--sout", sout,
+		"--play-and-exit",
+		"-q",
+		src,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("vlc transcode: %w", err)
+	}
+	return nil
+}
+
+// tagFLAC encodes src (WAV or raw FLAC from VLC) to FLAC with ffmpeg, embeds
+// metadata tags, and optionally embeds a cover image from artPath.
+// Re-encoding (not -c copy) is required because the source may be WAV PCM and
+// ensures ffmpeg writes correct STREAMINFO.total_samples (fixes Duration: N/A).
+func tagFLAC(ctx context.Context, ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
+	if err := lookFFmpeg(ffmpegPath); err != nil {
+		return err
+	}
+	args := []string{"-i", src}
+	if artPath != "" {
+		args = append(args,
+			"-i", artPath,
+			"-map", "0:a",
+			"-map", "1:v",
+			"-c:a", "flac",
+			"-compression_level", "8",
+			"-c:v", "copy",
+			"-disposition:v", "attached_pic",
+		)
+	} else {
+		args = append(args,
+			"-map", "0:a",
+			"-c:a", "flac",
+			"-compression_level", "8",
+		)
+	}
+	args = append(args, "-map_metadata", "-1")
+
+	if meta.Title != "" {
+		args = append(args, "-metadata", "title="+sanitizeMeta(meta.Title))
+	}
+	if meta.ArtistName != "" {
+		args = append(args, "-metadata", "artist="+sanitizeMeta(meta.ArtistName))
+	}
+	if meta.AlbumArtist != "" {
+		args = append(args, "-metadata", "album_artist="+sanitizeMeta(meta.AlbumArtist))
+	}
+	if meta.AlbumName != "" {
+		args = append(args, "-metadata", "album="+sanitizeMeta(meta.AlbumName))
+	}
+	if meta.TrackNumber > 0 {
+		track := fmt.Sprintf("%d", meta.TrackNumber)
+		if meta.TrackTotal > 0 {
+			track += fmt.Sprintf("/%d", meta.TrackTotal)
+		}
+		args = append(args, "-metadata", "track="+track)
+	}
+	if meta.DiscNumber > 0 {
+		disc := fmt.Sprintf("%d", meta.DiscNumber)
+		if meta.DiscTotal > 0 {
+			disc += fmt.Sprintf("/%d", meta.DiscTotal)
+		}
+		args = append(args, "-metadata", "disc="+disc)
+	}
+	if meta.ReleaseDate != "" {
+		args = append(args, "-metadata", "date="+sanitizeMeta(meta.ReleaseDate))
+	}
+	if meta.Genre != "" {
+		args = append(args, "-metadata", "genre="+sanitizeMeta(meta.Genre))
+	}
+	if meta.Composer != "" {
+		args = append(args, "-metadata", "composer="+sanitizeMeta(meta.Composer))
+	}
+	if meta.Copyright != "" {
+		args = append(args, "-metadata", "copyright="+sanitizeMeta(meta.Copyright))
+	}
+	if meta.RecordLabel != "" {
+		args = append(args, "-metadata", "publisher="+sanitizeMeta(meta.RecordLabel))
+	}
+	if meta.Isrc != "" {
+		args = append(args, "-metadata", "isrc="+sanitizeMeta(meta.Isrc))
+	}
+	if meta.UPC != "" {
+		args = append(args, "-metadata", "barcode="+sanitizeMeta(meta.UPC))
+	}
+
+	args = append(args, "-f", "flac", "-y", dst)
+	cmd := toolCommand(ctx, ffmpegPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg tag flac: %w", err)
+	}
+	return nil
+}
+
+// muxVideoAudio combines a video-only fMP4 and an audio-only fMP4 into a
+// single MP4 with -c copy.  Used for music-video exports where the session
+// returns separate video and audio streams.
+func muxVideoAudio(ctx context.Context, ffmpegPath, videoPath, audioPath, outPath string) error {
+	if err := lookFFmpeg(ffmpegPath); err != nil {
+		return err
+	}
+	cmd := toolCommand(ctx, ffmpegPath,
+		"-i", videoPath,
+		"-i", audioPath,
+		"-map", "0:v",
+		"-map", "1:a",
+		"-c:v", "copy",
+		"-c:a", "copy",
+		"-movflags", "+faststart",
+		"-f", "mp4",
+		"-y",
+		outPath,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg mux: %w", err)
+	}
+	return nil
+}
+
+// addSubtitleTrack adds an SRT subtitle track to an existing MP4 in-place.
+// Runs a second ffmpeg pass and atomically replaces inPath on success.
+func addSubtitleTrack(ctx context.Context, ffmpegPath, inPath, srtPath string) error {
+	if err := lookFFmpeg(ffmpegPath); err != nil {
+		return err
+	}
+	tmp := inPath + ".sub.mp4"
+	cmd := toolCommand(ctx, ffmpegPath,
+		"-i", inPath,
+		"-i", srtPath,
+		"-map", "0:v", "-map", "0:a", "-map", "1:s",
+		"-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
+		"-metadata:s:s:0", "language=eng",
+		"-movflags", "+faststart",
+		"-f", "mp4", "-y", tmp,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("ffmpeg add subtitles: %w", err)
+	}
+	if err := os.Rename(tmp, inPath); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename subtitle output: %w", err)
+	}
+	return nil
+}
+
+// runFFmpeg invokes ffmpeg to transcode src → dst (ALAC .m4a → FLAC).
+// artPath is an optional path to a cover image file; when non-empty it is
+// passed as a second -i input so ffmpeg embeds it as a METADATA_BLOCK_PICTURE,
+// which is more reliable than trying to copy the covr MP4 box across formats.
+// The caller is responsible for cleaning up dst on failure.
+func runFFmpeg(ctx context.Context, ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
+	if err := lookFFmpeg(ffmpegPath); err != nil {
+		return err
+	}
+	args := []string{"-i", src}
+	if artPath != "" {
+		// Explicit artwork file supplied: use it as a second input.
+		args = append(args,
+			"-i", artPath,
+			"-map", "0:a",
+			"-map", "1:v",
+			"-c:a", "flac",
+			"-c:v", "copy",
+			"-disposition:v", "attached_pic",
+		)
+	} else {
+		// No separate artwork file: copy any artwork TagFile already embedded
+		// in the source m4a (covr atom → video stream). The '?' makes the map
+		// optional so ffmpeg does not fail when the source has no artwork.
+		args = append(args,
+			"-map", "0:a",
+			"-map", "0:v?",
+			"-c:a", "flac",
+			"-c:v", "copy",
+			"-disposition:v", "attached_pic",
+		)
+	}
+	args = append(args,
+		"-compression_level", "8",
+		"-map_metadata", "-1", // start clean; explicit -metadata flags below set what we need
+	)
+
+	if meta.Title != "" {
+		args = append(args, "-metadata", "title="+sanitizeMeta(meta.Title))
+	}
+	if meta.ArtistName != "" {
+		args = append(args, "-metadata", "artist="+sanitizeMeta(meta.ArtistName))
+	}
+	if meta.AlbumArtist != "" {
+		args = append(args, "-metadata", "album_artist="+sanitizeMeta(meta.AlbumArtist))
+	}
+	if meta.AlbumName != "" {
+		args = append(args, "-metadata", "album="+sanitizeMeta(meta.AlbumName))
+	}
+	if meta.TrackNumber > 0 {
+		track := fmt.Sprintf("%d", meta.TrackNumber)
+		if meta.TrackTotal > 0 {
+			track += fmt.Sprintf("/%d", meta.TrackTotal)
+		}
+		args = append(args, "-metadata", "track="+track)
+	}
+	if meta.DiscNumber > 0 {
+		disc := fmt.Sprintf("%d", meta.DiscNumber)
+		if meta.DiscTotal > 0 {
+			disc += fmt.Sprintf("/%d", meta.DiscTotal)
+		}
+		args = append(args, "-metadata", "disc="+disc)
+	}
+	if meta.ReleaseDate != "" {
+		args = append(args, "-metadata", "date="+sanitizeMeta(meta.ReleaseDate))
+	}
+	if meta.Genre != "" {
+		args = append(args, "-metadata", "genre="+sanitizeMeta(meta.Genre))
+	}
+	if meta.Composer != "" {
+		args = append(args, "-metadata", "composer="+sanitizeMeta(meta.Composer))
+	}
+	if meta.Copyright != "" {
+		args = append(args, "-metadata", "copyright="+sanitizeMeta(meta.Copyright))
+	}
+	if meta.RecordLabel != "" {
+		args = append(args, "-metadata", "publisher="+sanitizeMeta(meta.RecordLabel))
+	}
+	if meta.Isrc != "" {
+		args = append(args, "-metadata", "isrc="+sanitizeMeta(meta.Isrc))
+	}
+	if meta.UPC != "" {
+		args = append(args, "-metadata", "barcode="+sanitizeMeta(meta.UPC))
+	}
+
+	args = append(args, "-y", dst)
+	cmd := toolCommand(ctx, ffmpegPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg exited: %w", err)
+	}
+	return nil
+}
+
+// validToolPath is the name rule for a tool path from a request: empty (resolve from
+// PATH), a bare tool name, or an absolute path whose file name is the tool or
+// "<tool>-<suffix>" (versioned installs). Tool paths arrive in request bodies from the
+// web page, so they must not be able to point the exporter at an arbitrary executable.
+// It is a pure name check; checkToolExecutable verifies the file itself.
+func validToolPath(p string, names ...string) bool {
+	if p == "" {
+		return true
+	}
+	if strings.ContainsRune(p, 0) || (filepath.IsAbs(p) && filepath.Clean(p) != p) {
+		return false
+	}
+	if !filepath.IsAbs(p) && strings.ContainsRune(p, filepath.Separator) {
+		return false // "bin/ffmpeg": neither a bare name nor absolute
+	}
+	return toolNameOK(filepath.Base(p), names)
+}
+
+func toolNameOK(base string, names []string) bool {
+	if runtime.GOOS == "windows" {
+		base = strings.TrimSuffix(strings.ToLower(base), ".exe")
+	}
+	for _, n := range names {
+		if base == n || strings.HasPrefix(base, n+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkToolExecutable verifies that an absolute tool path is what it claims to be: a
+// regular, executable file (after resolving symlinks, which must still carry the tool's
+// name) owned by root or the current user and not writable by anyone else, in a
+// directory nobody else can write to. Bare names are left to PATH lookup.
+func checkToolExecutable(p string, names ...string) error {
+	if p == "" || !filepath.IsAbs(p) {
+		return nil
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return fmt.Errorf("%s: %w", p, err)
+	}
+	if !toolNameOK(filepath.Base(resolved), names) {
+		return fmt.Errorf("%s resolves to %s, which is not the expected tool", p, resolved)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	return checkToolTrust(resolved, info)
+}

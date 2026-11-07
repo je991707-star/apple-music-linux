@@ -1,0 +1,65 @@
+package playback
+
+import (
+	"time"
+
+	"engine/core/pipeline"
+)
+
+// Session is the public session descriptor returned to API clients.
+// It contains no DRM material and is safe to serialise to JSON.
+// Every field with a json tag is client-visible; there are no unexported fields.
+type Session struct {
+	ID         string `json:"sessionId"`
+	AssetID    string `json:"assetId"`
+	Storefront string `json:"storefront"`
+	Type       string `json:"type"` // "song" | "mv"
+
+	Codec         string `json:"codec,omitempty"`
+	SampleRate    int    `json:"sampleRate,omitempty"`
+	BitDepth      int    `json:"bitDepth,omitempty"`
+	BitRate       int    `json:"bitRate,omitempty"`
+	ChannelCount  int    `json:"channelCount,omitempty"`
+	CodecMIMEType string `json:"codecMimeType,omitempty"`
+	SpatialAudio  string `json:"spatialAudio,omitempty"` // "binaural" | "binaural-lossless"
+
+	Capabilities struct {
+		Audio      bool   `json:"audio"`
+		Video      bool   `json:"video"`
+		Lyrics     bool   `json:"lyrics"`
+		Seekable   bool   `json:"seekable"`   // true when audio stream supports ?t= restart
+		VideoCodec string `json:"videoCodec"` // fMP4 codec string for MSE SourceBuffer (MV only)
+	} `json:"capabilities"`
+
+	Streams struct {
+		Audio string `json:"audio,omitempty"`
+		Video string `json:"video,omitempty"`
+	} `json:"streams"`
+
+	Title      string `json:"title"`
+	ArtistName string `json:"artistName"`
+	AlbumName  string `json:"albumName,omitempty"`
+	DurationMs int    `json:"durationMs"`
+	ArtworkURL string `json:"artworkUrl"`
+
+	VideoHeights []int `json:"videoHeights,omitempty"` // available H.264 heights from HLS master (MV only)
+	MVMaxHeight  int   `json:"mvMaxHeight,omitempty"`  // requested max height for this MV session
+
+	ExpiresIn int `json:"expiresIn"`
+}
+
+// playContext is the private engine state bound to one session.
+// Streams are keyed by StreamKind so the API can request any track type
+// without requiring separate methods for audio vs. video vs. future kinds.
+//
+// The context is stored in a separate map from the Session (both guarded by
+// Manager.mu), so that a lease refresh can replace the context (rebuilding
+// Source + Decryptor) while leaving the Session (and the client's sessionId)
+// completely unchanged.
+type playContext struct {
+	streams          map[pipeline.StreamKind]*pipeline.Stream
+	expiry           time.Time
+	mvProgressiveURL string    // CDN URL for cookie-authenticated proxy (MV only)
+	mvDownloadKey    string    // auth token sent as "downloadKey" cookie to CDN
+	mvFetchedAt      time.Time // when mvProgressiveURL/mvDownloadKey were last obtained
+}

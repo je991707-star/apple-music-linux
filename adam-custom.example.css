@@ -1,0 +1,145 @@
+/*
+ * Adam — Custom CSS Template
+ * Copy this file, edit it, then import via Adam Settings → Theme → Custom CSS.
+ * Changes apply instantly without restarting.
+ *
+ * ── CSS variables set by Adam ──────────────────────────────────────────────────
+ *
+ * These are available in all modes. Override them on :root to change the theme.
+ *
+ * Sidebar / navigation
+ *   --adam-nav-bg          Sidebar background color (HSLA with alpha)
+ *   --adam-nav-border      Sidebar right-edge border color
+ *   --adam-nav-text        Primary sidebar text color
+ *   --adam-nav-text-sec    Secondary / muted sidebar text color
+ *   --adam-glass-blur      Sidebar backdrop-filter blur amount   (default: 20px)
+ *   --adam-glass-opacity   Sidebar glass white tint intensity (0–1) (default: 0.07)
+ *
+ * Accent / interactive
+ *   --adam-accent          Highlight color for selected items and links
+ *   --adam-accent-active   Selected nav item / row background fill
+ *
+ * Background
+ *   --adam-bg-blur         Wallpaper blur intensity — Blur & Accented Blur modes (default: 18px)
+ *   --adam-fallback-bg     Solid background when no wallpaper is set
+ *
+ * ── Art-theme CSS variables (set when a track is playing + Album art theming on) ──
+ *
+ * These are written to <body> style by the art-theme engine. They change each time
+ * the playing track changes. Available in Accent and Accented Blur modes.
+ * Custom CSS can read them to build tinted components that follow the album art.
+ *
+ *   --adam-art-page-bg     Page body background — dark, hue-tinted from the artwork
+ *   --adam-art-glow-a      Radial gradient glow A (top-left corner)
+ *   --adam-art-glow-b      Radial gradient glow B (bottom-right corner)
+ *   --adam-art-raised      Raised surface / hover state color
+ *   --adam-art-on-accent   Text color that reads on --adam-accent (#000 or #fff)
+ *   --adam-art-src         url(…) of the current artwork — drives the blur backdrop
+ *
+ * (--adam-nav-bg, --adam-nav-border, --adam-accent, --adam-accent-active and
+ *  --keyColor are also overridden by the art-theme engine when active.)
+ *
+ * ── Body attributes set by Adam ────────────────────────────────────────────────
+ *
+ *   body[data-adam-mode]         Active theme mode: "blur" | "art-blur" | "accent" | "custom"
+ *   body[data-adam-art-theme]    Present when Album art theming is on and a track is playing
+ *   body[data-adam-art-blur]     Present in Accented Blur mode (combines blur + art palette)
+ *
+ * ── Injected element IDs ──────────────────────────────────────────────────────
+ *
+ * Wallpaper blur layers (present in Blur and Accented Blur modes)
+ *   #_adamBlurBg           Wallpaper image element with CSS blur filter (z-index: -1)
+ *   #_adamBlurTint         Dark/palette tint layer above the wallpaper (z-index: -1)
+ *                         In Accented Blur mode its background is set to --adam-nav-bg
+ *
+ * Art-theme overlay layers (present when art theming is active)
+ *   #_adamArtBlur          CSS-blurred artwork backdrop — visible in Accent mode,
+ *                         hidden in Accented Blur mode (wallpaper blur takes its place)
+ *   #_adamArtBg            Radial gradient glow layer (uses --adam-art-glow-a/b)
+ *
+ * HUD badges (top-right of now-playing header)
+ *   #adam-quality-badge    Streaming quality badge (e.g. "LOSSLESS", "HI-RES")
+ *   #adam-np-badge         Now-playing metadata badge
+ *
+ * Controls injected into the nav bar (top of sidebar)
+ *   #adam-nav-buttons      Wrapper div holding the back/forward + mini-player buttons
+ *   #adam-miniplayer-btn   Mini-player (PiP) toggle button
+ *
+ * Settings & downloads
+ *   #adam-settings-cog     Settings gear icon button
+ *   #adam-downloads-btn    Downloads panel toggle button
+ *   #adam-downloads-panel  Downloads slide-in panel
+ *
+ * Other
+ *   #adam-lyrics-overlay   Full-screen lyrics overlay
+ *   #adam-resume-chip      "Resume last session?" chip at launch
+ *   #adam-toast            Transient toast notification
+ *   #adam-tracklist-stats  Track count / duration row in album/playlist views
+ */
+
+
+/* ── Example: dark purple accent ─────────────────────────────────────────── */
+:root {
+    --adam-nav-bg:        hsla(270, 30%, 10%, 0.90);
+    --adam-nav-border:    hsla(270, 60%, 70%, 0.20);
+    --adam-accent:        #a855f7;
+    --adam-accent-active: hsla(270, 80%, 65%, 0.22);
+}
+
+
+/* ── Example: tint the wallpaper blur with a custom colour instead of the art palette ─ */
+/* Applies in Blur and Accented Blur modes. */
+/*
+body[data-adam-mode="blur"] #_adamBlurTint,
+body[data-adam-mode="art-blur"] #_adamBlurTint {
+    background: hsla(240, 30%, 8%, 0.55) !important;
+    opacity: 1 !important;
+}
+*/
+
+
+/* ── Example: build a tinted surface that follows the art palette ─────────── */
+/* Only shows when art theming is active. */
+/*
+body[data-adam-art-theme] .my-custom-element {
+    background: var(--adam-art-raised);
+    border-color: var(--adam-nav-border);
+    color: var(--adam-accent);
+}
+*/
+
+
+/* ── Example: increase sidebar font size ─────────────────────────────────── */
+/*
+nav.navigation {
+    font-size: 14px !important;
+}
+*/
+
+
+/* ── Example: remove the wallpaper blur layers entirely ──────────────────── */
+/*
+#_adamBlurBg, #_adamBlurTint { display: none !important; }
+*/
+
+
+/* ── Example: hide the quality badge ─────────────────────────────────────── */
+/*
+#adam-quality-badge { display: none !important; }
+*/
+
+
+/* ── Example: hide Adam nav buttons (back/forward/mini-player) ────────────── */
+/*
+#adam-nav-buttons { display: none !important; }
+*/
+
+
+/* ── Example: custom glass tint (warmer sidebar) ─────────────────────────── */
+/*
+:root {
+    --adam-glass-blur:    32px;
+    --adam-glass-opacity: 0.12;
+    --adam-nav-bg:        hsla(30, 20%, 8%, 0.85);
+}
+*/

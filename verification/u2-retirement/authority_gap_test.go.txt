@@ -1,0 +1,13 @@
+package ordering
+import("testing";"net/http/httptest";"time";"engine/core/vlc")
+func TestSourceRetirementMustInvalidateTicketAtNativeBoundary(t *testing.T){
+ entered,release:=make(chan struct{}),make(chan struct{});src:=&source{}
+ p:=&player{beforeLoad:func(){close(entered);<-release}}
+ s:=newServer(t,&APIServer{vlcPlayer:p,prepare:func(string)(vlc.Source,error){return src,nil}})
+ s.vlcGate.set("a");w:=httptest.NewRecorder();done:=make(chan struct{})
+ go func(){defer close(done);s.handleVLCLoad(w,loadRequest("a",45000))}()
+ select{case<-entered:case<-time.After(time.Second):t.Fatal("native boundary deadline")}
+ s.pm.inner.Release("a");close(release)
+ select{case<-done:case<-time.After(time.Second):t.Fatal("completion deadline")}
+ if w.Code!=409||p.position()!=0{t.Fatalf("source authority fence missing: status=%d nativeRecordedPosition=%d",w.Code,p.position())}
+}

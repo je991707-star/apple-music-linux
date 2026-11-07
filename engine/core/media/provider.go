@@ -1,0 +1,112 @@
+// Package media defines the Provider abstraction that decouples the engine
+// from any specific streaming service or DRM system.
+//
+// A Provider knows how to convert an opaque asset ID into a set of ready-to-run
+// pipeline.Streams.  It handles service authentication, catalog resolution,
+// variant selection, and key acquisition entirely internally.  None of those
+// details appear in the returned Session.
+//
+// This lets PlaybackManager, DownloadManager, and QueueManager work identically
+// regardless of whether the underlying source is Apple Music, a local file, a
+// DASH stream, or any future provider.
+package media
+
+import (
+	"context"
+
+	"engine/core/pipeline"
+)
+
+// Metadata holds the publicly-visible properties of a media item.
+// It contains no DRM material and is safe to serialise.
+type Metadata struct {
+	Title      string
+	ArtistName string
+	AlbumName  string
+	DurationMs int
+	ArtworkURL string
+	HasLyrics  bool
+}
+
+// DurationToleranceMs is how far a stream's declared length may differ from the catalog length before the stream's
+// length is reported instead. Smaller gaps are rounding and padding, not a real mismatch.
+const DurationToleranceMs = 1000
+
+// ReconcileDurationMs picks the duration to report for an item: the catalog length, unless the opened stream declares
+// a length that differs by more than DurationToleranceMs, in which case the stream's length is the one the player
+// will actually reach the end of. A stream length of 0 means unknown and leaves the catalog length alone.
+func ReconcileDurationMs(catalogMs, streamMs int) int {
+	if streamMs <= 0 {
+		return catalogMs
+	}
+	if catalogMs <= 0 {
+		return streamMs
+	}
+	if d := streamMs - catalogMs; d > DurationToleranceMs || d < -DurationToleranceMs {
+		return streamMs
+	}
+	return catalogMs
+}
+
+// Track is a single decodable media track within a Session.
+// The Open func lazily acquires any necessary resources (connections, licences)
+// and returns a pipeline.Stream ready to pipe to any io.Writer.
+//
+// Kind and Codec are set by the Provider that created the track; the caller
+// never needs to inspect them to route playback — it simply asks for the Kind
+// it wants when opening a stream.
+type Track struct {
+	Kind          pipeline.StreamKind
+	Codec         pipeline.Codec
+	CodecString   string // MSE codec string from HLS CODECS= attribute (e.g. "avc1.640028")
+	SampleRate    int    // optional; meaningful only for lossless audio
+	BitDepth      int    // optional; meaningful only for lossless audio
+	BitRate       int    // average bit-rate in bits/s (0 = unknown)
+	ChannelCount  int    // number of audio channels (0 = unknown)
+	CodecMIMEType string // MIME type + codec param e.g. "audio/mp4; codecs=\"mp4a.40.2\""
+	SpatialAudio  string // "binaural" | "binaural-lossless" | "" (empty = normal stereo)
+	Open          func(context.Context) (*pipeline.Stream, error)
+}
+
+// Session is the result of a successful Provider.Open call.
+// It carries the item's metadata and the full set of available tracks.
+type Session struct {
+	Kind         string // "song" | "mv" | "podcast" | "radio" …
+	Metadata     Metadata
+	Tracks       []Track
+	VideoHeights []int // available video variant heights from HLS master (MV only)
+
+	// MVProgressiveURL is the progressive CDN URL for the video (MV only).
+	// MVDownloadKey is the auth token sent as a "downloadKey" cookie to the CDN;
+	// the CDN uses it for server-side decryption authorisation (Android pattern).
+	// Both are empty for non-MV sessions and when the wrapper did not return a key.
+	// Never serialised — not DRM key material, but treated as auth material.
+	MVProgressiveURL string
+	MVDownloadKey    string
+}
+
+// OpenRequest carries the parameters that Providers use to locate and open a
+// media item.  Not all providers use all fields.
+type OpenRequest struct {
+	AssetID    string
+	Storefront string
+	Token      string // service bearer token (no "Bearer " prefix)
+	MUT        string // Apple Media User Token; ignored by non-Apple providers
+	Language   string
+
+	// Quality / capability hints — providers pick the best match they support.
+	Lossless bool
+	HiRes    bool // true = hi-res ALAC permitted when Lossless is set; false = cap at 44100/16-bit
+	Atmos    bool
+	Video    bool // request a music video if available
+
+	// MV variant selection hints.
+	MVMaxHeight       int
+	MVAudioPriorities []string
+}
+
+// Provider converts an opaque asset ID into a media Session.
+// Implementations must be safe to call concurrently.
+type Provider interface {
+	Open(ctx context.Context, req OpenRequest) (*Session, error)
+}

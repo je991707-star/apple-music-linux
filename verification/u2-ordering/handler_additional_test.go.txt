@@ -1,0 +1,71 @@
+package ordering
+
+import (
+	"bytes"
+	"encoding/json"
+	"engine/core/vlc"
+ "time"
+	"engine/internal/playbackcmd"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestOrderedAuthenticationAndMissingSession(t *testing.T) {
+	s := &APIServer{vlcPlayer: &player{}}
+	snap := s.vlcGate.order.Snapshot()
+	body, _ := json.Marshal(map[string]any{"boot": snap.Boot, "epoch": snap.Epoch, "sessionId": "a"})
+	check := func(token string, want int) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "/control", bytes.NewReader(body))
+		r.Header.Set("X-Api-Token", token)
+		w := httptest.NewRecorder()
+		s.handleVLCControl(w, r)
+		if w.Code != want {
+			t.Fatalf("auth status=%d want=%d", w.Code, want)
+		}
+	}
+	t.Setenv("ADAM_API_TOKEN", "synthetic-engine-secret")
+	t.Setenv("ADAM_VLC_ORDERED", "0")
+	check("synthetic-engine-secret", 401)
+	t.Setenv("ADAM_VLC_ORDERED", "1")
+	check("wrong", 401)
+	check("synthetic-engine-secret", 200)
+	current := s.vlcGate.order.Snapshot()
+	id := playbackcmd.Identity{Boot: current.Boot, Epoch: current.Epoch, Session: "missing", Load: 1, Sequence: 1, Type: "load", Request: "missing-session"}
+	b, _ := json.Marshal(map[string]any{"sessionId": "missing", "command": id})
+	r := httptest.NewRequest("POST", "/load", bytes.NewReader(b))
+	r.Header.Set("X-Api-Token", "synthetic-engine-secret")
+	w := httptest.NewRecorder()
+	s.handleVLCLoad(w, r)
+	if w.Code != 404 {
+		t.Fatal("missing Session accepted", w.Code)
+	}
+}
+func TestLegacyMutationCannotBypassClaim(t *testing.T) {
+	s := &APIServer{vlcPlayer: &player{}, prepare: func(string) (vlc.Source, error) { return &source{}, nil }}
+	s.vlcGate.set("a")
+	c := s.vlcGate.order.Snapshot()
+	if _, e := s.vlcGate.order.Claim(c.Boot, c.Epoch, "a"); e != nil {
+		t.Fatal(e)
+	}
+	for name, handler := range map[string]func(http.ResponseWriter, *http.Request){"load": s.handleVLCLoad, "seek": s.handleVLCSeek, "pause": s.handleVLCPause, "resume": s.handleVLCResume, "stop": s.handleVLCStop} {
+		w := httptest.NewRecorder()
+		handler(w, httptest.NewRequest("POST", "/"+name, bytes.NewBufferString(`{"sessionId":"a","posMs":200}`)))
+		if w.Code != 409 {
+			t.Fatalf("Legacy %s bypass: %d", name, w.Code)
+		}
+	}
+}
+
+func TestPreparedSourceSessionExpiredBeforeCommit(t *testing.T){
+ src:=&source{};entered,release:=make(chan struct{}),make(chan struct{})
+ s:=&APIServer{vlcPlayer:&player{},pm:manager{missing:map[string]bool{}}};s.vlcGate.set("a")
+ s.prepare=func(string)(vlc.Source,error){close(entered);<-release;return src,nil}
+ w:=httptest.NewRecorder();done:=make(chan struct{})
+ go func(){defer close(done);s.handleVLCLoad(w,loadRequest("a",45000))}()
+ select{case<-entered:case<-time.After(time.Second):t.Fatal("prepare deadline")}
+ s.pm.missing["a"]=true;close(release)
+ select{case<-done:case<-time.After(time.Second):t.Fatal("finish deadline")}
+ if w.Code!=409||s.vlcPlayer.position()!=0||src.aborts.Load()!=1||src.closes.Load()!=1{t.Fatalf("expired prepared source committed: status=%d pos=%d aborts=%d closes=%d",w.Code,s.vlcPlayer.position(),src.aborts.Load(),src.closes.Load())}
+}

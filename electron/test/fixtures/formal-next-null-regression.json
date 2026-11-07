@@ -1,0 +1,24 @@
+[
+  {
+    "instance": "normal-source-q",
+    "originalSHA256": "78937a3cf5b66a3b8a620cb1772bd29997e177782c47a0e114b6800bf161457d",
+    "aSession": "76dc9f97e5ea937d",
+    "bSession": null,
+    "pcm": {
+      "frames": 192000,
+      "full_pcm_exact": true,
+      "sha256": "4502fb87e6c2651a3c5247310a187ce294f2032b37ad93d04bc3dc679bb50e36"
+    }
+  },
+  {
+    "instance": "normal-source-r",
+    "originalSHA256": "87d802476acb3aa51629033880f2bbe0e8ff1460cc456e88ff3fcbc326b79422",
+    "aSession": "c386eee62666b301",
+    "bSession": null,
+    "pcm": {
+      "frames": 192000,
+      "full_pcm_exact": true,
+      "sha256": "4502fb87e6c2651a3c5247310a187ce294f2032b37ad93d04bc3dc679bb50e36"
+    }
+  }
+]

@@ -1,0 +1,116 @@
+name: Release build
+
+# Manual only: builds the .run installer and the AppImage and attaches them to a DRAFT
+# release for the given tag. Nothing is published automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the packages to (the draft is created if missing)
+        required: true
+        default: v1.5.0
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true # the Android runtime under drm/ (about 66 MB per run)
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc zstd build-essential libcurl4-openssl-dev libssl-dev clang-15
+      # electron-builder rebuilds abstract-socket (optional dependency of dbus-next) against Electron
+      # 43's V8 headers, which GCC 11 and 12 reject ("expected identifier before '__attribute__'");
+      # V8 is written for Clang. Only C++ switches: the DRM library's C flags are GCC-specific with
+      # -Werror. Clang links against the system libstdc++, so the glibc baseline is unchanged.
+      - name: Use Clang for C++
+        run: echo "CXX=clang++-15" >> "$GITHUB_ENV"
+      # VLC's avcodec/avformat plugins on 22.04 link libavcodec.so.58, which third_party/ffmpeg (FFmpeg 9)
+      # does not provide; build that FFmpeg from Ubuntu's source package (bundle-vlc.sh picks it up).
+      - name: FFmpeg for VLC's plugins
+        run: |
+          grep '^deb ' /etc/apt/sources.list | sed 's/^deb /deb-src /' | sudo tee /etc/apt/sources.list.d/deb-src.list >/dev/null
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends nasm patchelf zlib1g-dev dpkg-dev
+          scripts/build-vlc-ffmpeg.sh "$RUNNER_TEMP/vlc-ffmpeg"
+          echo "ADAM_VLC_FFMPEG_LIBDIR=$RUNNER_TEMP/vlc-ffmpeg" >> "$GITHUB_ENV"
+        env:
+          ADAM_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+      - run: npm ci
+        working-directory: electron
+      - name: Build the installer
+        env:
+          ADAM_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
+          ADAM_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+        run: scripts/build-installer.sh
+      - name: Build the AppImage
+        env:
+          ADAM_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
+          ADAM_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+        working-directory: electron
+        run: npm run dist
+      # The AppImage runs on the host's libc: anything linked against a newer glibc than Ubuntu 22.04's
+      # (2.35) fails to start on older systems, and the AppImage catalog rejects it. Fail the build here.
+      - name: Check the glibc baseline
+        run: scripts/check-glibc.sh electron/dist/linux-unpacked 2.35
+      # electron-builder's runtime needs libfuse2 and the host libc; the static type2 runtime needs neither.
+      - name: Repack on the static AppImage runtime
+        run: |
+          f=$(ls electron/dist/Adam-*-x86_64.AppImage)
+          scripts/repack-appimage.sh "$f" "$f.repacked"
+          mv "$f.repacked" "$f"
+      - name: Attach to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes-file "releases/${TAG}.md"
+          gh release upload "$TAG" dist/adam.run electron/dist/Adam-*-x86_64.AppImage --clobber
+
+  package-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-openssl
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install VLC
+        run: choco install vlc --no-progress -y
+      - name: Build the installer
+        shell: pwsh
+        run: scripts\build-windows.ps1 -Msys "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+      - name: Attach to a draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -ne 0) { gh release create $env:TAG --draft --title $env:TAG --notes-file "releases/$($env:TAG).md" }
+          gh release upload $env:TAG (Get-ChildItem electron\dist\adam-setup-*.exe).FullName --clobber

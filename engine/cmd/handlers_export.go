@@ -1,0 +1,110 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+
+	"engine/core/export"
+)
+
+func (s *APIServer) handleExportCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // 64 KB
+	var req export.ExportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// Prefer request-level tokens (from browser renderer) over cached session.
+	if req.Token == "" {
+		req.Token = s.token()
+	}
+	if req.MUT == "" {
+		req.MUT = s.mediaUserToken()
+	}
+	if req.Token == "" || req.MUT == "" {
+		http.Error(w, "not authenticated — provide token+mediaUserToken in request body or start playback first", http.StatusUnauthorized)
+		return
+	}
+	s.setToken(req.Token)
+	if req.Storefront == "" {
+		req.Storefront = s.storefront()
+	}
+	if req.Language == "" {
+		req.Language = s.lang(r)
+	}
+	job, err := s.em.Enqueue(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *APIServer) handleExportList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.em.List())
+}
+
+func (s *APIServer) handleExportGet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.em.Get(id)
+	if !ok {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *APIServer) handleExportCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.em.Cancel(id) {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *APIServer) handleExportRetry(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	token, mut := s.token(), s.mediaUserToken()
+	if token == "" || mut == "" {
+		http.Error(w, "not authenticated — start playback first so the engine has current tokens", http.StatusUnauthorized)
+		return
+	}
+	job, ok := s.em.Retry(id, token, mut)
+	if !ok {
+		// Distinguish not-found from wrong-state.
+		if _, exists := s.em.Get(id); !exists {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "job is not in a retryable state (must be failed or cancelled)", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+// handleExportPriority changes a queued job's priority.
+// Body: {"priority": N}. Higher runs sooner; equal priorities stay FIFO.
+// 200 + job snapshot; 404 unknown job; 409 job is running or finished.
+func (s *APIServer) handleExportPriority(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	var body struct {
+		Priority *int `json:"priority"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Priority == nil {
+		http.Error(w, `invalid request body: want {"priority": N}`, http.StatusBadRequest)
+		return
+	}
+	job, err := s.em.Prioritize(r.PathValue("id"), *body.Priority)
+	switch {
+	case errors.Is(err, export.ErrJobNotFound):
+		http.Error(w, "job not found", http.StatusNotFound)
+	case errors.Is(err, export.ErrNotQueued):
+		http.Error(w, "job is not queued (already running or finished)", http.StatusConflict)
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	default:
+		writeJSON(w, http.StatusOK, job)
+	}
+}

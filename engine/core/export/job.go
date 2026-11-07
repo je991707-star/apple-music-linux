@@ -1,0 +1,229 @@
+// Package export implements the engine's media export pipeline.
+//
+// An ExportJob downloads one track, decrypts it, writes it to a user-specified
+// path, and optionally embeds artwork, lyrics, and metadata tags.
+// Jobs are enqueued on an ExportManager and processed by a bounded worker pool.
+// Progress is emitted as structured events that the API layer forwards over SSE.
+//
+// Separation of concerns:
+//   - ExportManager is responsible for media acquisition, decryption, tagging,
+//     and writing files.  It knows nothing about HTTP or the TUI.
+//   - The caller (apiserver.go) is responsible for routing HTTP requests to the
+//     manager and forwarding events to SSE clients.
+//   - The client (adam) is responsible for UX, download queue
+//     display, library browsing, and playback cache management.
+package export
+
+import (
+	"context"
+	"time"
+)
+
+// Phase describes the current stage of an export job.
+type Phase string
+
+const (
+	PhaseQueued      Phase = "queued"
+	PhaseResolving   Phase = "resolving"   // fetching catalog metadata
+	PhaseDownloading Phase = "downloading" // streaming+decrypting fMP4
+	PhaseTagging     Phase = "tagging"     // embedding metadata, artwork, lyrics
+	PhaseMoving      Phase = "moving"      // temp → final path
+	PhaseDone        Phase = "done"
+	PhaseFailed      Phase = "failed"
+	PhaseCancelled   Phase = "cancelled"
+)
+
+// IsTerminal reports whether p is a final state: a job that reaches it never leaves it. Retrying a
+// failed or cancelled export enqueues a new job rather than reviving the old one.
+func (p Phase) IsTerminal() bool { return p == PhaseDone || p == PhaseFailed || p == PhaseCancelled }
+
+// rank orders the non-terminal phases; a job only ever moves forward through them.
+func (p Phase) rank() int {
+	switch p {
+	case PhaseQueued:
+		return 0
+	case PhaseResolving:
+		return 1
+	case PhaseDownloading:
+		return 2
+	case PhaseTagging:
+		return 3
+	case PhaseMoving:
+		return 4
+	}
+	return -1
+}
+
+// canTransition is the job's transition relation. From a terminal state nothing is allowed; any
+// non-terminal phase may end in a terminal one (failure and cancellation can strike anywhere, and
+// skipped or collection jobs finish without visiting every stage); otherwise the move must stay in
+// place (a progress update) or go forward. Unknown phases are refused.
+func canTransition(from, to Phase) bool {
+	if from.IsTerminal() || from.rank() < 0 { // finished, or not a phase at all
+		return false
+	}
+	if to.IsTerminal() {
+		return true
+	}
+	return to.rank() >= from.rank()
+}
+
+// ExportCapabilities selects the content variant to export.
+type ExportCapabilities struct {
+	Lossless        bool `json:"lossless"`        // ALAC
+	Atmos           bool `json:"atmos"`           // Dolby Atmos
+	Video           bool `json:"video"`           // Music Video
+	Playlist        bool `json:"playlist"`        // expand playlist → per-track jobs
+	LibraryPlaylist bool `json:"libraryPlaylist"` // use library API (p.xxx IDs)
+}
+
+// ExportOptions controls post-processing of the downloaded file.
+type ExportOptions struct {
+	// EmbedArtwork downloads and embeds the track's cover art.
+	// ArtworkSize controls the square pixel dimension requested from Apple CDN
+	// (default 3000; Apple usually caps at 3000×3000).
+	EmbedArtwork bool `json:"embedArtwork"`
+	ArtworkSize  int  `json:"artworkSize"`
+
+	// EmbedLyrics fetches synchronized lyrics (LRC) and embeds them in the
+	// lyrics tag.  Also writes a .lrc sidecar file if SaveLrcSidecar is true.
+	EmbedLyrics    bool   `json:"embedLyrics"`
+	LrcFormat      string `json:"lrcFormat"`      // "lrc" or "ttml"
+	LrcType        string `json:"lrcType"`        // "lyrics" or "syllable-lyrics"
+	SaveLrcSidecar bool   `json:"saveLrcSidecar"` // write .lrc file alongside audio
+
+	// OverwritePolicy controls what happens when the output file already exists.
+	// "skip" (default) — leave the existing file untouched.
+	// "overwrite"       — replace the existing file.
+	// "rename"          — append a counter suffix to produce a unique name.
+	OverwritePolicy string `json:"overwritePolicy"`
+
+	// ConvertToFLAC converts ALAC→FLAC after tagging.
+	// VLC is used for the audio decode (correctly handles Apple's fragmented MP4
+	// with identical tfdts); ffmpeg handles metadata tagging via -c copy.
+	// If VLCPath is empty, "cvlc" then "vlc" are tried from PATH.
+	// The original .m4a is removed unless KeepOriginal is true.
+	ConvertToFLAC bool   `json:"convertToFlac"`
+	VLCPath       string `json:"vlcPath"`
+	FFmpegPath    string `json:"ffmpegPath"`
+	KeepOriginal  bool   `json:"keepOriginal"`
+
+	// Tag markers appended to {tag} in the filename template.
+	// Defaults: "[E]" explicit, "[C]" clean, "[M]" Apple Digital Master.
+	// Set to "" to disable the corresponding marker.
+	ExplicitChoice string `json:"explicitChoice"`
+	CleanChoice    string `json:"cleanChoice"`
+	MasterChoice   string `json:"masterChoice"`
+}
+
+// FilenameTemplate is a path template relative to OutputDir.
+// Supported variables:
+//
+//	{title}         track title
+//	{artist}        primary artist
+//	{album_artist}  album artist (falls back to artist)
+//	{album}         album name
+//	{track_number}  track number (plain integer)
+//	{track_number:02d}  zero-padded to 2 digits
+//	{disc_number}   disc number
+//	{year}          4-digit release year (from ReleaseDate)
+//	{genre}         first genre name
+//	{codec}         "alac", "aac", or "atmos"
+//	{ext}           file extension without dot ("m4a", "flac", "mp4")
+//
+// Example:
+//
+//	"{album_artist}/{album}/{track_number:02d} - {title}"
+//
+// produces:
+//
+//	Taylor Swift/Fearless (Platinum Edition)/01 - Fearless.m4a
+//
+// The default when empty is "{album_artist}/{album}/{track_number:02d} - {title}".
+type FilenameTemplate string
+
+// Byte sources recorded in ExportJob.Source.
+const (
+	SourceCache    = "cache"
+	SourcePlayback = "playback"
+	SourceNetwork  = "network"
+)
+
+// ExportRequest fully describes one export job.
+type ExportRequest struct {
+	// Track selection
+	AssetID    string `json:"assetId"`
+	Storefront string `json:"storefront"`
+	Token      string `json:"token"`
+	MUT        string `json:"mut"` // x-apple-music-user-token
+	Language   string `json:"language"`
+
+	// What to export
+	Capabilities ExportCapabilities `json:"capabilities"`
+	MVMaxHeight  int                `json:"mvMaxHeight,omitempty"` // 0 = auto (defaults to 1080p in provider)
+
+	// Where to write
+	OutputDir        string           `json:"outputDir"`
+	FilenameTemplate FilenameTemplate `json:"filenameTemplate"`
+
+	// Post-processing
+	Options ExportOptions `json:"options"`
+
+	// Hints — optional metadata supplied by the client so the job row
+	// shows title/artist/artwork immediately without waiting for catalog resolution.
+	HintTitle   string `json:"hintTitle,omitempty"`
+	HintArtist  string `json:"hintArtist,omitempty"`
+	HintArtwork string `json:"hintArtwork,omitempty"`
+
+	// Priority orders this job in the queue: higher runs sooner, FIFO among
+	// equal priorities. Tracks expanded from an album or playlist inherit it.
+	Priority int `json:"priority,omitempty"`
+}
+
+// ExportEvent is emitted for each significant state transition and is
+// forwarded to SSE clients as a JSON object.
+type ExportEvent struct {
+	JobID   string `json:"jobId"`
+	AssetID string `json:"assetId"`
+	Phase   Phase  `json:"phase"`
+	Percent int    `json:"percent"` // 0–100; meaningful only in PhaseDownloading
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ExportJob is the public view of an in-flight or completed export job.
+// Its fields are safe to serialise to JSON and return to API clients.
+type ExportJob struct {
+	ID       string `json:"jobId"`
+	AssetID  string `json:"assetId"`
+	Phase    Phase  `json:"phase"`
+	Percent  int    `json:"percent"`
+	QueuePos int64  `json:"queuePos"` // monotonically increasing enqueue order
+	// QueueIndex is the job's 1-based position in run order while queued;
+	// 0 once it is running or finished.
+	QueueIndex int `json:"queueIndex,omitempty"`
+	// Priority orders queued jobs: higher runs sooner, FIFO among equals.
+	Priority   int    `json:"priority"`
+	Title      string `json:"title,omitempty"`
+	ArtistName string `json:"artistName,omitempty"`
+	ArtworkURL string `json:"artworkUrl,omitempty"`
+	BytesDone  int64  `json:"bytesDone,omitempty"`
+	BytesTotal int64  `json:"bytesTotal,omitempty"`
+	Output     string `json:"output,omitempty"`
+	Error      string `json:"error,omitempty"`
+	// Source records where the media bytes came from: "cache" (committed
+	// playback disk cache), "playback" (tail of an in-progress playback
+	// download) or "network" (a fresh export stream). Empty until downloading.
+	Source string `json:"source,omitempty"`
+	// LimitBps is the export bandwidth limit (bytes/s) in force when this
+	// snapshot was taken; nil means unlimited. Throttled mirrors LimitBps != nil.
+	LimitBps  *int64    `json:"limitBps"`
+	Throttled bool      `json:"throttled"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+
+	// cancel is called to request cancellation; not exported.
+	cancel func()
+	// ctx is the job's context; cancelled by Cancel. Not exported.
+	ctx context.Context
+}

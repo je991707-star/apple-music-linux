@@ -1,0 +1,35 @@
+package main
+
+import (
+	"os"
+)
+
+// ttyColors reports whether stderr/stdout is a real terminal.
+// When false, all color* functions return the input unchanged.
+var ttyColors = func() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}()
+
+const (
+	_cReset  = "\033[0m"
+	_cBold   = "\033[1m"
+	_cRed    = "\033[31m"
+	_cGreen  = "\033[32m"
+	_cYellow = "\033[33m"
+	_cBlue   = "\033[34m"
+	_cCyan   = "\033[36m"
+	_cPink   = "\033[35m"
+)
+
+func colorTag(color, tag string) string {
+	if !ttyColors {
+		return tag
+	}
+	return color + _cBold + tag + _cReset
+}
+
+func tagInfo(tag string) string { return colorTag(_cCyan, tag) }

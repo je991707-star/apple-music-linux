@@ -1,0 +1,13 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import vm from 'node:vm';
+import {createEngineLifecycle} from '../engine-lifecycle.mjs';import {createEngineAccountHost} from '../engine-account-context.mjs';import {EventEmitter} from 'node:events';
+const source=fs.readFileSync(new URL('../main.mjs',import.meta.url),'utf8');
+test('actual Main Ordered config branch only writes the fresh scoped config',async()=>{
+ const parent=fs.mkdtempSync(path.join(os.tmpdir(),'u215-main-'));fs.chmodSync(parent,0o700);let life;
+ const host=createEngineAccountHost({parent,getLifecycle:()=>life});let scope;life=createEngineLifecycle({prepare:async owner=>{scope=host.prepare(owner);return scope},spawn:()=>{const p=new EventEmitter();p.kill=()=>{p.emit('exit',0,null)};queueMicrotask(()=>p.emit('spawn'));return p},onReady:o=>host.owned(o),onRevoke:o=>host.revoke(o),onExit:o=>host.exited(o),log(){}});
+ try{const o=await life.start();await life.waitReady(o);let unscopedReads=0;const legacyAccess=()=>{unscopedReads++;throw Error('legacy credential path read')};const context=vm.createContext({MAIN_PLAYBACK:true,ENGINE_PORT:34000,FAIRPLAY_LIB64:"/runtime/anonymous-assets/lib64",engineAccountHost:host,mkdirSync:legacyAccess,readFile:legacyAccess,existsSync:legacyAccess,app:{get isPackaged(){return legacyAccess()}}});
+ vm.runInContext(source.slice(source.indexOf('function ensureEngineConfig('),source.indexOf("// The engine's Apple session directory")),context);context.ensureEngineConfig(scope);assert.equal(unscopedReads,0);assert.equal(fs.readdirSync(host.paths(scope).filesDir).length,0);assert.match(fs.readFileSync(path.join(host.paths(scope).engineDir,'config.yaml'),'utf8'),/authorization-token: ""/);
+ }finally{await life.stop();host.close();fs.rmSync(parent,{recursive:true,force:true})}
+});
+test('actual Main binds owner lifecycle hooks and fresh cwd; no authentication IPC is added',()=>{
+ assert.match(source,/onReady: owner => \{ if \(MAIN_PLAYBACK\) engineAccountHost\.owned\(owner\)/);assert.match(source,/onRevoke: \(owner, reason\) => \{ if \(MAIN_PLAYBACK\) engineAccountHost\.revoke\(owner, reason\)/);assert.match(source,/onExit: owner => \{ if \(MAIN_PLAYBACK\) engineAccountHost\.exited\(owner\)/);assert.match(source,/cwd: MAIN_PLAYBACK \? engineAccountHost\.paths\(accountContext\)\.engineDir/);assert.match(source,/if \(!engineLifecycle\.isCurrent\(playbackOwner\)/);assert.match(source,/sourceHost\?\.engineRetiring\(bootNonce\)/);assert(!/ipcMain\.(?:handle|on)\([^\n]*(?:beginFresh|engineAccount)/.test(source));
+});
